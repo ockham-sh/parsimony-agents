@@ -1,12 +1,12 @@
 # parsimony-agents Architecture
 
-This document explains the internal design of parsimony-agents for developers who need to extend, debug, or maintain the library. It covers the agent loop state machine, tool dispatch mechanics, the code execution engine, the output pipeline, the streaming protocol, and the dependency graph between modules.
+System design, components, data flow, and implementation details for developers who need to extend, debug, or maintain the library.
 
----
+This document covers both the high-level design (components and data flow) and the technical deep-dive on internal implementation (agent loop, tool dispatch, execution engine, and streaming protocol).
 
-## System Overview
+## Overview
 
-parsimony-agents is a Python library — not a server. It has no HTTP listeners and no web framework. All interaction is through Python function calls and an async generator interface.
+`parsimony-agents` is a Python library — not a server. It has no HTTP listeners and no web framework. All interaction is through Python function calls and an async generator interface.
 
 The library's job is to bridge three things:
 
@@ -15,6 +15,330 @@ The library's job is to bridge three things:
 3. A Python sandbox that executes code and captures outputs
 
 The agent loop connects them: it serializes the conversation state into an LLM-readable context block, sends it to the LLM, dispatches the tool calls the LLM requests, and feeds results back into the next iteration.
+
+## Core Components
+
+### 1. Agent (`parsimony_agents/agent/`)
+
+The main orchestrator that manages the LLM loop, tool invocation, and execution state.
+
+**Key classes:**
+- `Agent` — Main entry point; orchestrates LLM calls, code execution, and artifact management
+- `AgentResult` — Structured response containing natural language analysis, datasets, charts, and executed code
+
+**Responsibilities:**
+- Maintain multi-turn conversation state
+- Invoke tools (code execution, artifact return, context inspection)
+- Parse LLM responses and handle tool calls
+- Track execution history and guardrails
+
+### 2. CodeExecutor (`parsimony_agents/execution/executor.py`)
+
+Sandboxed Python code execution engine that runs agent-generated code in-process.
+
+**Key features:**
+- In-process execution (no separate service required)
+- Configurable working directory and environment
+- Timeout enforcement
+- Output capture and provenance tracking
+- Safe namespace with allowed imports
+
+**Configuration:**
+```python
+CodeExecutor(
+    cwd="/tmp/work",              # Working directory
+    output_factory=OutputFactory(),
+    sandbox=True,                 # Enable/disable sandboxing
+    allowed_imports=["pandas", ...] # Whitelist imports
+)
+```
+
+### 3. Variable Store (`parsimony_agents/variable.py`)
+
+Maintains execution state across multiple code executions.
+
+**Features:**
+- Tracks Python variables created during code execution
+- Supports serialization/deserialization
+- Enables multi-turn conversations with persistent state
+- Provides variable inspection and context
+
+### 4. Notebooks (`parsimony_agents/notebook.py`)
+
+Organizes agent-generated code into editable, re-executable cells.
+
+**Concepts:**
+- **Script** — A named collection of code cells (immutable execution record)
+- **Notebook** — Editable cells that can be modified and re-executed
+- **Cell** — Individual code block with output and execution metadata
+
+### 5. Artifacts (`parsimony_agents/artifacts/`)
+
+Typed deliverables produced by the agent.
+
+**Artifact types:**
+- **Dataset** — Curated data with metadata, version, and provenance
+- **Chart** — Altair/Vega-Lite visualization linked to source dataset
+- **Table** — Formatted data table
+
+### 6. Output Factory (`parsimony_agents/execution/factory.py`)
+
+Dispatches execution outputs to appropriate artifact types.
+
+**Responsibilities:**
+- Detect output type (DataFrame, Chart, etc.)
+- Instantiate appropriate Artifact class
+- Manage artifact metadata and storage
+- Handle serialization
+
+### 7. RAG System (Optional, `parsimony_agents/rag/`)
+
+Semantic search over agent outputs for multi-turn context.
+
+**Components:**
+- **VectorStore** — ChromaDB/Tantivy-backed semantic search
+- **Embeddings** — Embedding model for vectorization
+- **OutputProcessor** — Converts outputs to searchable documents
+
+## Data Flow
+
+```
+User Query
+    ↓
+Agent.ask() / Agent.run()
+    ↓
+LLM Prompt + Tool Definitions
+    ↓
+LLM generates Tool Calls
+    ↓
+Tool Dispatch
+    ├─ code_set → CodeExecutor → outputs → OutputFactory → Artifacts
+    ├─ code_edit → Modify notebook cells
+    ├─ return_dataset → Finalize Dataset artifact
+    ├─ return_chart → Finalize Chart artifact
+    └─ get_context → Return Variable state
+    ↓
+Outputs stored in VariableStore
+    ↓
+LLM synthesis
+    ↓
+AgentResult (text, datasets, charts, code)
+```
+
+## Key Design Patterns
+
+### 1. Composable Data Sources
+
+Data sources are plugged in via `parsimony` connectors:
+
+```python
+agent = Agent(
+    connectors=(
+        FRED.bind_deps(api_key="...")
+        + SDMX
+        + FMP.bind_deps(api_key="...")
+    )
+)
+```
+
+Agents discover available data sources via the MCP server or connectors list.
+
+### 2. Dual Consumption Modes
+
+**Ask mode** — Returns a complete structured result:
+```python
+result = await agent.ask("Question")
+# Access: result.text, result.datasets, result.charts
+```
+
+**Stream mode** — Emits events as they occur:
+```python
+async for event in agent.run("Question"):
+    if event.type == "text_delta":
+        print(event.content, end="")
+```
+
+### 3. Provenance Tracking
+
+Every data fetch is tagged with:
+- **Source** — Connector and endpoint
+- **Parameters** — Query arguments and timestamps
+- **Metadata** — Response format, data types
+
+Stored in `Dataset.provenance` and accessible in the execution context.
+
+### 4. Multi-Turn State Management
+
+State persists across calls via `VariableStore`:
+- Previous code executions available as variables
+- Notebooks are editable and re-executable
+- Context can be inspected with `get_context` tool
+
+## Extension Points
+
+### Custom Connectors
+
+Implement `parsimony.Connector` protocol to add data sources:
+
+```python
+class MyDataConnector(Connector):
+    def discover(self) -> list[DataSource]:
+        """Publish available datasets"""
+    
+    def fetch(self, source_id: str, **params) -> Result:
+        """Execute a data fetch"""
+```
+
+### Custom Tools
+
+Add application-specific tools via `Agent.tools` parameter:
+
+```python
+@tool
+def my_tool(arg: str) -> str:
+    """Tool description for LLM"""
+    return f"Result: {arg}"
+
+agent = Agent(tools=[my_tool], ...)
+```
+
+### Custom Output Types
+
+Extend `Artifact` and register with `OutputFactory`:
+
+```python
+class MyArtifact(Artifact):
+    type: Literal["my_artifact"] = "my_artifact"
+    data: MyData
+
+output_factory.register(MyArtifact)
+```
+
+## Configuration
+
+### Agent Configuration
+
+```python
+agent = Agent(
+    # LLM settings
+    model_config={"model": "claude-sonnet-4-6", "api_key": "..."},
+    
+    # Execution settings
+    code_executor=CodeExecutor(...),
+    output_factory=OutputFactory(...),
+    
+    # Control settings
+    guardrails=AgentGuardrails(
+        max_iterations=30,
+        max_execution_time_s=120.0,
+        max_output_size_mb=100
+    ),
+    
+    # Data sources
+    connectors=my_connectors,
+    
+    # Behavior
+    instructions="Custom system prompt...",
+    tools=[...],
+)
+```
+
+### Guardrails
+
+Safety limits on agent execution:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `max_iterations` | 30 | Max LLM turns before stopping |
+| `max_execution_time_s` | 120.0 | Max total execution time |
+| `max_output_size_mb` | 100 | Max output file size |
+| `max_code_lines` | 500 | Max code lines per execution |
+
+## Testing
+
+### Unit Tests
+
+Test individual components (tools, executors, artifacts):
+
+```python
+def test_code_executor():
+    executor = CodeExecutor()
+    result = executor.execute("x = 1 + 1", {})
+    assert result.outputs["x"] == 2
+```
+
+### Integration Tests
+
+Test end-to-end agent workflows with mock or real connectors:
+
+```python
+@pytest.mark.asyncio
+async def test_agent_ask():
+    agent = Agent(connectors=FRED.bind_deps(api_key="test"))
+    result = await agent.ask("What is the current unemployment rate?")
+    assert result.ok
+    assert "unemployment" in result.text.lower()
+```
+
+## Performance Considerations
+
+### Memory
+
+- **CodeExecutor** runs in-process; memory grows with variable size
+- For large datasets, consider pagination or streaming results
+- Use `VariableStore.clear()` to reset execution state
+
+### Execution Time
+
+- LLM calls add 1-5s per turn (depends on model and latency)
+- Code execution time depends on connector and dataset size
+- Set `max_execution_time_s` guardrail to prevent runaway loops
+
+### Connector Selection
+
+- **FRED**: ~100ms per fetch, rate-limited to 120 req/min
+- **SDMX**: ~500ms per fetch (depends on provider)
+- **FMP**: ~200ms per fetch, free tier limited
+- Local (in-memory): <1ms
+
+## Logging
+
+Enable debug logging:
+
+```python
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
+logging.getLogger("parsimony_agents").setLevel(logging.DEBUG)
+```
+
+Key loggers:
+- `parsimony_agents.agent` — LLM loop and tool dispatch
+- `parsimony_agents.execution` — Code execution and output
+- `parsimony_agents.rag` — Semantic search operations
+
+## Troubleshooting
+
+### Common Issues
+
+**Agent times out or iterates endlessly:**
+- Lower `max_iterations` guardrail
+- Shorten LLM context with older messages
+- Check connector performance with direct queries
+
+**Import errors during code execution:**
+- Install missing packages in your Python environment
+- Check `CodeExecutor.allowed_imports` whitelist
+- Verify package is available in execution environment
+
+**Large outputs causing OOM:**
+- Set `max_output_size_mb` guardrail
+- Paginate large result sets in connector
+- Use `output_factory.local_dir` with disk storage instead of memory
+
+**Provenance missing from datasets:**
+- Ensure connector sets `result.provenance` when returning data
+- Check `Dataset.provenance` attribute in agent result
 
 ---
 
@@ -519,3 +843,16 @@ This is an unconditional import — `opentelemetry-api` must be installed even i
 ### Python version restriction
 
 The package declares `requires-python = ">=3.11,<3.13"`. Python 3.13 is not supported. This is due to compatibility requirements of a pinned transitive dependency; the restriction should be re-evaluated when dependencies are updated.
+
+---
+
+## See Also
+
+- [Documentation Index](index.md) — Navigation guide by user role
+- [API Reference](API.md) — Complete method signatures and parameter details
+- [RUNBOOK](RUNBOOK.md) — Deployment, monitoring, and performance tuning
+- [CODEMAPS](CODEMAPS.md) — Code structure and public API exports
+- [COMMANDS](COMMANDS.md) — Development workflow and testing
+- [Quick Start](../README.md#quick-start) — Getting started in 5 minutes
+- [CONTRIBUTING.md](../CONTRIBUTING.md) — Contributing guidelines
+- [parsimony documentation](https://parsimony.dev) — Data connector protocol
