@@ -5,8 +5,8 @@ from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
 
-from ockham_agents import Agent
-from ockham.connectors.fred import CONNECTORS as FRED
+from parsimony_agents import Agent
+from parsimony.connectors.fred import CONNECTORS as FRED
 
 load_dotenv()
 

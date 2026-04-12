@@ -2,20 +2,20 @@
 
 Prerequisites::
 
-    pip install ockham-agents[display]
+    pip install parsimony-agents[display]
     export ANTHROPIC_API_KEY="sk-ant-..."   # or any litellm-supported provider
     export FRED_API_KEY="..."               # free: https://fred.stlouisfed.org/docs/api/api_key.html
 
 Run::
 
-    python -m ockham_agents.examples.quickstart
+    python -m parsimony_agents.examples.quickstart
 
 For direct event access (custom UIs, websockets), see ``event_stream.py``.
 
 This example uses FRED (free API key) but you can compose any connectors::
 
-    from ockham.connectors.sdmx import CONNECTORS as SDMX
-    from ockham.connectors.fmp import CONNECTORS as FMP
+    from parsimony.connectors.sdmx import CONNECTORS as SDMX
+    from parsimony.connectors.fmp import CONNECTORS as FMP
 
     connectors = FRED.bind_deps(api_key="...") + SDMX + FMP.bind_deps(api_key="...")
 """
@@ -25,9 +25,9 @@ from __future__ import annotations
 import asyncio
 import os
 
-from ockham.connectors.fred import CONNECTORS as FRED
+from parsimony.connectors.fred import CONNECTORS as FRED
 
-from ockham_agents import Agent, stream_to_display
+from parsimony_agents import Agent, stream_to_display
 
 
 async def main() -> None:

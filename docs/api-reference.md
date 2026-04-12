@@ -1,17 +1,17 @@
-# ockham-agents API Reference
+# parsimony-agents API Reference
 
 **Version**: 0.1.0  
 **Python**: 3.11 – 3.12  
 **License**: Apache-2.0
 
-This reference covers every public symbol exported from `ockham_agents`. Internal helpers and private methods prefixed with `_` are excluded unless they appear in documented usage patterns.
+This reference covers every public symbol exported from `parsimony_agents`. Internal helpers and private methods prefixed with `_` are excluded unless they appear in documented usage patterns.
 
 ---
 
 ## Public Exports
 
 ```python
-from ockham_agents import (
+from parsimony_agents import (
     Agent,
     AgentResult,
     Script,
@@ -59,7 +59,7 @@ You must provide either `model` or `model_config`. Providing both raises `TypeEr
 |-----------|------|-------------|
 | `model` | `str` | Any model string accepted by litellm, e.g. `"claude-sonnet-4-6"`, `"gpt-4o"`, `"gemini/gemini-3-flash-preview"`. Mutually exclusive with `model_config`. |
 | `api_key` | `str` | API key forwarded to litellm. Use only with the `model` convenience form. Keys are never stored beyond the session. |
-| `connectors` | `Connectors` | A `ockham.Connectors` instance providing data sources the agent can fetch during execution. When provided, connector descriptions are appended to the system prompt automatically. |
+| `connectors` | `Connectors` | A `parsimony.Connectors` instance providing data sources the agent can fetch during execution. When provided, connector descriptions are appended to the system prompt automatically. |
 | `model_config` | `dict` | Raw litellm completion kwargs. Supports any field litellm accepts: `model`, `api_key`, `api_base`, `temperature`, `max_tokens`, etc. Takes precedence over `model`. |
 | `instructions` | `str` | Custom system prompt. Defaults to `DEFAULT_DATA_ANALYSIS_PROMPT`. When `connectors` is also set, connector descriptions are appended to the resolved instructions. |
 | `code_executor` | `BaseCodeExecutor` | Custom executor implementation. Defaults to the in-process `CodeExecutor`. Supply this to use a remote sandbox or mock executor in tests. |
@@ -71,7 +71,7 @@ You must provide either `model` or `model_config`. Providing both raises `TypeEr
 #### Minimal example
 
 ```python
-from ockham_agents import Agent
+from parsimony_agents import Agent
 
 agent = Agent(model="claude-sonnet-4-6")
 result = await agent.ask("Compute the sum of 1..100 in Python")
@@ -81,9 +81,9 @@ print(result.text)
 #### With connectors and full model config
 
 ```python
-from ockham_agents import Agent
-from ockham_agents.agent.config import AgentGuardrails
-from ockham.connectors.fred import CONNECTORS as FRED
+from parsimony_agents import Agent
+from parsimony_agents.agent.config import AgentGuardrails
+from parsimony.connectors.fred import CONNECTORS as FRED
 
 agent = Agent(
     model_config={
@@ -504,9 +504,9 @@ Registers a handler for a custom Python type. Handlers run before built-in type 
 
 ```python
 import polars as pl
-from ockham_agents.execution.factory import OutputFactory
-from ockham_agents.execution.outputs import DataFrameObject
-from ockham_agents.execution.dataframe_ref import DataframeRef
+from parsimony_agents.execution.factory import OutputFactory
+from parsimony_agents.execution.outputs import DataFrameObject
+from parsimony_agents.execution.dataframe_ref import DataframeRef
 
 OutputFactory.register(
     pl.DataFrame,
@@ -561,7 +561,7 @@ class FigureObject(BaseOutputObject):
     base64_image: str | None  # excluded from serialization
 ```
 
-Wraps an Altair chart. `calc_base64_image()` renders the chart to PNG via vl-convert and caches the base64 result. The Ockham theme (dark background, Ubuntu Mono, 640x400) is applied automatically.
+Wraps an Altair chart. `calc_base64_image()` renders the chart to PNG via vl-convert and caches the base64 result. The Parsimony theme (dark background, Ubuntu Mono, 640x400) is applied automatically.
 
 ### PrimitiveObject
 
@@ -672,7 +672,7 @@ def tool(
 Wraps a free async function as a `Tool`. Use at module level for standalone tools.
 
 ```python
-from ockham_agents.tools import tool
+from parsimony_agents.tools import tool
 
 @tool(
     name="fetch_weather",

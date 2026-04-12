@@ -1,4 +1,4 @@
-# Contributing to ockham-agents
+# Contributing to parsimony-agents
 
 Thank you for your interest in contributing! This guide will help you get started.
 
@@ -7,8 +7,8 @@ Thank you for your interest in contributing! This guide will help you get starte
 We use [uv](https://docs.astral.sh/uv/) for dependency management:
 
 ```bash
-git clone https://github.com/<your-username>/ockham-agents.git
-cd ockham-agents
+git clone https://github.com/<your-username>/parsimony-agents.git
+cd parsimony-agents
 uv venv && source .venv/bin/activate
 uv pip install -e ".[all]"
 uv pip install pytest pytest-asyncio ruff mypy
@@ -27,7 +27,7 @@ ruff check .
 ruff format --check .
 
 # Type checking
-mypy ockham_agents/
+mypy parsimony_agents/
 ```
 
 ## Making Changes
@@ -54,7 +54,7 @@ mypy ockham_agents/
 
 ## Repository Structure
 
-This repository is a read-only mirror of `packages/ockham-agents/` in our development monorepo. Your PR will be reviewed here and synced upstream.
+This repository is a read-only mirror of `packages/parsimony-agents/` in our development monorepo. Your PR will be reviewed here and synced upstream.
 
 ## Code of Conduct
 

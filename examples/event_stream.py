@@ -8,13 +8,13 @@ For the high-level display experience, see ``quickstart.py``.
 
 Prerequisites::
 
-    pip install ockham-agents
+    pip install parsimony-agents
     export ANTHROPIC_API_KEY="sk-ant-..."   # or any litellm-supported provider
     export FRED_API_KEY="..."               # free: https://fred.stlouisfed.org/docs/api/api_key.html
 
 Run::
 
-    python -m ockham_agents.examples.event_stream
+    python -m parsimony_agents.examples.event_stream
 """
 
 from __future__ import annotations
@@ -22,9 +22,9 @@ from __future__ import annotations
 import asyncio
 import os
 
-from ockham.connectors.fred import CONNECTORS as FRED
+from parsimony.connectors.fred import CONNECTORS as FRED
 
-from ockham_agents import Agent, AgentResult
+from parsimony_agents import Agent, AgentResult
 
 
 async def main() -> None:

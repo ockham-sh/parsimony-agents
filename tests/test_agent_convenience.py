@@ -6,9 +6,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from ockham_agents.agent.agent import Agent, AgentResult
-from ockham_agents.agent.events import AgentError, StateSnapshot, TextDelta
-from ockham_agents.agent.prompts import DEFAULT_DATA_ANALYSIS_PROMPT
+from parsimony_agents.agent.agent import Agent, AgentResult
+from parsimony_agents.agent.events import AgentError, StateSnapshot, TextDelta
+from parsimony_agents.agent.prompts import DEFAULT_DATA_ANALYSIS_PROMPT
 
 # ---------------------------------------------------------------------------
 # AgentResult
@@ -88,7 +88,7 @@ class TestAgentConvenience:
 
     def test_default_code_executor_created(self):
         agent = Agent(model="test-model")
-        from ockham_agents.execution.executor import CodeExecutor
+        from parsimony_agents.execution.executor import CodeExecutor
 
         assert isinstance(agent.code_executor, CodeExecutor)
 
@@ -114,11 +114,11 @@ class TestAgentConvenience:
 
 class TestReExports:
     def test_agent_alias(self):
-        from ockham_agents import Agent
+        from parsimony_agents import Agent
 
         assert Agent is not None
 
     def test_agent_result_importable(self):
-        from ockham_agents import AgentResult as AR
+        from parsimony_agents import AgentResult as AR
 
         assert AR is AgentResult

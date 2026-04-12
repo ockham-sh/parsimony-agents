@@ -1,18 +1,18 @@
-# ockham-agents User Guide
+# parsimony-agents User Guide
 
-ockham-agents is a Python library that gives you an LLM-powered data analysis agent. You ask questions in plain English, the agent writes and executes Python code in a sandboxed environment, and you get back structured results: datasets, charts, and explanatory text.
+parsimony-agents is a Python library that gives you an LLM-powered data analysis agent. You ask questions in plain English, the agent writes and executes Python code in a sandboxed environment, and you get back structured results: datasets, charts, and explanatory text.
 
 ---
 
 ## Installation
 
-ockham-agents is not yet published to PyPI. Install directly from source.
+parsimony-agents is not yet published to PyPI. Install directly from source.
 
 ### From source
 
 ```bash
-git clone https://github.com/espinetandreu/ockham-agents
-cd ockham-agents
+git clone https://github.com/ockham-sh/parsimony-agents
+cd parsimony-agents
 pip install -e .
 ```
 
@@ -36,7 +36,7 @@ pip install -e ".[all]"
 
 | Package | Purpose |
 |---------|---------|
-| `ockham` | Data connector protocol |
+| `parsimony` | Data connector protocol |
 | `litellm` | LLM provider abstraction (OpenAI, Anthropic, Gemini, etc.) |
 | `pydantic` | Data validation |
 | `pandas` | DataFrame operations |
@@ -45,7 +45,7 @@ pip install -e ".[all]"
 | `httpx` | HTTP client for data fetching |
 | `dateparser` | Natural language date parsing |
 
-> **Important**: Three packages are imported at module load time but are not declared in `pyproject.toml`: `scipy`, `statsmodels`, and `opentelemetry-api`. If your environment does not have these installed transitively, you will see an `ImportError` when you first `import ockham_agents`. See the [Deployment Guide](./deployment.md) for full details and mitigations.
+> **Important**: Three packages are imported at module load time but are not declared in `pyproject.toml`: `scipy`, `statsmodels`, and `opentelemetry-api`. If your environment does not have these installed transitively, you will see an `ImportError` when you first `import parsimony_agents`. See the [Deployment Guide](./deployment.md) for full details and mitigations.
 
 ---
 
@@ -53,7 +53,7 @@ pip install -e ".[all]"
 
 ### 1. Set your LLM API key
 
-ockham-agents uses litellm, which picks up API keys from environment variables:
+parsimony-agents uses litellm, which picks up API keys from environment variables:
 
 ```bash
 # Anthropic
@@ -72,7 +72,7 @@ Keys are never stored by this library. They are forwarded to litellm via the `mo
 
 ```python
 import asyncio
-from ockham_agents import Agent
+from parsimony_agents import Agent
 
 async def main():
     agent = Agent(model="claude-sonnet-4-6")
@@ -100,7 +100,7 @@ print(result.code)       # dict[str, Script] — the generated code notebooks
 
 ```python
 import asyncio
-from ockham_agents import Agent, AgentResult
+from parsimony_agents import Agent, AgentResult
 
 async def main():
     agent = Agent(model="claude-sonnet-4-6")
@@ -158,7 +158,7 @@ Pass `result.context` as `ctx` to continue a conversation. The agent restores al
 
 ```python
 import asyncio
-from ockham_agents import Agent, stream_to_display
+from parsimony_agents import Agent, stream_to_display
 
 async def main():
     agent = Agent(model="claude-sonnet-4-6")
@@ -192,8 +192,8 @@ The `stream_to_display` function provides a Rich terminal UI with live progress 
 ```python
 import asyncio
 import os
-from ockham_agents import Agent, stream_to_display
-from ockham.connectors.fred import CONNECTORS as FRED
+from parsimony_agents import Agent, stream_to_display
+from parsimony.connectors.fred import CONNECTORS as FRED
 
 async def main():
     agent = Agent(
@@ -225,8 +225,8 @@ asyncio.run(main())
 ```python
 import asyncio
 import tempfile
-from ockham_agents.execution.executor import CodeExecutor
-from ockham_agents.execution.factory import OutputFactory
+from parsimony_agents.execution.executor import CodeExecutor
+from parsimony_agents.execution.factory import OutputFactory
 
 async def main():
     # Create an executor with a temp working directory
@@ -291,7 +291,7 @@ You can extend the agent with custom tools using the `@tool` and `@toolmethod` d
 ### Standalone tool (free function)
 
 ```python
-from ockham_agents.tools import tool, Tools
+from parsimony_agents.tools import tool, Tools
 
 @tool(
     name="get_exchange_rate",
@@ -323,7 +323,7 @@ agent.system_tools = agent.system_tools + Tools([get_exchange_rate])
 ### Tool method on a class
 
 ```python
-from ockham_agents.tools import toolmethod
+from parsimony_agents.tools import toolmethod
 
 class DataAgent(Agent):
     @toolmethod(
@@ -357,7 +357,7 @@ class DataAgent(Agent):
 
 ## Chart Generation with Altair
 
-The agent generates charts using [Altair](https://altair-viz.github.io/) (Vega-Lite). Charts are validated against the spec at generation time using vl-convert. The Ockham theme is applied automatically: dark background, Ubuntu Mono font, 640x400 dimensions.
+The agent generates charts using [Altair](https://altair-viz.github.io/) (Vega-Lite). Charts are validated against the spec at generation time using vl-convert. The Parsimony theme is applied automatically: dark background, Ubuntu Mono font, 640x400 dimensions.
 
 To produce a chart, the agent writes code like:
 
@@ -378,8 +378,8 @@ If you use Plotly, Matplotlib, or another charting library, register a handler:
 
 ```python
 import plotly.graph_objects as go
-from ockham_agents.execution.factory import OutputFactory
-from ockham_agents.execution.outputs import PrimitiveObject
+from parsimony_agents.execution.factory import OutputFactory
+from parsimony_agents.execution.outputs import PrimitiveObject
 
 OutputFactory.register(
     go.Figure,
@@ -391,12 +391,12 @@ OutputFactory.register(
 
 ## Connecting Data Sources
 
-The `connectors` parameter accepts a `ockham.Connectors` object. When attached, the connector catalog is appended to the system prompt so the agent knows what data sources are available.
+The `connectors` parameter accepts a `parsimony.Connectors` object. When attached, the connector catalog is appended to the system prompt so the agent knows what data sources are available.
 
 ```python
 import os
-from ockham.connectors.fred import CONNECTORS as FRED
-from ockham.connectors.sdmx import CONNECTORS as SDMX
+from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony.connectors.sdmx import CONNECTORS as SDMX
 
 # Single connector
 agent = Agent(
@@ -424,7 +424,7 @@ df = result.data  # Returns a DataFrame directly
 
 ## Environment Variables
 
-ockham-agents does not read any environment variables directly. LLM API keys are passed through litellm via the `model_config` dict or the `api_key` constructor parameter. litellm reads provider-specific environment variables by convention:
+parsimony-agents does not read any environment variables directly. LLM API keys are passed through litellm via the `model_config` dict or the `api_key` constructor parameter. litellm reads provider-specific environment variables by convention:
 
 | Variable | Provider |
 |----------|---------|
@@ -455,7 +455,7 @@ All examples require a FRED API key (free: https://fred.stlouisfed.org/docs/api/
 
 ## Troubleshooting
 
-### ImportError on `import ockham_agents`
+### ImportError on `import parsimony_agents`
 
 The most common cause is missing undeclared dependencies. Check whether `scipy`, `statsmodels`, or `opentelemetry-api` are installed:
 

@@ -1,12 +1,12 @@
-# ockham-agents Architecture
+# parsimony-agents Architecture
 
-This document explains the internal design of ockham-agents for developers who need to extend, debug, or maintain the library. It covers the agent loop state machine, tool dispatch mechanics, the code execution engine, the output pipeline, the streaming protocol, and the dependency graph between modules.
+This document explains the internal design of parsimony-agents for developers who need to extend, debug, or maintain the library. It covers the agent loop state machine, tool dispatch mechanics, the code execution engine, the output pipeline, the streaming protocol, and the dependency graph between modules.
 
 ---
 
 ## System Overview
 
-ockham-agents is a Python library — not a server. It has no HTTP listeners and no web framework. All interaction is through Python function calls and an async generator interface.
+parsimony-agents is a Python library — not a server. It has no HTTP listeners and no web framework. All interaction is through Python function calls and an async generator interface.
 
 The library's job is to bridge three things:
 
@@ -287,7 +287,7 @@ Python value (from exec/eval/display/print)
   │    ├─ pd.DataFrame / pd.Series → DataFrameObject
   │    │    └─ DataframeRef.from_pandas() → content-addressed .parquet file
   │    ├─ alt.TopLevelMixin → FigureObject
-  │    │    └─ Ockham theme applied
+  │    │    └─ Parsimony theme applied
   │    │    └─ vlc.vegalite_to_png() validation — returns ExceptionObject on failure
   │    ├─ str / int / float / bool / None → PrimitiveObject
   │    ├─ np.generic → PrimitiveObject (.item() called)
@@ -366,7 +366,7 @@ User message → Agent LLM
   → Altair chart object produced in sandbox
   → display(chart) called in user code, or chart returned from exec
   → OutputFactory._from_altair(chart):
-      1. Apply Ockham theme (dark background, 640x400, Ubuntu Mono)
+      1. Apply Parsimony theme (dark background, 640x400, Ubuntu Mono)
       2. Serialize to Vega-Lite spec dict via chart.to_dict()
       3. Apply finalize_spec() — sets width, height, autosize
       4. Call vlc.vegalite_to_png(spec_json) — validation pass
@@ -394,7 +394,7 @@ graph TD
     B["Sandbox executes cell\nalt.Chart(...) produced"]:::sandbox
     C["display(chart) or\nprint(chart)"]:::sandbox
     D["OutputFactory._from_altair(chart)"]:::factory
-    E["Apply Ockham theme\n640x400, dark background"]:::factory
+    E["Apply Parsimony theme\n640x400, dark background"]:::factory
     F["chart.to_dict()\nVega-Lite spec"]:::factory
     G["finalize_spec()\nwidth + height + autosize"]:::factory
     H["vlc.vegalite_to_png(spec)\nvalidation pass"]:::factory
@@ -413,7 +413,7 @@ graph TD
 
 ### Theme application
 
-`theme.py` registers a custom Altair theme named `"ockham"`. The factory applies it by merging the theme config dict directly into the chart's `config` and `background` fields before rendering. This avoids depending on Altair's `alt.themes.enable()` global state.
+`theme.py` registers a custom Altair theme named `"parsimony"`. The factory applies it by merging the theme config dict directly into the chart's `config` and `background` fields before rendering. This avoids depending on Altair's `alt.themes.enable()` global state.
 
 Default dimensions: width=640, height=400. Charts produced in a different size will be resized to fit within these bounds via the `autosize: {type: "fit", contains: "padding"}` rule.
 
@@ -422,7 +422,7 @@ Default dimensions: width=640, height=400. Charts produced in a different size w
 ## Dependency Graph
 
 ```
-ockham_agents (public API)
+parsimony_agents (public API)
 ├── agent/agent.py              ← core loop, all tool implementations
 │   ├── agent/config.py         ← AgentGuardrails, FileStore protocol
 │   ├── agent/events.py         ← AgentEvent subclasses (streaming protocol)

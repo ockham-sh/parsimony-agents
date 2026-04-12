@@ -7,10 +7,10 @@ from typing import Any
 
 import pandas as pd
 import pytest
-from ockham.result import Provenance, Result
+from parsimony.result import Provenance, Result
 
-from ockham_agents.execution.helpers import inject_connectors
-from ockham_agents.execution.outputs import FetchLogEntry
+from parsimony_agents.execution.helpers import inject_connectors
+from parsimony_agents.execution.outputs import FetchLogEntry
 
 
 class _Exec:

@@ -1,21 +1,21 @@
-# ockham-agents
+# parsimony-agents
 
-[![PyPI version](https://img.shields.io/pypi/v/ockham-agents)](https://pypi.org/project/ockham-agents/)
+[![PyPI version](https://img.shields.io/pypi/v/parsimony-agents)](https://pypi.org/project/parsimony-agents/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![Python](https://img.shields.io/pypi/pyversions/ockham-agents)](https://pypi.org/project/ockham-agents/)
-[![CI](https://github.com/espinetandreu/ockham-agents/actions/workflows/test.yml/badge.svg)](https://github.com/espinetandreu/ockham-agents/actions)
+[![Python](https://img.shields.io/pypi/pyversions/parsimony-agents)](https://pypi.org/project/parsimony-agents/)
+[![CI](https://github.com/ockham-sh/parsimony-agents/actions/workflows/test.yml/badge.svg)](https://github.com/ockham-sh/parsimony-agents/actions)
 
 Build AI agents that discover, fetch, and analyze data.
 
-### Why ockham-agents?
+### Why parsimony-agents?
 
-LLM frameworks are generic by design. `ockham-agents` is purpose-built for data analysis: agents write and execute Python code against typed data connectors, track provenance for every data fetch, and produce reproducible datasets and Altair visualizations. Works with any LLM provider supported by [LiteLLM](https://docs.litellm.ai/docs/providers) (OpenAI, Anthropic, Google, Azure, local models, and more).
+LLM frameworks are generic by design. `parsimony-agents` is purpose-built for data analysis: agents write and execute Python code against typed data connectors, track provenance for every data fetch, and produce reproducible datasets and Altair visualizations. Works with any LLM provider supported by [LiteLLM](https://docs.litellm.ai/docs/providers) (OpenAI, Anthropic, Google, Azure, local models, and more).
 
 ## Quick Start
 
 ```python
-from ockham_agents import Agent
-from ockham.connectors.fred import CONNECTORS as FRED
+from parsimony_agents import Agent
+from parsimony.connectors.fred import CONNECTORS as FRED
 
 agent = Agent(
     model="claude-sonnet-4-6",
@@ -32,10 +32,10 @@ print(result.code)        # {"main": Script(...), ...} — named scripts keyed b
 ## Installation
 
 ```bash
-pip install ockham-agents
+pip install parsimony-agents
 ```
 
-Requires [ockham](../ockham) (installed automatically as a dependency).
+Requires [parsimony](../parsimony) (installed automatically as a dependency).
 
 ## Features
 
@@ -51,12 +51,12 @@ gdp = result.data  # pandas DataFrame with provenance attached
 
 ### Composable data sources
 
-Plug in any combination of data sources via [ockham](../ockham) connectors:
+Plug in any combination of data sources via [parsimony](../parsimony) connectors:
 
 ```python
-from ockham.connectors.fred import CONNECTORS as FRED
-from ockham.connectors.sdmx import CONNECTORS as SDMX
-from ockham.connectors.fmp import CONNECTORS as FMP
+from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony.connectors.sdmx import CONNECTORS as SDMX
+from parsimony.connectors.fmp import CONNECTORS as FMP
 
 agent = Agent(
     model="claude-sonnet-4-6",
@@ -127,9 +127,9 @@ Agents organize code into notebooks (editable, re-executable cells) and produce 
 ## Architecture
 
 ```
-ockham (connectors, catalog, Result model)
+parsimony (connectors, catalog, Result model)
      |
-ockham-agents (this package)
+parsimony-agents (this package)
      |
      +-- Agent                  — LLM loop, tool orchestration
      +-- CodeExecutor           — in-process Python execution
@@ -145,10 +145,10 @@ ockham-agents (this package)
 For full control, use `Agent` directly with explicit configuration:
 
 ```python
-from ockham_agents import Agent
-from ockham_agents.agent.config import AgentGuardrails
-from ockham_agents.execution.executor import CodeExecutor
-from ockham_agents.execution.factory import OutputFactory
+from parsimony_agents import Agent
+from parsimony_agents.agent.config import AgentGuardrails
+from parsimony_agents.execution.executor import CodeExecutor
+from parsimony_agents.execution.factory import OutputFactory
 
 agent = Agent(
     model_config={"model": "claude-sonnet-4-6", "api_key": "..."},
@@ -163,15 +163,15 @@ agent = Agent(
 ## Optional extras
 
 ```bash
-pip install ockham-agents[rag]       # ChromaDB + Tantivy for semantic search
-pip install ockham-agents[sql]       # DuckDB for SQL over DataFrames
-pip install ockham-agents[display]   # Rich terminal output for streaming events
-pip install ockham-agents[all]       # Everything
+pip install parsimony-agents[rag]       # ChromaDB + Tantivy for semantic search
+pip install parsimony-agents[sql]       # DuckDB for SQL over DataFrames
+pip install parsimony-agents[display]   # Rich terminal output for streaming events
+pip install parsimony-agents[all]       # Everything
 ```
 
 ## Supported LLM Providers
 
-`ockham-agents` uses [LiteLLM](https://docs.litellm.ai/docs/providers) for LLM access, which supports 100+ providers:
+`parsimony-agents` uses [LiteLLM](https://docs.litellm.ai/docs/providers) for LLM access, which supports 100+ providers:
 
 | Provider | Model example |
 |----------|--------------|

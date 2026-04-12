@@ -1,6 +1,6 @@
-# ockham-agents Deployment and Integration Guide
+# parsimony-agents Deployment and Integration Guide
 
-This guide covers adding ockham-agents to a Python project, managing its dependencies, understanding its security model, and avoiding known pitfalls.
+This guide covers adding parsimony-agents to a Python project, managing its dependencies, understanding its security model, and avoiding known pitfalls.
 
 ---
 
@@ -20,28 +20,28 @@ python --version   # must be 3.11.x or 3.12.x
 
 ---
 
-## Adding ockham-agents to Your Project
+## Adding parsimony-agents to Your Project
 
 ### Via pip (from source)
 
 ```bash
-pip install git+https://github.com/espinetandreu/ockham-agents
+pip install git+https://github.com/ockham-sh/parsimony-agents
 ```
 
 ### With extras
 
 ```bash
 # Terminal display
-pip install "git+https://github.com/espinetandreu/ockham-agents[display]"
+pip install "git+https://github.com/ockham-sh/parsimony-agents[display]"
 
 # RAG search
-pip install "git+https://github.com/espinetandreu/ockham-agents[rag]"
+pip install "git+https://github.com/ockham-sh/parsimony-agents[rag]"
 
 # SQL queries
-pip install "git+https://github.com/espinetandreu/ockham-agents[sql]"
+pip install "git+https://github.com/ockham-sh/parsimony-agents[sql]"
 
 # All extras
-pip install "git+https://github.com/espinetandreu/ockham-agents[all]"
+pip install "git+https://github.com/ockham-sh/parsimony-agents[all]"
 ```
 
 ### Via pyproject.toml
@@ -49,7 +49,7 @@ pip install "git+https://github.com/espinetandreu/ockham-agents[all]"
 ```toml
 [project]
 dependencies = [
-    "ockham-agents[display] @ git+https://github.com/espinetandreu/ockham-agents",
+    "parsimony-agents[display] @ git+https://github.com/ockham-sh/parsimony-agents",
 ]
 ```
 
@@ -61,7 +61,7 @@ dependencies = [
 
 | Package | Version constraint | Notes |
 |---------|--------------------|-------|
-| `ockham` | `>=0.1.0` | Data connector protocol. Breaking changes in this package affect `inject_connectors` and `fetch_log` behavior. |
+| `parsimony` | `>=0.1.0` | Data connector protocol. Breaking changes in this package affect `inject_connectors` and `fetch_log` behavior. |
 | `litellm` | `>=1.59.0,<2` | LLM provider abstraction. litellm has had breaking API changes across minor versions; the major-version cap is important. |
 | `pydantic` | `>=2.11.1,<3` | v2 only. The library uses v2-specific validators and computed fields throughout. |
 | `pandas` | `>=2.3.3,<3` | 2.3.x is a recent constraint. Users on older pandas must upgrade. |
@@ -85,7 +85,7 @@ dependencies = [
 
 ### litellm version notice
 
-ockham-agents depends on the standard `litellm` package from PyPI. However, the codebase was developed alongside a specific litellm version range (`>=1.59.0,<2`). If litellm releases a breaking change within the 1.x series, you may encounter unexpected behavior. Pin litellm to a specific version in your lockfile:
+parsimony-agents depends on the standard `litellm` package from PyPI. However, the codebase was developed alongside a specific litellm version range (`>=1.59.0,<2`). If litellm releases a breaking change within the 1.x series, you may encounter unexpected behavior. Pin litellm to a specific version in your lockfile:
 
 ```bash
 # Generate a lockfile after installing
@@ -139,7 +139,7 @@ Without this extra, `stream_to_display()` raises an `ImportError`.
 
 ### API key handling
 
-ockham-agents never stores LLM API keys. Keys are passed through litellm via the `model_config` dict provided at `Agent` construction. They exist in memory for the duration of the Agent object's lifetime.
+parsimony-agents never stores LLM API keys. Keys are passed through litellm via the `model_config` dict provided at `Agent` construction. They exist in memory for the duration of the Agent object's lifetime.
 
 Do not log `Agent.model_config` — it contains the API key in plaintext.
 
@@ -153,7 +153,7 @@ If an OpenTelemetry collector is configured, tool execution spans are exported. 
 
 ### LLM provider selection
 
-ockham-agents uses litellm, which normalizes API calls across providers. The `model` string follows litellm's naming convention:
+parsimony-agents uses litellm, which normalizes API calls across providers. The `model` string follows litellm's naming convention:
 
 | Provider | Model string format | Key env variable |
 |----------|--------------------|--------------------|
@@ -175,15 +175,15 @@ agent = Agent(
 
 ### Data storage
 
-By default, `OutputFactory` writes parquet files to a temporary directory created by `tempfile.mkdtemp(prefix="ockham_agent_")`. This directory is not cleaned up automatically.
+By default, `OutputFactory` writes parquet files to a temporary directory created by `tempfile.mkdtemp(prefix="parsimony_agent_")`. This directory is not cleaned up automatically.
 
 To control the storage location:
 
 ```python
 from pathlib import Path
-from ockham_agents.execution.factory import OutputFactory
-from ockham_agents.execution.executor import CodeExecutor
-from ockham_agents import Agent
+from parsimony_agents.execution.factory import OutputFactory
+from parsimony_agents.execution.executor import CodeExecutor
+from parsimony_agents import Agent
 
 data_dir = Path("/var/lib/myapp/agent-data")
 data_dir.mkdir(parents=True, exist_ok=True)
@@ -197,7 +197,7 @@ agent = Agent(model="claude-sonnet-4-6", code_executor=executor, output_factory=
 
 ## Deployment Checklist
 
-Before deploying ockham-agents in production:
+Before deploying parsimony-agents in production:
 
 - [ ] Python 3.11 or 3.12 confirmed
 - [ ] No dependency conflicts (`pip install . --dry-run`)
@@ -213,7 +213,7 @@ Before deploying ockham-agents in production:
 
 ## Version Compatibility Matrix
 
-| ockham-agents | Python | pandas | altair | litellm | chromadb |
+| parsimony-agents | Python | pandas | altair | litellm | chromadb |
 |-----------------|--------|--------|--------|---------|---------|
 | 0.1.0 | 3.11, 3.12 | >=2.3.3 | >=6.0.0,<7 | >=1.59.0,<2 | >=1.4.0,<2 |
 
@@ -223,7 +223,7 @@ Before deploying ockham-agents in production:
 
 ### Not on PyPI
 
-ockham-agents 0.1.0 is not published to PyPI. You must install from the GitHub repository or a local clone. There is no `pip install ockham-agents` command that works without the Git URL.
+parsimony-agents 0.1.0 is not published to PyPI. You must install from the GitHub repository or a local clone. There is no `pip install parsimony-agents` command that works without the Git URL.
 
 ### No remote sandbox support in open-source build
 
