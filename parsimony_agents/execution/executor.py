@@ -28,6 +28,54 @@ from parsimony_agents.execution.outputs import (
 )
 from parsimony_agents.theme import register_theme
 
+# ---------------------------------------------------------------------------
+# Security: restrict the builtins available inside user-submitted code.
+# This executor runs code in-process; for full isolation a sandboxed environment
+# (e.g. a separate subprocess, container, or remote kernel) is required.
+# The allowlist below removes dangerous callables (open, __import__, exec, eval,
+# compile, os, subprocess, etc.) while preserving the builtins needed for normal
+# data-analysis work.
+# ---------------------------------------------------------------------------
+_SAFE_BUILTINS: dict[str, object] = {
+    name: getattr(builtins, name)
+    for name in (
+        # types & constructors
+        "bool", "bytearray", "bytes", "complex", "dict", "enumerate",
+        "float", "frozenset", "int", "list", "object", "range", "set",
+        "slice", "str", "tuple", "type",
+        # introspection
+        "callable", "chr", "dir", "getattr", "hasattr", "hash", "hex",
+        "id", "isinstance", "issubclass", "iter", "len", "next", "oct",
+        "ord", "repr", "round", "setattr", "sorted", "vars",
+        # itertools / functional
+        "abs", "all", "any", "divmod", "filter", "map", "max", "min",
+        "pow", "reversed", "sum", "zip",
+        # I/O safe subset (print is overridden by capturer at call time)
+        "format", "input", "print",
+        # exceptions
+        "ArithmeticError", "AssertionError", "AttributeError", "BaseException",
+        "BlockingIOError", "BrokenPipeError", "BufferError", "BytesWarning",
+        "ChildProcessError", "ConnectionAbortedError", "ConnectionError",
+        "ConnectionRefusedError", "ConnectionResetError", "DeprecationWarning",
+        "EOFError", "EnvironmentError", "Exception", "FileExistsError",
+        "FileNotFoundError", "FloatingPointError", "FutureWarning",
+        "GeneratorExit", "IOError", "ImportError", "ImportWarning",
+        "IndentationError", "IndexError", "InterruptedError",
+        "IsADirectoryError", "KeyError", "KeyboardInterrupt", "LookupError",
+        "MemoryError", "ModuleNotFoundError", "NameError", "NotADirectoryError",
+        "NotImplemented", "NotImplementedError", "OSError", "OverflowError",
+        "PendingDeprecationWarning", "PermissionError", "ProcessLookupError",
+        "RecursionError", "ReferenceError", "ResourceWarning", "RuntimeError",
+        "RuntimeWarning", "StopAsyncIteration", "StopIteration", "SyntaxError",
+        "SyntaxWarning", "SystemError", "SystemExit", "TabError", "TimeoutError",
+        "True", "False", "None",
+        "TypeError", "UnboundLocalError", "UnicodeDecodeError",
+        "UnicodeEncodeError", "UnicodeError", "UnicodeTranslateError",
+        "UnicodeWarning", "UserWarning", "ValueError", "Warning", "ZeroDivisionError",
+    )
+    if hasattr(builtins, name)
+}
+
 
 @runtime_checkable
 class SerializableContext(Protocol):
@@ -199,7 +247,7 @@ class CodeExecutor(BaseCodeExecutor):
             "datetime": datetime,
             "timedelta": timedelta,
             "timezone": timezone,
-            "__builtins__": builtins,
+            "__builtins__": _SAFE_BUILTINS,
         }
 
     async def set_connectors(self, connectors: Any) -> None:
@@ -284,7 +332,11 @@ class CodeExecutor(BaseCodeExecutor):
             try:
                 with self._working_directory(self.cwd):
                     compiled = compile(code, "cell.py", "exec", ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
-                    result = eval(compiled, exec_locals)
+                    # eval() is used intentionally: for exec-mode code compiled with
+                    # PyCF_ALLOW_TOP_LEVEL_AWAIT it returns a coroutine when top-level
+                    # await is present, allowing us to drive it here.  The namespace is
+                    # restricted to _SAFE_BUILTINS to limit available attack surface.
+                    result = eval(compiled, exec_locals)  # noqa: S307
                     if inspect.iscoroutine(result):
                         await result
                 fetch_log = _drain_fetch_log(exec_locals)

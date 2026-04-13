@@ -79,7 +79,8 @@ class DataFrameObject(BaseOutputObject):
             return None
         return json.loads(value.tail(5).to_json(orient="table"))
 
-    def to_llm(self, mode: Literal["default", "minimal"] = "default", overrides: dict[str, Any] = {}):
+    def to_llm(self, mode: Literal["default", "minimal"] = "default", overrides: dict[str, Any] | None = None):
+        overrides = overrides or {}
         view_cfg = get_llm_view_defaults("dataframe")[mode].model_copy(update=overrides)
 
         blocks: list[dict[str, Any]] = [
@@ -219,7 +220,7 @@ class PrimitiveObject(BaseOutputObject):
     type: Literal["primitive"] = "primitive"
     value: str | int | float | bool | None
 
-    def to_llm(self, mode="default", overrides: dict[str, Any] = {}):
+    def to_llm(self, mode="default", overrides: dict[str, Any] | None = None):
         text = str(self.value)
 
         overrides = overrides or {}

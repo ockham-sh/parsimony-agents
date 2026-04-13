@@ -859,7 +859,26 @@ class Agent:
                     if isinstance(raw_result, asyncio.CancelledError):
                         raise raw_result
 
+                    # Guard: asyncio.gather(return_exceptions=True) can return any
+                    # BaseException subclass, not just Exception.  Re-raise signals
+                    # that indicate process-level conditions (KeyboardInterrupt, SystemExit,
+                    # GeneratorExit) so they propagate normally; convert all other
+                    # exceptions into a tool error message without accessing result
+                    # attributes that only exist on valid tool results.
+                    if isinstance(raw_result, BaseException) and not isinstance(raw_result, Exception):
+                        logger.error(
+                            "Tool %s raised non-Exception BaseException: %r",
+                            tool_name,
+                            raw_result,
+                        )
+                        raise raw_result
+
                     if isinstance(raw_result, Exception):
+                        logger.warning(
+                            "Tool %s raised an exception: %r",
+                            tool_name,
+                            raw_result,
+                        )
                         ctx.messages.append(
                             AgentMessage(role="tool", content=str(raw_result), name=tool_name, tool_call_id=tool_call.id)
                         )
