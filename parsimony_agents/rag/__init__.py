@@ -6,8 +6,6 @@ and semantic (ChromaDB) retrieval with Reciprocal Rank Fusion.
 from __future__ import annotations
 
 import asyncio
-from typing import Dict, List, Optional
-
 import numpy as np
 from pydantic import BaseModel
 

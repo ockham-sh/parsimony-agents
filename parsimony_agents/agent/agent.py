@@ -311,8 +311,6 @@ class Agent:
         if isinstance(user_message, str):
             user_message = Text(content=user_message)
 
-        response_id = str(uuid4())
-
         agent_span = trace.get_current_span()
 
         logger.info("Agent run started", extra={"prompt_preview": user_message.content[:1000]})
@@ -378,9 +376,6 @@ class Agent:
                 ctx.messages.append(AgentMessage(role="user", content=user_message))
 
         iteration = 0
-        data_context_iteration = 0
-        notebook_iteration = 0
-
 
         tool_choice = "auto"
 
@@ -673,7 +668,6 @@ class Agent:
 
             # Log tool calls if any
             if _new_tool_calls:
-                tool_names = ", ".join([tc.function.name for tc in _new_tool_calls])
                 logger.info("Tool calls", extra={
                     "iteration": iteration_count,
                     "tool_names": [tc.function.name for tc in _new_tool_calls]
@@ -1379,8 +1373,7 @@ class Agent:
         for figure in kernel_output.get_figures():
             self.figures.append(figure)
 
-        message = "Executed " + ("with errors." if notebook.has_errors() else "successfully." + " Check next User message for outputs.")
-        return kernel_output # Text(content=message)
+        return kernel_output
 
     @toolmethod(
         name="code_edit",
@@ -1418,8 +1411,7 @@ class Agent:
         for figure in kernel_output.get_figures():
             self.figures.append(figure)
 
-        message = "Executed " + ("with errors." if notebook.has_errors() else "successfully.") + " Check next User message for outputs."
-        return kernel_output # Text(content=message)
+        return kernel_output
 
     def _stamp_data_objects(self, notebook: Any) -> None:
         """Copy :attr:`KernelOutput.fetch_log` onto the notebook for the UI."""
