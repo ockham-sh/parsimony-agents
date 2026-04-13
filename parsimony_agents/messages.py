@@ -5,7 +5,7 @@ Core models for the assistant functionality.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal, Union
+from typing import Any, Literal
 
 from litellm import Message as LitellmMessage
 from pydantic import BaseModel, Field, field_validator
@@ -166,7 +166,7 @@ class ContinueRequest(MessageContent):
         return []  # Not sent back to the LLM
 
 
-MessageType = Union[LitellmMessage, Message]
+MessageType = LitellmMessage | Message
 
 
 def blocks_to_text(blocks: list[dict[str, Any]], sep: str = "\n") -> str:

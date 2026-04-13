@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Union
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -50,4 +50,4 @@ class AgentError(AgentEvent):
     error_type: str | None = None
 
 
-AgentEventUnion = Union[TextDelta, ReasoningDelta, ToolEvent, StateSnapshot, AgentError]
+AgentEventUnion = TextDelta | ReasoningDelta | ToolEvent | StateSnapshot | AgentError
