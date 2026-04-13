@@ -21,6 +21,8 @@ _default_local_root: Path | None = None
 
 @runtime_checkable
 class StorageBackend(Protocol):
+    """Protocol for remote parquet storage (upload/download by content key)."""
+
     def upload(self, key: str, local_path: Path) -> None: ...
 
     def download(self, key: str, local_path: Path) -> bool: ...

@@ -27,6 +27,8 @@ from parsimony_agents.variable import Variable, VariableStore
 
 
 class ReturnedDatasetState(BaseModel):
+    """Persistent state for a dataset artifact that has been returned by the agent."""
+
     artifact_id: str = ""
     version: int = 1
     dataset_variable_name: str
@@ -49,6 +51,8 @@ class ReturnedDatasetState(BaseModel):
 
 
 class ReturnedChartState(BaseModel):
+    """Persistent state for a chart artifact that has been returned by the agent."""
+
     artifact_id: str = ""
     version: int = 1
     title: str = ""
@@ -90,6 +94,8 @@ def _default_notebooks() -> dict[str, Script]:
 
 
 class AgentContextSnapshot(MessageContent):
+    """Serializable snapshot of agent state for injection into the LLM context window."""
+
     type: Literal["agent_context_snapshot"] = "agent_context_snapshot"
     data_context: VariableStore
     notebooks: dict[str, Script] = Field(default_factory=_default_notebooks)
@@ -217,10 +223,14 @@ AgentMessageContent = Annotated[
 
 
 class AgentMessage(Message):
+    """A conversation message in an agent session (may carry structured artifacts)."""
+
     content: AgentMessageContent | None = Field(default=None, description="Content of the message")
 
 
 class AgentContext(MessageContent):
+    """Live agent session state: messages, notebooks, data context, and returned artifacts."""
+
     session_id: str
     data_context: VariableStore = Field(default_factory=VariableStore)
     messages: list[AgentMessage] = Field(default_factory=list)
@@ -251,6 +261,7 @@ class AgentContext(MessageContent):
         self,
         notebook_name: str,
     ) -> Script:
+        """Return the named notebook, creating it if it does not exist."""
         normalized_name = notebook_name.strip()
         if not normalized_name:
             raise ValueError("notebook_name must be a non-empty string.")
@@ -259,30 +270,35 @@ class AgentContext(MessageContent):
         return self.notebooks[normalized_name]
 
     def get_returned_dataset(self, artifact_id: str | None = None) -> ReturnedDatasetState | None:
+        """Look up a returned dataset by ID, defaulting to the active one."""
         target_id = artifact_id or self.active_returned_dataset_id
         if target_id and target_id in self.returned_datasets:
             return self.returned_datasets[target_id]
         return self.returned_dataset
 
     def set_returned_dataset(self, state: ReturnedDatasetState) -> ReturnedDatasetState:
+        """Register and activate a returned dataset state."""
         self.returned_datasets[state.artifact_id] = state
         self.active_returned_dataset_id = state.artifact_id
         self.returned_dataset = state
         return state
 
     def get_returned_chart(self, artifact_id: str | None = None) -> ReturnedChartState | None:
+        """Look up a returned chart by ID, defaulting to the active one."""
         target_id = artifact_id or self.active_returned_chart_id
         if target_id and target_id in self.returned_charts:
             return self.returned_charts[target_id]
         return self.returned_chart
 
     def set_returned_chart(self, state: ReturnedChartState) -> ReturnedChartState:
+        """Register and activate a returned chart state."""
         self.returned_charts[state.artifact_id] = state
         self.active_returned_chart_id = state.artifact_id
         self.returned_chart = state
         return state
 
     def mark_charts_stale_for_dataset(self, *, dataset_artifact_id: str, latest_version: int) -> None:
+        """Flag all charts derived from the given dataset as stale when a new version is available."""
         for artifact_id, chart_state in list(self.returned_charts.items()):
             if chart_state.source_dataset_artifact_id != dataset_artifact_id:
                 continue
@@ -327,6 +343,7 @@ class AgentContext(MessageContent):
         code_executor: Any,
         update_outputs: bool = True,
     ) -> dict[str, KernelOutput]:
+        """Execute all session notebooks and return a dict of their kernel outputs."""
         outputs: dict[str, KernelOutput] = {}
         for notebook_name, notebook in self.notebooks.items():
             outputs[notebook_name] = await notebook.execute(
@@ -335,6 +352,7 @@ class AgentContext(MessageContent):
         return outputs
 
     async def to_snapshot(self) -> AgentContextSnapshot:
+        """Build a serializable snapshot of the current context for LLM injection."""
         files_list = await self.files.list_files() if self.files is not None else []
         return AgentContextSnapshot(
             data_context=self.data_context.model_copy(deep=True),

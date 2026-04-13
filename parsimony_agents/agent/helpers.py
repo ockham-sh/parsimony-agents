@@ -28,6 +28,8 @@ def system_error(msg: str) -> SystemToolOutput:
 
 
 class TurnState(BaseModel):
+    """Mutable flags tracking progress within a single agent turn."""
+
     stopped: bool = False
     final_response_started: bool = False
     edited_notebook_names: set[str] = Field(default_factory=set)

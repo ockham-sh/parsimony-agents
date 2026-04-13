@@ -122,6 +122,8 @@ class Dataset(MessageContent):
 
 
 class Chart(MessageContent):
+    """Returned chart artifact: an Altair figure linked to a returned dataset."""
+
     type: Literal["chart"] = "chart"
     artifact_id: str = ""
     version: int = 1
@@ -139,6 +141,8 @@ class Chart(MessageContent):
     last_refreshed_at: datetime | None = None
 
     class Config:
+        """Pydantic config: allow arbitrary types (FigureObject)."""
+
         arbitrary_types_allowed = True
 
     @model_validator(mode="after")

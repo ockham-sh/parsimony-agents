@@ -308,6 +308,12 @@ class Agent:
         ctx: AgentContext | None = None,
         tool_choice: str = "auto",
     ) -> AsyncGenerator[Any, None]:
+        """Stream agent events for a single user turn.
+
+        Yields :class:`AgentEvent` subclass instances (TextDelta, ToolEvent,
+        StateSnapshot, etc.) as they are produced.  For simple one-shot usage
+        prefer :meth:`ask` which collects the stream into an :class:`AgentResult`.
+        """
         if isinstance(user_message, str):
             user_message = Text(content=user_message)
 
@@ -1059,6 +1065,7 @@ class Agent:
         ui_message=None
     )
     async def get_context(self, *, context: AgentContext) -> AgentContext:
+        """Return a serializable snapshot of the current agent context (tool)."""
         context_snapshot = await context.to_snapshot()
         return context_snapshot
 
@@ -1089,6 +1096,7 @@ class Agent:
         ui_message_completed="Read output"
     )
     async def output_read(self, *, variable_name: str, pages: list[int], context: AgentContext) -> SystemToolOutput:
+        """Page through a long variable or cell value (tool, max 5 pages per call)."""
         pages = pages[:5]
         display_pages = [p - 1 for p in pages]
 
@@ -1309,6 +1317,7 @@ class Agent:
         timeout_seconds: float = 120.0,
         context: AgentContext,
     ) -> UtilityToolOutput:
+        """Execute exploratory code in a sandboxed copy without modifying notebooks (tool)."""
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than 0")
         effective_timeout = min(timeout_seconds, self.guardrails.tool_timeout_s)
@@ -1361,6 +1370,7 @@ class Agent:
         ui_message="Writing notebook",
     )
     async def code_set(self, *, notebook_name: str, code: str, context: AgentContext) -> str:
+        """Overwrite a notebook's full code and re-execute it (tool)."""
         notebook = context.get_or_create_notebook(notebook_name)
         context.active_notebook_name = notebook.id
         context.bump_state_version()
@@ -1396,6 +1406,7 @@ class Agent:
         ui_message="Editing notebook",
     )
     async def code_edit(self, *, notebook_name: str, old_str: str, new_str: str, context: AgentContext) -> str:
+        """Apply a targeted string replacement to a notebook and re-execute it (tool)."""
         if old_str == "":
             return await self.code_set(notebook_name=notebook_name, code=new_str, context=context)
 
@@ -1532,6 +1543,7 @@ class Agent:
             tags: list[str] | None = None,
             notebook_refs: list[str] | None = None,
         ) -> Dataset:
+        """Declare a DataFrame variable as the session's primary returned dataset (tool)."""
         dataset_variable_name = self._require_plain_variable_name(
             value=dataset_variable_name,
             parameter_name="dataset_variable_name",
@@ -1659,6 +1671,7 @@ class Agent:
         description: str,
         notes: list[str],
     ) -> Chart:
+        """Declare an Altair chart variable as the session's primary returned chart (tool)."""
         source_dataset_variable_name = self._require_plain_variable_name(
             value=source_dataset_variable_name,
             parameter_name="source_dataset_variable_name",
@@ -1856,6 +1869,10 @@ class Agent:
         context: AgentContext,
         artifact_id: str | None = None,
     ) -> Dataset:
+        """Re-execute notebooks and bump the version of the returned dataset.
+
+        Used to propagate upstream data changes to an already-returned artifact.
+        """
         returned_state = context.get_returned_dataset(artifact_id)
         if returned_state is None:
             raise ValueError("No returned dataset is available to refresh.")
@@ -1906,6 +1923,10 @@ class Agent:
         context: AgentContext,
         artifact_id: str | None = None,
     ) -> Chart:
+        """Re-render the returned chart from updated notebook state.
+
+        Should be called after the source dataset has been refreshed.
+        """
         returned_chart = context.get_returned_chart(artifact_id)
         if returned_chart is None:
             raise ValueError("No returned chart is available to refresh.")
