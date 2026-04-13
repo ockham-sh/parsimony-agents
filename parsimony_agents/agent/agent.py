@@ -296,6 +296,89 @@ class Agent:
             **tool_args,
         }
 
+    async def _handle_llm_error(
+        self,
+        last_exception: Exception,
+        text_message_id: str,
+        turn_state: TurnState,
+        agent_span: Any,
+    ) -> AsyncGenerator[Any, None]:
+        """Classify an LLM exception and yield the appropriate error/text events.
+
+        Handles RateLimitError, Timeout, ServiceUnavailableError, APIError, and
+        all other unexpected exceptions with user-facing messages and span recording.
+        """
+        section = "final_response" if turn_state.final_response_started else "analysis"
+
+        if isinstance(last_exception, RateLimitError):
+            error_logger.error("Rate limit exceeded: %s", last_exception, exc_info=True)
+            yield AgentError(
+                message="Rate limit exceeded",
+                recoverable=False,
+                error_type="rate_limit",
+                section=section,
+            )
+            yield TextDeltaEvent(
+                content=(
+                    "We're currently in beta and experiencing high demand. "
+                    "The AI model has hit its rate limit, please wait a moment and try again. "
+                    "This is expected during peak usage and will be resolved as we scale."
+                ),
+                message_id=text_message_id,
+                delta=False,
+                section="final_response",
+            )
+        elif isinstance(last_exception, Timeout):
+            error_logger.error("Request timeout: %s", last_exception, exc_info=True)
+            yield AgentError(
+                message="Request timeout",
+                recoverable=False,
+                error_type="timeout",
+                section=section,
+            )
+            yield TextDeltaEvent(
+                content=(
+                    "The AI model took too long to respond, please wait a moment and try again. "
+                    "We're currently in beta and this will be resolved as we improve the service."
+                ),
+                message_id=text_message_id,
+                delta=False,
+                section="final_response",
+            )
+        elif isinstance(last_exception, ServiceUnavailableError) or (
+            isinstance(last_exception, APIError) and "unavailable" in str(last_exception).lower()
+        ):
+            error_logger.error("Model unavailable: %s", last_exception, exc_info=True)
+            yield AgentError(
+                message="Model unavailable",
+                recoverable=False,
+                error_type="unavailable",
+                section=section,
+            )
+            yield TextDeltaEvent(
+                content=(
+                    "The selected AI model is currently unavailable. "
+                    "Please try again in a moment or select a different model."
+                ),
+                message_id=text_message_id,
+                delta=False,
+                section="final_response",
+            )
+        else:
+            error_logger.error(
+                "LLM error (%s): %s", type(last_exception).__name__, last_exception, exc_info=True
+            )
+            yield TextDeltaEvent(
+                content="I'm sorry, but an error occurred while trying to communicate with the AI model, and your request cannot proceed.",
+                message_id=text_message_id,
+                delta=False,
+                section=section,
+            )
+
+        if agent_span and agent_span.is_recording():
+            agent_span.record_exception(last_exception)
+
+
     async def ask(
         self,
         message: str | Text,
@@ -581,92 +664,10 @@ class Agent:
                     break
 
             if last_exception is not None:
-                # Determine error message based on exception type
-                if isinstance(last_exception, RateLimitError):
-                    error_logger.error(
-                        f"Rate limit exceeded: {str(last_exception)}",
-                        exc_info=True
-                    )
-                    # Toast: short technical message
-                    yield AgentError(
-                        message="Rate limit exceeded",
-                        recoverable=False,
-                        error_type="rate_limit",
-                        section="final_response" if turn_state.final_response_started else "analysis",
-                    )
-                    rate_limit_user_msg = (
-                        "We're currently in beta and experiencing high demand. "
-                        "The AI model has hit its rate limit, please wait a moment and try again. "
-                        "This is expected during peak usage and will be resolved as we scale."
-                    )
-                    yield TextDeltaEvent(
-                        content=rate_limit_user_msg,
-                        message_id=text_message_id,
-                        delta=False,
-                        section="final_response",
-                    )
-                elif isinstance(last_exception, Timeout):
-                    error_logger.error(
-                        f"Request timeout: {str(last_exception)}",
-                        exc_info=True
-                    )
-                    # Toast: short technical message
-                    yield AgentError(
-                        message="Request timeout",
-                        recoverable=False,
-                        error_type="timeout",
-                        section="final_response" if turn_state.final_response_started else "analysis",
-                    )
-                    timeout_user_msg = (
-                        "The AI model took too long to respond, please wait a moment and try again. "
-                        "We're currently in beta and this will be resolved as we improve the service."
-                    )
-                    yield TextDeltaEvent(
-                        content=timeout_user_msg,
-                        message_id=text_message_id,
-                        delta=False,
-                        section="final_response",
-                    )
-                elif isinstance(last_exception, ServiceUnavailableError) or (
-                    isinstance(last_exception, APIError) and "unavailable" in str(last_exception).lower()
+                async for event in self._handle_llm_error(
+                    last_exception, text_message_id, turn_state, agent_span
                 ):
-                    error_logger.error(
-                        f"Model unavailable: {str(last_exception)}",
-                        exc_info=True
-                    )
-                    yield AgentError(
-                        message="Model unavailable",
-                        recoverable=False,
-                        error_type="unavailable",
-                        section="final_response" if turn_state.final_response_started else "analysis",
-                    )
-                    model_unavailable_user_msg = (
-                        "The selected AI model is currently unavailable. "
-                        "Please try again in a moment or select a different model."
-                    )
-                    yield TextDeltaEvent(
-                        content=model_unavailable_user_msg,
-                        message_id=text_message_id,
-                        delta=False,
-                        section="final_response",
-                    )
-                else:
-                    error_logger.error(
-                        f"LLM error ({type(last_exception).__name__}): {str(last_exception)}",
-                        exc_info=True
-                    )
-                    error_msg = "I'm sorry, but an error occurred while trying to communicate with the AI model, and your request cannot proceed."
-                    yield TextDeltaEvent(
-                        content=error_msg,
-                        message_id=text_message_id,
-                        delta=False,
-                        section="final_response" if turn_state.final_response_started else "analysis",
-                    )
-                
-                # Record error on span
-                if agent_span and agent_span.is_recording():
-                    agent_span.record_exception(last_exception)
-                
+                    yield event
                 break
 
             if response is None or len(response.choices) == 0:
