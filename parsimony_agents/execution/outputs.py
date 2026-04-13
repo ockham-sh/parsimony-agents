@@ -306,7 +306,7 @@ class KernelOutput(MessageContent):
                 "text": "Out:\n---\n",
             }
         ]
-        for enum, output in enumerate(self.outputs):
+        for output in self.outputs:
             blocks.extend(output.to_llm(mode=mode))
             blocks.append(
                 {

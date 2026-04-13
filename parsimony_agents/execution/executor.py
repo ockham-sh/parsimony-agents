@@ -7,6 +7,7 @@ import asyncio
 import builtins
 import inspect
 import io
+import logging
 import os
 import secrets
 import string
@@ -14,6 +15,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from typing import Any, Protocol, runtime_checkable
+
+logger = logging.getLogger("parsimony_agents")
 
 import altair as alt
 import numpy as np
@@ -51,7 +54,7 @@ _SAFE_BUILTINS: dict[str, object] = {
         "abs", "all", "any", "divmod", "filter", "map", "max", "min",
         "pow", "reversed", "sum", "zip",
         # I/O safe subset (print is overridden by capturer at call time)
-        "format", "input", "print",
+        "format", "print",
         # exceptions
         "ArithmeticError", "AssertionError", "AttributeError", "BaseException",
         "BlockingIOError", "BrokenPipeError", "BufferError", "BytesWarning",
@@ -285,7 +288,7 @@ class CodeExecutor(BaseCodeExecutor):
             return
         original = os.getcwd()
         try:
-            os.chdir(path)
+            os.chdir(path)  # TODO: replace with absolute path construction to avoid process-global mutation
             yield
         finally:
             os.chdir(original)
@@ -401,7 +404,7 @@ class CodeExecutor(BaseCodeExecutor):
                     try:
                         con.close()
                     except Exception:
-                        pass
+                        logger.debug("Failed to close DuckDB connection", exc_info=True)
 
     def get_locals(self) -> dict[str, Any]:
         return {

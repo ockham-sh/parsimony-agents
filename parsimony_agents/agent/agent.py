@@ -6,7 +6,7 @@ import logging
 import re
 import tempfile
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -21,26 +21,19 @@ from pydantic import TypeAdapter
 from parsimony_agents.agent.config import AgentConfig, AgentGuardrails, FileStore
 from parsimony_agents.agent.events import (
     AgentError,
-    StateSnapshot,
-    ToolEvent,
-)
-from parsimony_agents.agent.events import (
     ReasoningDelta as ReasoningDeltaEvent,
-)
-from parsimony_agents.agent.events import (
+    StateSnapshot,
     TextDelta as TextDeltaEvent,
+    ToolEvent,
 )
 from parsimony_agents.agent.helpers import (
     TurnState,
-)
-from parsimony_agents.agent.helpers import (
     parse_cell_ref as _parse_cell_ref,
-)
-from parsimony_agents.agent.helpers import (
     system_error as _system_error,
 )
 from parsimony_agents.agent.models import (
     AgentContext,
+    AgentContextSnapshot,
     AgentMessage,
     ReturnedChartState,
     ReturnedDatasetState,
@@ -71,12 +64,12 @@ from parsimony_agents.views import get_llm_view_defaults
 logger = logging.getLogger("parsimony_agents")
 error_logger = logging.getLogger("parsimony_agents.errors")
 
-litellm.REPEATED_STREAMING_CHUNK_LIMIT = 100
+litellm.REPEATED_STREAMING_CHUNK_LIMIT = 100  # TODO: Monitor how many repeated chunks appear naturally before hitting the limit
 
 # ---------------------------------------------------------------------------
 # Agent defaults
 # ---------------------------------------------------------------------------
-_DRY_EXECUTE_DEFAULT_TIMEOUT_S: float = 120.0  # Default sandbox timeout for dry_execute_code  # TODO: Monitor how many repeated chunks appear naturally before hitting the limit
+_DRY_EXECUTE_DEFAULT_TIMEOUT_S: float = 120.0  # Default sandbox timeout for dry_execute_code
 
 
 def _serialize_and_hash_object(obj: Any) -> int:
@@ -243,7 +236,7 @@ class Agent:
         self.code_executor = resolved_executor
         self._output_factory = output_factory
 
-        self.figures = []
+        self.figures: list[FigureObject] = []
 
         self.system_tools = Tools(
             [
@@ -302,7 +295,7 @@ class Agent:
         text_message_id: str,
         turn_state: TurnState,
         agent_span: Any,
-    ) -> AsyncGenerator[Any, None]:
+    ) -> AsyncIterator[AgentError | TextDeltaEvent]:
         """Classify an LLM exception and yield the appropriate error/text events.
 
         Handles RateLimitError, Timeout, ServiceUnavailableError, APIError, and
@@ -555,7 +548,7 @@ class Agent:
 
 
             response = None
-            last_exception = None
+            last_exception: Exception | None = None
             for attempt in range(self.guardrails.llm_max_retries + 1):
 
                 try:
@@ -759,6 +752,7 @@ class Agent:
                     t_type: str,
                     raw_args: dict,
                     timeout_s: float,
+                    tools: dict = tools,
                 ):
                     @trace_tool_execution(name, t_type, logger, error_logger, timeout_s)
                     async def _execute():
@@ -1090,7 +1084,7 @@ class Agent:
         tool_type="system",
         ui_message=None
     )
-    async def get_context(self, *, context: AgentContext) -> AgentContext:
+    async def get_context(self, *, context: AgentContext) -> AgentContextSnapshot:
         """Return a serializable snapshot of the current agent context (tool)."""
         context_snapshot = await context.to_snapshot()
         return context_snapshot
