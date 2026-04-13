@@ -71,7 +71,12 @@ from parsimony_agents.views import get_llm_view_defaults
 logger = logging.getLogger("parsimony_agents")
 error_logger = logging.getLogger("parsimony_agents.errors")
 
-litellm.REPEATED_STREAMING_CHUNK_LIMIT = 100  # TODO: Monitor how many repeated chunks appear naturally before hitting the limit
+litellm.REPEATED_STREAMING_CHUNK_LIMIT = 100
+
+# ---------------------------------------------------------------------------
+# Agent defaults
+# ---------------------------------------------------------------------------
+_DRY_EXECUTE_DEFAULT_TIMEOUT_S: float = 120.0  # Default sandbox timeout for dry_execute_code  # TODO: Monitor how many repeated chunks appear naturally before hitting the limit
 
 
 def _serialize_and_hash_object(obj: Any) -> int:
@@ -248,13 +253,13 @@ class Agent:
         global_cap = self.guardrails.tool_timeout_s
         if tool_name != "dry_execute_code":
             return global_cap
-        raw_timeout = raw_args.get("timeout_seconds", 120.0)
+        raw_timeout = raw_args.get("timeout_seconds", _DRY_EXECUTE_DEFAULT_TIMEOUT_S)
         try:
             requested = float(raw_timeout)
         except (TypeError, ValueError):
-            requested = 120.0
+            requested = _DRY_EXECUTE_DEFAULT_TIMEOUT_S
         if requested <= 0:
-            requested = 120.0
+            requested = _DRY_EXECUTE_DEFAULT_TIMEOUT_S
         return min(requested, global_cap)
 
     @staticmethod
@@ -1314,7 +1319,7 @@ class Agent:
         self,
         *,
         code: str,
-        timeout_seconds: float = 120.0,
+        timeout_seconds: float = _DRY_EXECUTE_DEFAULT_TIMEOUT_S,
         context: AgentContext,
     ) -> UtilityToolOutput:
         """Execute exploratory code in a sandboxed copy without modifying notebooks (tool)."""

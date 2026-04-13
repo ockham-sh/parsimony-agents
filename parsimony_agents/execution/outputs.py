@@ -20,6 +20,13 @@ from parsimony_agents.theme import PARSIMONY_FIGURE_HEIGHT, PARSIMONY_FIGURE_WID
 from parsimony_agents.util import truncate_text
 from parsimony_agents.views import get_llm_view_defaults
 
+# ---------------------------------------------------------------------------
+# Named constants
+# ---------------------------------------------------------------------------
+_DATAFRAME_FULL_SHOW_THRESHOLD = 10  # Rows at or below this count: show all; above: show head + tail
+_DATAFRAME_HEAD_TAIL_SIZE = 5        # Number of rows in head/tail preview slices
+_DEFAULT_MAX_CELL_LENGTH = 1000      # Fallback max characters per cell in LLM output
+
 
 class BaseOutputObject(MessageContent):
     class Config:
@@ -65,9 +72,9 @@ class DataFrameObject(BaseOutputObject):
         column_to_drop = self.value.index.name if self.value.index.name is not None else "index"
         value = self.value.drop(columns=[column_to_drop], errors="ignore")
 
-        if len(value) <= 10:
+        if len(value) <= _DATAFRAME_FULL_SHOW_THRESHOLD:
             return json.loads(value.to_json(orient="table"))
-        return json.loads(value.head(5).to_json(orient="table"))
+        return json.loads(value.head(_DATAFRAME_HEAD_TAIL_SIZE).to_json(orient="table"))
 
     @computed_field
     @property
@@ -75,9 +82,9 @@ class DataFrameObject(BaseOutputObject):
         column_to_drop = self.value.index.name if self.value.index.name is not None else "index"
         value = self.value.drop(columns=[column_to_drop], errors="ignore")
 
-        if len(value) <= 10:
+        if len(value) <= _DATAFRAME_FULL_SHOW_THRESHOLD:
             return None
-        return json.loads(value.tail(5).to_json(orient="table"))
+        return json.loads(value.tail(_DATAFRAME_HEAD_TAIL_SIZE).to_json(orient="table"))
 
     def to_llm(self, mode: Literal["default", "minimal"] = "default", overrides: dict[str, Any] | None = None):
         overrides = overrides or {}
@@ -94,7 +101,7 @@ class DataFrameObject(BaseOutputObject):
         paginator = TablePaginator(self.value, rows_per_page=view_cfg.page_rows, show_dtypes=view_cfg.show_dtypes)
         max_cell = getattr(view_cfg, "max_cell_length", None)
         if max_cell is None:
-            max_cell = 1000
+            max_cell = _DEFAULT_MAX_CELL_LENGTH
         page_blocks = "\n".join(
             paginator.iter_pages(view_cfg.display_pages, na_rep="<NULL>", max_cell_length=max_cell)
         )
