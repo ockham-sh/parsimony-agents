@@ -18,7 +18,7 @@ from litellm.exceptions import APIError, InternalServerError, RateLimitError, Se
 from opentelemetry import trace
 from pydantic import TypeAdapter
 
-from parsimony_agents.agent.config import AgentGuardrails, FileStore
+from parsimony_agents.agent.config import AgentConfig, AgentGuardrails, FileStore
 from parsimony_agents.agent.events import (
     AgentError,
     StateSnapshot,
@@ -45,7 +45,6 @@ from parsimony_agents.agent.models import (
     ReturnedChartState,
     ReturnedDatasetState,
 )
-from parsimony_agents.notebook import Script
 from parsimony_agents.agent.outputs import SystemToolMessage, SystemToolOutput, UtilityToolOutput
 from parsimony_agents.agent.tracing import trace_tool_execution
 from parsimony_agents.artifacts import (
@@ -62,6 +61,7 @@ from parsimony_agents.execution import (
 from parsimony_agents.execution.executor import BaseCodeExecutor
 from parsimony_agents.execution.factory import OutputFactory as FrameworkOutputFactory
 from parsimony_agents.messages import Message, Text, blocks_to_text
+from parsimony_agents.notebook import Script
 from parsimony_agents.rag.keyword_store import get_or_create_session_keyword_store
 from parsimony_agents.rag.vector_store import get_or_create_session_vector_store
 from parsimony_agents.tools import Tools, toolmethod
@@ -172,17 +172,38 @@ class Agent:
         model: str | None = None,
         api_key: str | None = None,
         connectors: Any | None = None,
-        # --- Explicit params (product / power usage) ---
+        # --- Expert bundle (product / power usage) ---
+        config: AgentConfig | None = None,
+        # --- Explicit params (override config or use standalone) ---
         model_config: dict[str, Any] | None = None,
         instructions: str | None = None,
         code_executor: BaseCodeExecutor | None = None,
         output_factory: FrameworkOutputFactory | None = None,
-        guardrails: AgentGuardrails = AgentGuardrails(),
+        guardrails: AgentGuardrails | None = None,
         session_id: str | None = None,
         file_store: FileStore | None = None,
     ):
         from parsimony_agents.agent.prompts import DEFAULT_DATA_ANALYSIS_PROMPT
         from parsimony_agents.execution.executor import CodeExecutor as _LocalExecutor
+
+        # Unpack AgentConfig bundle (individual kwargs always take precedence)
+        if config is not None:
+            if model_config is None:
+                model_config = config.model_config
+            if instructions is None:
+                instructions = config.instructions
+            if code_executor is None:
+                code_executor = config.code_executor
+            if output_factory is None:
+                output_factory = config.output_factory
+            if guardrails is None:
+                guardrails = config.guardrails
+            if session_id is None:
+                session_id = config.session_id
+            if file_store is None:
+                file_store = config.file_store
+        if guardrails is None:
+            guardrails = AgentGuardrails()
 
         # Resolve model_config: explicit > built from model= convenience param
         if model_config is not None:
