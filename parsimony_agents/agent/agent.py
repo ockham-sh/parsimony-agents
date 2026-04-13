@@ -657,10 +657,7 @@ class Agent:
                     # Catch all other exceptions (e.g., APIConnectionError, TypeError, etc.)
                     last_exception = e
                     # Log for debugging but don't retry on unexpected errors
-                    error_logger.error(
-                        f"Unexpected error calling LLM: {str(e)}",
-                        exc_info=True
-                    )
+                    error_logger.error("Unexpected error calling LLM: %s", e, exc_info=True)
                     break
 
             if last_exception is not None:
@@ -793,7 +790,7 @@ class Agent:
                     repeat_count = sum(1 for sig in tool_call_history if sig == call_signature)
 
                     if repeat_count == 6:
-                        logger.warning(f"Loop detected: {tool_name} called {repeat_count + 1} times with same args", extra={
+                        logger.warning("Loop detected: %s called %d times with same args", tool_name, repeat_count + 1, extra={
                             "tool_name": tool_name,
                             "repeat_count": repeat_count + 1
                         })
@@ -809,7 +806,7 @@ class Agent:
                         turn_state.stopped = True
                         continue
                     elif repeat_count >= 2:
-                        logger.warning(f"Loop suspected: {tool_name} called {repeat_count + 1} times with same args", extra={
+                        logger.warning("Loop suspected: %s called %d times with same args", tool_name, repeat_count + 1, extra={
                             "tool_name": tool_name,
                             "repeat_count": repeat_count + 1
                         })
@@ -1059,11 +1056,13 @@ class Agent:
         # Log agent run completion (after while loop ends)
         total_time = time.time() - start_time
         logger.info(
-            f"Agent run completed in {total_time:.3f}s after {iteration_count} iterations",
+            "Agent run completed in %.3fs after %d iterations",
+            total_time,
+            iteration_count,
             extra={
                 "duration_s": total_time,
-                "iterations": iteration_count
-            }
+                "iterations": iteration_count,
+            },
         )
         
         # Record final metrics on span (span created at router level)
