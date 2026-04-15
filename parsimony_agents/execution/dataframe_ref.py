@@ -160,6 +160,18 @@ class DataframeRef(BaseModel):
                 dataframe = dataframe.to_frame()
 
         local_path.parent.mkdir(parents=True, exist_ok=True)
+        # Coerce object-dtype columns that contain mixed Timestamps/datetimes
+        # to a proper datetime64 dtype so Arrow/Parquet serialization succeeds.
+        # Copy to avoid mutating the caller's DataFrame.
+        needs_copy = any(dataframe[c].dtype == object for c in dataframe.columns)
+        if needs_copy:
+            dataframe = dataframe.copy()
+            for col in dataframe.columns:
+                if dataframe[col].dtype == object:
+                    try:
+                        dataframe[col] = pd.to_datetime(dataframe[col])
+                    except (ValueError, TypeError):
+                        pass
         with tempfile.NamedTemporaryFile(delete=False, dir=local_path.parent, suffix=".parquet") as tmp:
             tmp_path = tmp.name
             dataframe.to_parquet(tmp_path, index=True)
