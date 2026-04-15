@@ -57,7 +57,7 @@ from parsimony_agents.messages import Message, Text, blocks_to_text
 from parsimony_agents.notebook import Script
 from parsimony_agents.rag.keyword_store import get_or_create_session_keyword_store
 from parsimony_agents.rag.vector_store import get_or_create_session_vector_store
-from parsimony_agents.tools import Tools, toolmethod
+from parsimony_agents.tools import Tool, Tools, toolmethod
 from parsimony_agents.variable import Variable, VariableStore
 from parsimony_agents.views import get_llm_view_defaults
 
@@ -74,6 +74,55 @@ _DRY_EXECUTE_DEFAULT_TIMEOUT_S: float = 120.0  # Default sandbox timeout for dry
 
 def _serialize_and_hash_object(obj: Any) -> int:
     return hash(json.dumps(obj, sort_keys=True))
+
+
+def _connector_to_agent_tool(connector: Any) -> Tool:
+    """Bridge a parsimony ``Connector`` to an agent :class:`Tool` (utility type).
+
+    The tool calls the connector directly (no code execution), serialises
+    the :class:`~parsimony.result.Result` to markdown, and wraps it in a
+    :class:`UtilityToolOutput` for the agent loop.
+    """
+    schema: dict[str, Any] = dict(connector.param_schema)
+    schema.pop("$defs", None)
+    schema.pop("title", None)
+
+    async def _call(**kwargs: Any) -> UtilityToolOutput:
+        # Strip framework-injected keys (e.g. 'context') that the connector
+        # param model doesn't accept.
+        kwargs.pop("context", None)
+        result = await connector(**kwargs)
+        data = result.data
+        if isinstance(data, pd.DataFrame):
+            df = data.head(50)
+            text = df.to_markdown(index=False)
+            if len(data) > 50:
+                text += f"\n({len(data) - 50} more rows omitted)"
+        elif isinstance(data, pd.Series):
+            text = data.to_markdown()
+        else:
+            text = str(data)
+        metadata: dict[str, Any] = {
+            "source": result.provenance.source,
+            "source_description": result.provenance.source_description,
+            "source_tool": connector.name,
+            "source_tool_description": connector.description,
+            "source_tool_args": result.provenance.params,
+        }
+        return UtilityToolOutput(
+            ui_message=connector.name,
+            metadata=metadata,
+            content=Text(content=text),
+        )
+
+    return Tool(
+        function=_call,
+        name=connector.name,
+        description=connector.description,
+        parameters_schema=schema,
+        tool_type="utility",
+        ui_message=f"Running {connector.name}…",
+    )
 
 
 
@@ -213,8 +262,20 @@ class Agent:
             resolved_instructions = instructions
         else:
             resolved_instructions = DEFAULT_DATA_ANALYSIS_PROMPT
+
+        # Split connectors: tool-tagged → direct agent tools,
+        # non-tool → described in system prompt for code use.
+        # ALL connectors remain in client for code execution.
+        connector_tools: list[Tool] = []
         if connectors is not None:
-            resolved_instructions += connectors.to_llm()
+            tool_tagged = list(connectors.filter(tags=["tool"]))
+            if tool_tagged:
+                tool_names = {c.name for c in tool_tagged}
+                non_tool = type(connectors)([c for c in connectors if c.name not in tool_names])
+                resolved_instructions += non_tool.to_llm()
+                connector_tools = [_connector_to_agent_tool(c) for c in tool_tagged]
+            else:
+                resolved_instructions += connectors.to_llm()
 
         # Resolve output_factory first (executor depends on it)
         output_factory = (
@@ -248,6 +309,7 @@ class Agent:
                 self.output_read,
                 self.output_search,
                 self.get_context,
+                *connector_tools,
             ]
         )
 

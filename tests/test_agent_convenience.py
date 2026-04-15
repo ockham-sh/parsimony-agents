@@ -95,16 +95,20 @@ class TestAgentConvenience:
     def test_connectors_appends_dynamic_catalog(self):
         mock_connectors = MagicMock()
         mock_connectors.to_llm.return_value = "\n## Data connectors\n\nclient catalog here\n"
+        # filter(tags=["tool"]) returns empty — no tool-tagged connectors
+        mock_tool_tagged = MagicMock()
+        mock_tool_tagged.__iter__ = MagicMock(return_value=iter([]))
+        mock_connectors.filter.return_value = mock_tool_tagged
         agent = Agent(model="test-model", connectors=mock_connectors)
         assert agent.instructions.startswith(DEFAULT_DATA_ANALYSIS_PROMPT)
         assert "client catalog here" in agent.instructions
         mock_connectors.to_llm.assert_called_once()
         assert agent._connectors is mock_connectors
 
-    def test_no_connectors_omits_connector_prompt(self):
+    def test_no_connectors_omits_connector_catalog(self):
         agent = Agent(model="test-model")
         assert agent.instructions == DEFAULT_DATA_ANALYSIS_PROMPT
-        assert "client" not in agent.instructions
+        assert "## Connectors" not in agent.instructions
 
 
 # ---------------------------------------------------------------------------
