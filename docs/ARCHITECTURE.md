@@ -216,7 +216,36 @@ output_factory.register(MyArtifact)
 
 ## Configuration
 
-### Agent Configuration
+### AgentConfig Bundle
+
+For product integrations that reuse the same expert-level settings, `AgentConfig` consolidates 7 constructor parameters into a single dataclass:
+
+```python
+from parsimony_agents.agent import AgentConfig, AgentGuardrails
+
+config = AgentConfig(
+    model_config={"model": "claude-sonnet-4-6", "api_key": "..."},
+    instructions="Custom system prompt...",
+    code_executor=CodeExecutor(...),
+    output_factory=OutputFactory(...),
+    guardrails=AgentGuardrails(max_iterations=30),
+    session_id="my-session",
+    file_store=my_file_store,
+)
+
+agent = Agent(config=config, connectors=my_connectors)
+```
+
+Explicit keyword arguments always take precedence over `config` values, so you can override individual settings:
+
+```python
+# Uses config for everything except instructions
+agent = Agent(config=config, instructions="Override prompt")
+```
+
+### Agent Configuration (direct kwargs)
+
+All `AgentConfig` fields can also be passed directly as keyword arguments:
 
 ```python
 agent = Agent(
@@ -748,7 +777,7 @@ Default dimensions: width=640, height=400. Charts produced in a different size w
 ```
 parsimony_agents (public API)
 ├── agent/agent.py              ← core loop, all tool implementations
-│   ├── agent/config.py         ← AgentGuardrails, FileStore protocol
+│   ├── agent/config.py         ← AgentConfig, AgentGuardrails, FileStore protocol
 │   ├── agent/events.py         ← AgentEvent subclasses (streaming protocol)
 │   ├── agent/models.py         ← AgentContext, AgentContextSnapshot
 │   │   └── [imports scipy, statsmodels, opentelemetry unconditionally]
