@@ -35,10 +35,46 @@ from parsimony_agents.theme import register_theme
 # Security: restrict the builtins available inside user-submitted code.
 # This executor runs code in-process; for full isolation a sandboxed environment
 # (e.g. a separate subprocess, container, or remote kernel) is required.
-# The allowlist below removes dangerous callables (open, __import__, exec, eval,
-# compile, os, subprocess, etc.) while preserving the builtins needed for normal
-# data-analysis work.
+# The allowlist below removes dangerous callables (open, exec, eval, compile,
+# etc.) while preserving the builtins needed for normal data-analysis work.
+# __import__ is replaced by _safe_import which only permits a whitelist of
+# safe stdlib modules (CPython internals like strftime trigger lazy imports).
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Restricted __import__: allow only modules that CPython's own C code may
+# lazily import (e.g. ``time`` via ``datetime.strftime``) plus a small set of
+# safe stdlib modules useful for data-analysis cells.
+# ---------------------------------------------------------------------------
+_IMPORT_ALLOWLIST: frozenset[str] = frozenset({
+    # Triggered internally by datetime.strftime / strptime
+    "time", "_strptime",
+    # Common stdlib used in data-analysis code
+    "math", "statistics", "decimal", "fractions",
+    "json", "csv", "re", "collections", "itertools", "functools",
+    "copy", "operator", "string", "textwrap",
+    # typing (pydantic / pandas internals may reference)
+    "typing", "typing_extensions",
+})
+
+
+def _safe_import(name: str, *args: object, **kwargs: object) -> object:
+    """Restricted ``__import__`` that only allows whitelisted modules.
+
+    CPython internally calls ``__import__`` for lazy stdlib imports
+    (e.g. ``datetime.strftime`` imports ``time``).  Blocking it entirely
+    causes cryptic ``KeyError: '__import__'`` for innocent user code.
+    This function permits known-safe modules and rejects everything else
+    with a clear error message.
+    """
+    if name in _IMPORT_ALLOWLIST:
+        return builtins.__import__(name, *args, **kwargs)
+    raise ImportError(
+        f"Importing {name!r} is not allowed in notebook cells. "
+        f"Use the pre-loaded modules (pd, np, alt, datetime, timedelta, timezone) "
+        f"or the client connector instead."
+    )
+
+
 _SAFE_BUILTINS: dict[str, object] = {
     name: getattr(builtins, name)
     for name in (
@@ -78,6 +114,7 @@ _SAFE_BUILTINS: dict[str, object] = {
     )
     if hasattr(builtins, name)
 }
+_SAFE_BUILTINS["__import__"] = _safe_import
 
 
 @runtime_checkable
