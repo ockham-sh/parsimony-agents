@@ -72,6 +72,26 @@ litellm.REPEATED_STREAMING_CHUNK_LIMIT = 100  # TODO: Monitor how many repeated 
 _DRY_EXECUTE_DEFAULT_TIMEOUT_S: float = 120.0  # Default sandbox timeout for dry_execute_code
 
 
+# Host-owned prose framing non-tool-tagged connectors for code execution.
+# The runtime owns this wording; the kernel's Connectors.to_llm only
+# composes per-connector cards underneath whatever header we pass.
+_CODE_HEADER = (
+    "\n# Data connectors (code execution)\n"
+    "\n"
+    "These connectors are available via `client` in the code executor. "
+    "They return full datasets as DataFrames — the data stays in the "
+    "execution environment, not in the conversation context.\n"
+    "\n"
+    "## How to use\n"
+    '- `result = await client["name"](param=value)` — returns Result '
+    "with .data and .provenance (source metadata).\n"
+    "- .data is usually a DataFrame; some connectors return text (noted in their description).\n"
+    "- Keyword arguments must match the connector's typed parameters.\n"
+    '- `client.filter(name="query")` narrows by name or description.\n'
+    "- **ONLY use connectors listed below. Do NOT invent connector names.**\n"
+)
+
+
 def _serialize_and_hash_object(obj: Any) -> int:
     return hash(json.dumps(obj, sort_keys=True))
 
@@ -272,10 +292,10 @@ class Agent:
             if tool_tagged:
                 tool_names = {c.name for c in tool_tagged}
                 non_tool = type(connectors)([c for c in connectors if c.name not in tool_names])
-                resolved_instructions += non_tool.to_llm()
+                resolved_instructions += non_tool.to_llm(header=_CODE_HEADER)
                 connector_tools = [_connector_to_agent_tool(c) for c in tool_tagged]
             else:
-                resolved_instructions += connectors.to_llm()
+                resolved_instructions += connectors.to_llm(header=_CODE_HEADER)
 
         # Resolve output_factory first (executor depends on it)
         output_factory = (
