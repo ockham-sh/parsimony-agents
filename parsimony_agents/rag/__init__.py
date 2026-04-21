@@ -6,7 +6,6 @@ and semantic (ChromaDB) retrieval with Reciprocal Rank Fusion.
 from __future__ import annotations
 
 import asyncio
-from typing import Dict, List, Optional
 
 import numpy as np
 from pydantic import BaseModel
@@ -139,7 +138,7 @@ async def hybrid_search(
 
     # Stage 2: Semantic re-ranking (precision)
     content_embeddings = await embed_texts([r.content for r in candidates])
-    for result, content_embedding in zip(candidates, content_embeddings):
+    for result, content_embedding in zip(candidates, content_embeddings, strict=True):
         emb = np.array(content_embedding)
         similarity = np.dot(query_embedding, emb) / (
             np.linalg.norm(query_embedding) * np.linalg.norm(emb)

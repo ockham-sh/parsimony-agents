@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Union
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
 
 class AgentEvent(BaseModel):
+    """Base class for all agent streaming events."""
+
     type: str
     section: Literal["analysis", "final_response"] = "analysis"
 
 
 class TextDelta(AgentEvent):
+    """Incremental text chunk from the assistant response."""
+
     type: Literal["text_delta"] = "text_delta"
     content: str
     message_id: str
@@ -20,6 +24,8 @@ class TextDelta(AgentEvent):
 
 
 class ReasoningDelta(AgentEvent):
+    """Incremental reasoning/thinking token from a model with extended thinking."""
+
     type: Literal["reasoning_delta"] = "reasoning_delta"
     content: str
     message_id: str
@@ -28,6 +34,8 @@ class ReasoningDelta(AgentEvent):
 
 
 class ToolEvent(AgentEvent):
+    """Event emitted when a tool call starts or completes."""
+
     type: Literal["tool_event"] = "tool_event"
     tool_name: str
     tool_call_id: str
@@ -39,15 +47,19 @@ class ToolEvent(AgentEvent):
 
 
 class StateSnapshot(AgentEvent):
+    """Full AgentContext snapshot emitted at the start of each run and after state changes."""
+
     type: Literal["state_snapshot"] = "state_snapshot"
     context: Any  # AgentContext (Any avoids circular import)
 
 
 class AgentError(AgentEvent):
+    """Fatal or recoverable error encountered during the agent run."""
+
     type: Literal["error"] = "error"
     message: str
     recoverable: bool = False
     error_type: str | None = None
 
 
-AgentEventUnion = Union[TextDelta, ReasoningDelta, ToolEvent, StateSnapshot, AgentError]
+AgentEventUnion = TextDelta | ReasoningDelta | ToolEvent | StateSnapshot | AgentError

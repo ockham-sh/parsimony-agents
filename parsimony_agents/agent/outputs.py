@@ -10,6 +10,8 @@ from parsimony_agents.variable import Variable
 
 
 class UtilityToolOutput(MessageContent):
+    """Tool output shown in the UI for utility (non-code, non-return) tool calls."""
+
     type: Literal["utility_tool_output"] = "utility_tool_output"
     ui_message: str
     ui_message_completed: str | None = None
@@ -17,11 +19,13 @@ class UtilityToolOutput(MessageContent):
     content: Variable | KernelOutput | Text | None = None
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
+        """Serialize content to LLM message blocks."""
         if self.content is None:
             return []
         return self.content.to_llm(mode=mode)
 
     def to_frontend_dict(self) -> dict[str, Any]:
+        """Serialize to frontend-consumable dict including content payload."""
         dump = self.model_dump(mode="json", exclude={"content"})
         dump["content"] = self.content.to_frontend_dict() if self.content is not None else None
         return dump

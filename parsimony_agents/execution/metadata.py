@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal, Union
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -30,4 +30,4 @@ class DatasetRefreshRecipe(BaseModel):
 
 RefreshStatus = Literal["idle", "running", "failed"]
 
-PrimitiveTypes = Union[str, int, float, bool, None]
+PrimitiveTypes = str | int | float | bool | None

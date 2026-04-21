@@ -193,6 +193,20 @@ Pass any LiteLLM-compatible model string to `Agent(model="...")`.
 
 **Streaming not printing**: Use `stream_to_display()` for formatted terminal output, or iterate `agent.run()` events manually.
 
+## Documentation
+
+Comprehensive guides for developing, deploying, and operating parsimony-agents:
+
+**[Start with Documentation Index →](docs/index.md)** — Choose your path by role (API developer, operations, architect, contributor)
+
+| Guide | Purpose |
+|-------|---------|
+| [**ARCHITECTURE.md**](docs/ARCHITECTURE.md) | System design, components, data flow, extension points |
+| [**API.md**](docs/API.md) | Complete API reference for Agent, CodeExecutor, artifacts, and tools |
+| [**RUNBOOK.md**](docs/RUNBOOK.md) | Deployment, monitoring, performance tuning, and troubleshooting |
+| [**COMMANDS.md**](docs/COMMANDS.md) | Development commands: testing, linting, building, packaging |
+| [**CODEMAPS.md**](docs/CODEMAPS.md) | Code structure, module organization, and public API exports |
+
 ## License
 
 Apache 2.0

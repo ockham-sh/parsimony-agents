@@ -1,7 +1,7 @@
 """Agent-facing models, helpers, and tracing (no FastAPI / SSE)."""
 
 from parsimony_agents.agent.agent import Agent
-from parsimony_agents.agent.config import AgentGuardrails, FileStore
+from parsimony_agents.agent.config import AgentConfig, AgentGuardrails, FileStore
 from parsimony_agents.agent.events import (
     AgentError,
     AgentEvent,
@@ -31,6 +31,7 @@ __all__ = [
     "AgentContextSnapshot",
     "AgentError",
     "AgentEvent",
+    "AgentConfig",
     "AgentGuardrails",
     "AgentMessage",
     "AgentMessageContent",

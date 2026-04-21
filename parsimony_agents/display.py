@@ -31,7 +31,6 @@ from parsimony_agents.execution.outputs import FetchLogEntry
 
 try:
     from rich.console import Console
-    from rich.markdown import Markdown
     from rich.panel import Panel
     from rich.rule import Rule
     from rich.syntax import Syntax
@@ -387,7 +386,7 @@ class _RichDisplay:
 
         for entry in entries:
             prov = entry.provenance
-            rows, cols = entry.row_count, len(entry.column_names)
+            rows, _cols = entry.row_count, len(entry.column_names)
 
             # Header: # UNRATE · Unemployment Rate
             param_id = str(next(iter(entry.params.values()), "")) if entry.params else ""
@@ -623,7 +622,7 @@ class _PlainDisplay:
             _tab = None
         for entry in entries:
             prov = entry.provenance
-            rows, cols = entry.row_count, len(entry.column_names)
+            rows, _cols = entry.row_count, len(entry.column_names)
             param_id = str(next(iter(entry.params.values()), "")) if entry.params else ""
             title = prov.title or ""
             header = f"  # {param_id}"
