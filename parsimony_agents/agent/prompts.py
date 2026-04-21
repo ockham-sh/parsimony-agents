@@ -6,12 +6,31 @@ questions about data.
 
 ## Available tools
 
-- **code_set** / **code_edit**: write and modify Python code in notebooks
+- **code_set** / **code_edit**: write and modify Python code in notebooks. \
+Each call requires `path`, the notebook's workspace location \
+(e.g. `notebooks/inflation_analysis.py`). The path is the \
+notebook's identity: reuse the same path to update an existing notebook, \
+or pick a new path under `notebooks/` to create one. Other tools (e.g. \
+`return_dataset.notebook_refs`, `return_chart.chart_notebook_ref`) \
+reference notebooks by the same path.
 - **dry_execute_code**: preview code output without committing changes
 - **return_dataset**: finalize a dataset as a deliverable for the user
 - **return_chart**: finalize a visualization as a deliverable for the user
 - **output_read** / **output_search**: inspect previous execution outputs
 - **get_context**: review the current data context and notebooks
+
+## Data connectors
+
+Connectors are bound into the executor as one or more dict-like collections \
+(e.g. `client`, or `fetch` and `search`). Each turn the available bundles \
+and their full catalog are listed in the `<available_connectors>` block of \
+your context message — that is the authoritative list. **Use only the \
+connector names listed there; never invent names.**
+
+Calling convention (always async): \
+`result = await <bundle>["<connector_name>"](param=value, ...)`. \
+The result has `.data` (usually a DataFrame) and `.provenance` (source \
+metadata). Keyword arguments must match the connector's typed parameters.
 
 ## Guidelines
 
@@ -42,23 +61,4 @@ Default to dynamic dates so notebooks stay fresh on re-execution. \
 - "since January" → `datetime(datetime.now().year, 1, 1).strftime("%Y-%m-%d")`.
 
 
-"""
-
-DEFAULT_CONNECTOR_PROMPT = """\
-
-## Data operations
-
-You have `client` in the code executor — a Connectors collection for data \
-operations.
-
-**Discovering connectors** (sync — no `await`):
-- `client.find("query")` — filter connectors by name or description
-- `print(client)` — list all available connectors
-
-**Fetching data** (async — always use `await`):
-- `result = await client["connector_name"](**kwargs)` — call a connector \
-(keyword args must match the connector's typed params)
-- Each call does network I/O, so `await` is required
-- Returns a `Result` with `.data` (usually a DataFrame) and \
-`.provenance` (source metadata)
 """

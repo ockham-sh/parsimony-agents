@@ -594,11 +594,14 @@ class FetchLogEntry(BaseModel):
     column_names: list[str]
     columns: list[dict[str, Any]]
     provenance: Provenance
-    head: dict[str, Any] | None   # nullable
-    tail: dict[str, Any] | None   # nullable
+    head: dict[str, Any] | None       # nullable
+    tail: dict[str, Any] | None       # nullable
+    workspace_path: str | None        # set when the executor has a data-object persister
 ```
 
 Records a single data fetch performed inside the sandbox (via the `client` connector wrapper). `head` and `tail` are `None` when the dataset has 10 or fewer rows.
+
+When the executor is wired with a [`make_data_object_persister`](#make_data_object_persister) (the default in the terminal host), the result is also written to a content-addressed parquet under `<workspace>/.ockham/data_objects/<sha>.parquet`; that workspace-relative path is stamped on `workspace_path` and lets viewers render the entry as a clickable artifact (path is identity).
 
 ### KernelOutput
 
@@ -788,17 +791,13 @@ class Chart(MessageContent):
     artifact_id: str
     version: int
     title: str
-    source_dataset_artifact_id: str
-    source_dataset_variable_name: str
-    source_dataset_version: int
-    latest_source_dataset_version: int
-    is_stale: bool             # True when source dataset has been updated
-    chart_variable_name: str
-    figure: FigureObject
+    source_dataset_path: str   # workspace path to the source dataset snapshot
     chart_notebook_ref: str
     description: str
     notes: list[str]
-    last_refreshed_at: datetime | None
 ```
 
-Published chart artifact wrapping a `FigureObject`. `is_stale` is `True` when the source dataset has been updated since the chart was generated.
+Published chart artifact. The source dataset is referenced by its
+workspace-relative snapshot path (path is identity); staleness is
+derived at card-build time from path resolution against the latest
+snapshot, not stored on the chart.

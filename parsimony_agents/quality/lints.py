@@ -237,6 +237,44 @@ class RollingLinter(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+class RawParquetIOLinter(ast.NodeVisitor):
+    """Soft lint discouraging raw parquet/JSON I/O for agent-curated artifacts.
+
+    The canonical idioms are ``return_dataset`` / ``return_chart`` (which
+    write open-format containers with embedded framework metadata via the
+    framework's I/O codecs). Direct ``df.to_parquet(...)`` /
+    ``pd.read_parquet(...)`` writes the same bytes but loses provenance,
+    curation, and the file ends up indistinguishable from arbitrary user
+    input. This lint surfaces such uses so the agent self-corrects toward
+    the typed path before a malformed artifact ships.
+    """
+
+    issues: list[str]
+
+    _BARE_WRITE_METHODS = ("to_parquet",)
+    _BARE_READ_FUNCTIONS = ("read_parquet",)
+
+    def __init__(self) -> None:
+        self.issues = []
+
+    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802 — ast hook name
+        if isinstance(node.func, ast.Attribute):
+            attr = node.func.attr
+            if attr in self._BARE_WRITE_METHODS:
+                self.issues.append(
+                    f"Line {node.lineno}: avoid `.{attr}(...)` for agent artifacts. "
+                    "Return curated outputs via `return_dataset` / `return_chart` so "
+                    "curation metadata is embedded in the file."
+                )
+            elif attr in self._BARE_READ_FUNCTIONS and _get_base_name(node.func.value) == "pd":
+                self.issues.append(
+                    f"Line {node.lineno}: prefer `Result.from_parquet(path)` over "
+                    "`pd.{attr}(path)` so embedded provenance round-trips into the "
+                    "Result wrapper.".format(attr=attr)
+                )
+        self.generic_visit(node)
+
+
 def check_code(code: str, type_map: dict[str, type] | None = None) -> list[str]:
     tree = ast.parse(code)
     issues: list[str] = []
@@ -247,5 +285,9 @@ def check_code(code: str, type_map: dict[str, type] | None = None) -> list[str]:
 
     index_policy = IndexPolicyLinter(type_map)
     issues.extend(index_policy.run(tree))
+
+    raw_io = RawParquetIOLinter()
+    raw_io.visit(tree)
+    issues.extend(raw_io.issues)
 
     return issues

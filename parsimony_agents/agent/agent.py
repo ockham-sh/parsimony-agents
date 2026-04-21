@@ -6,14 +6,16 @@ import logging
 import re
 import tempfile
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import litellm
 import pandas as pd
+from parsimony.connector import Connectors
+from parsimony.result import Result
 from litellm.exceptions import APIError, InternalServerError, RateLimitError, ServiceUnavailableError, Timeout
 from opentelemetry import trace
 from pydantic import TypeAdapter
@@ -51,6 +53,7 @@ from parsimony_agents.agent.tracing import trace_tool_execution
 from parsimony_agents.artifacts import (
     Chart,
     Dataset,
+    snapshot_path,
 )
 from parsimony_agents.execution import (
     DataFrameObject,
@@ -60,6 +63,7 @@ from parsimony_agents.execution import (
     StringPaginator,
 )
 from parsimony_agents.execution.executor import BaseCodeExecutor
+from parsimony_agents.execution.parquet_helpers import parquet_summary
 from parsimony_agents.execution.factory import OutputFactory as FrameworkOutputFactory
 from parsimony_agents.messages import Message, Text, blocks_to_text
 from parsimony_agents.rag.keyword_store import get_or_create_session_keyword_store
@@ -78,6 +82,22 @@ def _serialize_and_hash_object(obj: Any) -> int:
     return hash(json.dumps(obj, sort_keys=True))
 
 
+def _artifact_id_from_dataset_snapshot_path(path: str) -> str | None:
+    """Recover the source-dataset artifact id from a ``.ockham/cards/`` path.
+
+    Returns ``None`` when *path* is empty (no source link recorded yet) or
+    doesn't follow the ``.ockham/cards/<artifact_id>/v<n>.parquet`` shape;
+    the caller falls back to the session's active returned dataset.
+    """
+
+    if not path:
+        return None
+    parts = path.split("/")
+    if len(parts) >= 4 and parts[0] == ".ockham" and parts[1] == "cards":
+        return parts[2]
+    return None
+
+
 
 
 @dataclass
@@ -93,13 +113,13 @@ class AgentResult:
     """Concatenated assistant text (all ``TextDelta`` content)."""
 
     datasets: dict[str, Dataset] = field(default_factory=dict)
-    """Returned :class:`Dataset` objects keyed by variable name."""
+    """Returned :class:`Dataset` objects keyed by ``artifact_id``."""
 
     charts: dict[str, Chart] = field(default_factory=dict)
-    """Returned :class:`Chart` objects keyed by chart variable name."""
+    """Returned :class:`Chart` objects keyed by ``artifact_id``."""
 
     code: dict[str, Script] = field(default_factory=dict)
-    """Returned :class:`Script` objects keyed by notebook name (execution order preserved)."""
+    """Returned :class:`Script` objects keyed by notebook path (execution order preserved)."""
 
     context: AgentContext | None = None
     """Final :class:`AgentContext` — use for multi-turn continuation or inspection."""
@@ -121,20 +141,18 @@ class AgentResult:
         elif etype == "state_snapshot":
             self.context = event.context
             if self.context is not None:
-                for nb_name, nb in getattr(self.context, "notebooks", {}).items():
-                    self.code[nb_name] = nb
+                for nb_path, nb in getattr(self.context, "notebooks", {}).items():
+                    self.code[nb_path] = nb
         elif etype == "tool_event" and getattr(event, "completed", False):
             result = getattr(event, "result", None)
             if result is None:
                 return
             if isinstance(result, Dataset):
-                var_name = getattr(result, "variable_name", None)
-                if var_name:
-                    self.datasets[var_name] = result
+                if result.artifact_id:
+                    self.datasets[result.artifact_id] = result
             elif isinstance(result, Chart):
-                chart_name = getattr(result, "chart_variable_name", None)
-                if chart_name:
-                    self.charts[chart_name] = result
+                if result.artifact_id:
+                    self.charts[result.artifact_id] = result
 
 
 class Agent:
@@ -158,7 +176,7 @@ class Agent:
     """
 
     RETURN_TOOLS = ("return_dataset", "return_chart")
-    CODE_TOOL_NAMES = {"code_set", "code_edit", "dry_execute_code"}
+    CODE_TOOL_NAMES = {"code_set", "code_edit", "dry_execute_code", "execute"}
 
     def __init__(
         self,
@@ -189,13 +207,16 @@ class Agent:
                 "Agent requires either model_config={...} or model='model-name'"
             )
 
-        # Resolve instructions: explicit > default prompt; always append connector catalog
-        if instructions is not None:
-            resolved_instructions = instructions
-        else:
-            resolved_instructions = DEFAULT_DATA_ANALYSIS_PROMPT
-        if connectors is not None:
-            resolved_instructions += connectors.to_llm()
+        # Resolve instructions: explicit > default prompt. The connector catalog
+        # is *not* appended here — connectors live in the executor namespace and
+        # are advertised per-turn via AgentContextSnapshot.connectors_catalog,
+        # so the system prompt stays stable and cache-friendly.
+        resolved_instructions = instructions if instructions is not None else DEFAULT_DATA_ANALYSIS_PROMPT
+        if connectors is not None and not isinstance(connectors, (Connectors, Mapping)):
+            raise TypeError(
+                "connectors must be a Connectors or Mapping[str, Connectors]; "
+                f"got {type(connectors).__name__}"
+            )
 
         # Resolve output_factory first (executor depends on it)
         output_factory = (
@@ -224,6 +245,12 @@ class Agent:
                 self.code_set,
                 self.code_edit,
                 self.dry_execute_code,
+                self.write_file,
+                self.edit_file,
+                self.execute_workspace_tool,
+                self.read_file,
+                self.read_data,
+                self.list_files,
                 self.return_dataset,
                 self.return_chart,
                 self.output_read,
@@ -270,6 +297,19 @@ class Agent:
             **tool_args,
         }
 
+    @staticmethod
+    def _resolve_code_tool_path(tool_args: dict[str, Any]) -> str | None:
+        """Pull the canonical ``path`` parameter from a code tool's args.
+
+        Returns the trimmed path, or ``None`` when ``path`` is absent or
+        blank — the loop treats that as a contract error and replies with a
+        tool message instructing the agent to provide ``path``.
+        """
+        raw_path = tool_args.get("path")
+        if isinstance(raw_path, str) and raw_path.strip():
+            return raw_path.strip()
+        return None
+
     async def ask(
         self,
         message: str | Text,
@@ -300,6 +340,7 @@ class Agent:
         if self._connectors is None:
             return
         await self.code_executor.set_connectors(self._connectors)
+
 
     async def run(
         self,
@@ -388,7 +429,7 @@ class Agent:
         accumulated_reasoning = ""
         accumulated_duration = 0.0
 
-        context_snapshot = await ctx.to_snapshot()
+        context_snapshot = await ctx.to_snapshot(connectors=self._connectors)
 
         # filter previous context snapshots
         ctx.messages = [m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False]
@@ -453,12 +494,6 @@ class Agent:
                     reasoning_start_time = time.time()  # Track when reasoning started
 
                     request_model_config = dict(self.model_config)
-
-                    try:
-                        with open("ignored/llm_messages.json", "w") as f:
-                            json.dump(llm_messages, f)
-                    except OSError:
-                        pass
 
                     logger.info("Agent thinking", extra={"iteration": iteration_count, "attempt": attempt + 1})
                     response = await litellm.acompletion(
@@ -673,7 +708,6 @@ class Agent:
 
             # Log tool calls if any
             if _new_tool_calls:
-                tool_names = ", ".join([tc.function.name for tc in _new_tool_calls])
                 logger.info("Tool calls", extra={
                     "iteration": iteration_count,
                     "tool_names": [tc.function.name for tc in _new_tool_calls]
@@ -789,40 +823,33 @@ class Agent:
 
                     tool_type = tools[tool_name].tool_type
 
-                    # Code tools require a non-empty notebook_name. Fail fast before execution.
                     if tool_type == "code":
-                        notebook_name = tool_args.get("notebook_name")
-                        if not isinstance(notebook_name, str) or not notebook_name.strip():
+                        notebook_path = self._resolve_code_tool_path(tool_args)
+                        if notebook_path is None:
                             ctx.messages.append(
                                 AgentMessage(
                                     role="tool",
-                                    content="code_set and code_edit require a non-empty notebook_name. Provide a descriptive name (e.g. 'inflation_analysis', 'returns_pipeline').",
+                                    content="code_set and code_edit require a non-empty 'path'. Provide a workspace path like 'notebooks/inflation_analysis.py'.",
                                     name=tool_name,
                                     tool_call_id=tool_call.id,
                                 )
                             )
                             continue
 
-                    # Yield the "started" UI chunk for code tools here; other tool types
-                    # already emit their "started" chunk during LLM response streaming.
-                    # ui_message = Tool definition label (loading state).
-                    # ui_message_completed = LLM _ui_message (completed state, set later).
                     loading_label = tools[tool_name].ui_message
                     if tool_type == "code":
-                        notebook_name = tool_args.get("notebook_name")
-                        if isinstance(notebook_name, str) and notebook_name.strip():
-                            notebook = ctx.get_or_create_notebook(notebook_name)
-                            preview = notebook.to_preview()
-                            preview.ui_message = loading_label
-                            yield ToolEvent(
-                                tool_name=tool_name,
-                                tool_call_id=tool_call.id,
-                                tool_type="code",
-                                completed=False,
-                                result=preview,
-                                ui_message=loading_label,
-                                section="final_response" if turn_state.final_response_started else "analysis",
-                            )
+                        notebook = ctx.get_or_create_notebook(notebook_path)
+                        preview = notebook.to_preview()
+                        preview.ui_message = loading_label
+                        yield ToolEvent(
+                            tool_name=tool_name,
+                            tool_call_id=tool_call.id,
+                            tool_type="code",
+                            completed=False,
+                            result=preview,
+                            ui_message=loading_label,
+                            section="final_response" if turn_state.final_response_started else "analysis",
+                        )
 
                     tool_executions.append((
                         tool_call,
@@ -946,10 +973,10 @@ class Agent:
                         case "code":
                             tool_call_output = tool_result.data if tool_result.data else tool_result.exception_message
                             if tool_result.success:
-                                notebook_name = tool_args.get("notebook_name")
-                                if not isinstance(notebook_name, str) or not notebook_name.strip():
-                                    raise ValueError("code tools require a non-empty notebook_name.")
-                                notebook = ctx.get_or_create_notebook(notebook_name)
+                                notebook_path = self._resolve_code_tool_path(tool_args)
+                                if notebook_path is None:
+                                    raise ValueError("code tools require a non-empty 'path'.")
+                                notebook = ctx.get_or_create_notebook(notebook_path)
 
                                 preview = notebook.to_preview()
                                 preview.ui_message = llm_ui_message
@@ -964,7 +991,7 @@ class Agent:
                                     section="final_response" if turn_state.final_response_started else "analysis",
                                 )
 
-                                turn_state.edited_notebook_names.add(notebook.id)
+                                turn_state.edited_notebook_paths.add(notebook.path)
 
                         case "system":
                             tool_call_output = tool_result.data
@@ -1032,9 +1059,9 @@ class Agent:
                 section="final_response" if turn_state.final_response_started else "analysis",
             )
 
-        if turn_state.edited_notebook_names:
-            for notebook_name in turn_state.edited_notebook_names:
-                ctx.get_or_create_notebook(notebook_name).increment_version()
+        if turn_state.edited_notebook_paths:
+            for notebook_path in turn_state.edited_notebook_paths:
+                ctx.get_or_create_notebook(notebook_path).increment_version()
 
         yield StateSnapshot(context=ctx.model_copy(deep=False), section="analysis")
 
@@ -1046,7 +1073,7 @@ class Agent:
         ui_message=None
     )
     async def get_context(self, *, context: AgentContext) -> AgentContext:
-        context_snapshot = await context.to_snapshot()
+        context_snapshot = await context.to_snapshot(connectors=self._connectors)
         return context_snapshot
 
 
@@ -1328,33 +1355,216 @@ class Agent:
             ui_message="Executing temporary code"
         )
 
+    def _workspace_root(self) -> Path:
+        cwd = getattr(self.code_executor, "cwd", None)
+        if not cwd:
+            raise RuntimeError("Code executor has no working directory set.")
+        return Path(cwd)
+
+    @toolmethod(
+        name="write_file",
+        description="Write or overwrite a text file in the workspace (UTF-8). Does not execute the file.",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative path (e.g. main.py, charts/x.vl.json)."},
+                "content": {"type": "string", "description": "Full file content."},
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+        tool_type="utility",
+        ui_message="Writing file",
+    )
+    async def write_file(self, *, path: str, content: str, context: AgentContext) -> str:
+        existed = (self._workspace_root() / path).exists()
+        await self.code_executor.write_workspace_file(path, content.encode("utf-8"))
+        nlines = len(content.splitlines())
+        action = "modified" if existed else "created"
+        return f"{action.capitalize()} {path} ({nlines} lines)."
+
+    @toolmethod(
+        name="edit_file",
+        description="Replace exactly one occurrence of old_str with new_str in a text file.",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative path to the file."},
+                "old_str": {"type": "string", "description": "Exact substring to replace (must occur exactly once)."},
+                "new_str": {"type": "string", "description": "Replacement text."},
+            },
+            "required": ["path", "old_str", "new_str"],
+            "additionalProperties": False,
+        },
+        tool_type="utility",
+        ui_message="Editing file",
+    )
+    async def edit_file(self, *, path: str, old_str: str, new_str: str, context: AgentContext) -> str:
+        raw = await self.code_executor.read_workspace_file(path)
+        text = raw.decode("utf-8")
+        if old_str == "":
+            return await self.write_file(path=path, content=new_str, context=context)
+        n = text.count(old_str)
+        if n == 0:
+            raise ValueError("old_str not found in file.")
+        if n > 1:
+            raise ValueError("old_str occurs multiple times; provide a more specific target.")
+        new_text = text.replace(old_str, new_str, 1)
+        await self.code_executor.write_workspace_file(path, new_text.encode("utf-8"))
+        nlines = len(new_text.splitlines())
+        return f"Modified {path} ({nlines} lines)."
+
+    @toolmethod(
+        name="execute",
+        description="Execute a Python script file in a fresh namespace (connectors available as client).",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Relative path to the .py file to run."},
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        tool_type="utility",
+        ui_message="Executing script",
+    )
+    async def execute_workspace_tool(self, *, path: str, context: AgentContext) -> UtilityToolOutput:
+        raw = await self.code_executor.read_workspace_file(path)
+        code = raw.decode("utf-8")
+        effective_timeout = self.guardrails.tool_timeout_s
+        metadata = self._utility_tool_metadata(
+            tool_name="execute",
+            tool_description="Execute a workspace Python script.",
+            tool_args={"path": path, "effective_timeout_seconds": effective_timeout},
+        )
+        kernel_output = await self.code_executor.execute_workspace(
+            code,
+            dry_run=False,
+            timeout_seconds=effective_timeout,
+        )
+        kernel_output.metadata = metadata
+        return UtilityToolOutput(
+            metadata=metadata,
+            content=kernel_output,
+            ui_message=f"Executed {path}",
+        )
+
+    @toolmethod(
+        name="read_file",
+        description="Read a text file from the workspace (UTF-8). For Parquet data files use read_data.",
+        parameters_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "Relative file path."}},
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        tool_type="system",
+        ui_message="Reading file",
+        ui_message_completed="Read file",
+    )
+    async def read_file(self, *, path: str, context: AgentContext) -> SystemToolOutput:
+        raw = await self.code_executor.read_workspace_file(path)
+        text = raw.decode("utf-8")
+        return SystemToolOutput(content=Text(content=text))
+
+    @toolmethod(
+        name="read_data",
+        description="Read schema, provenance, and a short preview of a .parquet file (parsimony.result metadata).",
+        parameters_schema={
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "Path ending in .parquet"}},
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        tool_type="system",
+        ui_message="Reading data file",
+        ui_message_completed="Read data file",
+    )
+    async def read_data(self, *, path: str, context: AgentContext) -> SystemToolOutput:
+        if not path.endswith(".parquet"):
+            raise ValueError("read_data only supports .parquet files.")
+        full = self._workspace_root() / path
+        result = Result.from_parquet(full)
+        df = result.df
+        head = df.head(5)
+        schema_line = " | ".join(f"{c.name} ({c.role.value}, {c.dtype})" for c in result.columns)
+        prov = result.provenance
+        lines = [
+            f'<data_file path="{path}">',
+            "  <schema>",
+            f"    {schema_line}",
+            "  </schema>",
+            "  <provenance>",
+            f"    source: {prov.source or ''}",
+            f"    params: {json.dumps(prov.params or {}, sort_keys=True)}",
+            f"    fetched_at: {prov.fetched_at.isoformat() if prov.fetched_at else ''}",
+            "  </provenance>",
+            f"  <summary>{len(df)} rows x {len(result.columns)} columns</summary>",
+            "  <head>",
+            head.to_string(),
+            "  </head>",
+            "</data_file>",
+        ]
+        return SystemToolOutput(content=Text(content="\n".join(lines)))
+
+    @toolmethod(
+        name="list_files",
+        description="List files in the workspace with sizes; Parquet files include a one-line metadata summary.",
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "prefix": {
+                    "type": "string",
+                    "description": "Optional subdirectory prefix (e.g. data/).",
+                    "default": "",
+                }
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        tool_type="system",
+        ui_message="Listing files",
+        ui_message_completed="Listed files",
+    )
+    async def list_files(self, *, prefix: str = "", context: AgentContext) -> SystemToolOutput:
+        rows = await self.code_executor.list_workspace_files(prefix)
+        lines: list[str] = ["<workspace_files>"]
+        root = self._workspace_root()
+        for rel, size_b in rows:
+            line = f"  {rel} ({size_b} bytes)"
+            if rel.endswith(".parquet"):
+                line += f" — {parquet_summary(root / rel)}"
+            lines.append(line)
+        lines.append("</workspace_files>")
+        return SystemToolOutput(content=Text(content="\n".join(lines)))
+
     @toolmethod(
         name="code_set",
         description="Replace the entire analysis script. This overwrites previous code and re-executes the full script.",
         parameters_schema={
             "type": "object",
             "properties": {
-                "notebook_name": {
+                "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required. A stable, descriptive name for the notebook (e.g. 'gdp_retrieval', 'gdp_transform', 'gdp_validation'). Must not be empty.",
+                    "description": "Required. Workspace path for the notebook, e.g. 'notebooks/inflation_analysis.py'. The path is the notebook's identity; reusing it overwrites; using a new path creates a new notebook.",
                 },
                 "code": {"type": "string", "description": "The full Python script to set."}
             },
-            "required": ["notebook_name", "code"],
+            "required": ["path", "code"],
             "additionalProperties": False,
         },
         tool_type="code",
         ui_message="Writing notebook",
     )
-    async def code_set(self, *, notebook_name: str, code: str, context: AgentContext) -> str:
-        notebook = context.get_or_create_notebook(notebook_name)
-        context.active_notebook_name = notebook.id
+    async def code_set(self, *, path: str, code: str, context: AgentContext) -> str:
+        notebook = context.get_or_create_notebook(path)
+        context.active_notebook_path = notebook.path
         context.bump_state_version()
         notebook.code_set(code=code)
         await self._reexecute_context_notebooks(context=context)
         self._stamp_data_objects(notebook)
-        self._invalidate_notebook_dependent_state(context=context, notebook_ref=notebook.id)
+        self._invalidate_notebook_dependent_state(context=context, notebook_ref=notebook.path)
         kernel_output = notebook.output
 
         for figure in kernel_output.get_figures():
@@ -1369,31 +1579,31 @@ class Agent:
         parameters_schema={
             "type": "object",
             "properties": {
-                "notebook_name": {
+                "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required. A stable, descriptive name for the notebook (e.g. 'gdp_retrieval', 'gdp_transform', 'gdp_validation'). Must not be empty.",
+                    "description": "Required. Workspace path for the notebook to edit, e.g. 'notebooks/inflation_analysis.py'.",
                 },
                 "old_str": {"type": "string", "description": "Exact substring to replace (must occur exactly once)."},
                 "new_str": {"type": "string", "description": "Replacement text."},
             },
-            "required": ["notebook_name", "old_str", "new_str"],
+            "required": ["path", "old_str", "new_str"],
             "additionalProperties": False,
         },
         tool_type="code",
         ui_message="Editing notebook",
     )
-    async def code_edit(self, *, notebook_name: str, old_str: str, new_str: str, context: AgentContext) -> str:
+    async def code_edit(self, *, path: str, old_str: str, new_str: str, context: AgentContext) -> str:
         if old_str == "":
-            return await self.code_set(notebook_name=notebook_name, code=new_str, context=context)
+            return await self.code_set(path=path, code=new_str, context=context)
 
-        notebook = context.get_or_create_notebook(notebook_name)
-        context.active_notebook_name = notebook.id
+        notebook = context.get_or_create_notebook(path)
+        context.active_notebook_path = notebook.path
         context.bump_state_version()
         notebook.code_edit(old_str=old_str, new_str=new_str)
         await self._reexecute_context_notebooks(context=context)
         self._stamp_data_objects(notebook)
-        self._invalidate_notebook_dependent_state(context=context, notebook_ref=notebook.id)
+        self._invalidate_notebook_dependent_state(context=context, notebook_ref=notebook.path)
         kernel_output = notebook.output
 
         for figure in kernel_output.get_figures():
@@ -1428,6 +1638,12 @@ class Agent:
         await self.code_executor.set_sandbox_state_version(context.state_version)
 
     def _invalidate_notebook_dependent_state(self, *, context: AgentContext, notebook_ref: str) -> None:
+        """Drop derived variables and returned-dataset state for ``notebook_ref``.
+
+        Chart staleness is derived at card-build time from path resolution
+        against the latest dataset snapshot path, so no staleness
+        bookkeeping is needed here.
+        """
         derived_variable_names = [
             name
             for name, var in context.data_context.variables.items()
@@ -1442,31 +1658,16 @@ class Agent:
             if context.active_returned_dataset_id == returned.artifact_id:
                 context.active_returned_dataset_id = None
                 context.returned_dataset = None
-            context.mark_charts_stale_for_dataset(
-                dataset_artifact_id=returned.artifact_id,
-                latest_version=returned.version + 1,
-            )
-            return
-        for artifact_id, returned_chart in list(context.returned_charts.items()):
-            if returned_chart.chart_notebook_ref != notebook_ref:
-                continue
-            updated_chart = returned_chart.model_copy(
-                update={
-                    "latest_source_dataset_version": max(
-                        returned_chart.latest_source_dataset_version,
-                        returned_chart.source_dataset_version + 1,
-                    ),
-                    "is_stale": True,
-                }
-            )
-            context.returned_charts[artifact_id] = updated_chart
-            if context.active_returned_chart_id == artifact_id:
-                context.returned_chart = updated_chart
 
 
     @toolmethod(
         name="return_dataset",
-        description="Return exactly one validated dataset. dataset_variable_name must be a plain variable name. Provide notebook refs for the stages used in the pipeline.",
+        description=(
+            "Return exactly one validated dataset. ``dataset_variable_name`` must be a "
+            "plain notebook variable name. Provide notebook refs for the stages used in "
+            "the pipeline. The framework picks the persistence location and embeds curation "
+            "metadata in the on-disk file."
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
@@ -1482,7 +1683,7 @@ class Agent:
                 "notebook_refs": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of notebook names used to produce this dataset, in execution order. Include all notebooks whose code contributes to the final dataset (e.g. retrieval, transformation, validation notebooks).",
+                    "description": "List of notebook paths (e.g. 'notebooks/sp500_fetch.py') used to produce this dataset, in execution order.",
                 },
                 "description": {
                     "type": "string",
@@ -1549,12 +1750,16 @@ class Agent:
         )
         if variable.output is None:
             raise ValueError(f"Dataset '{dataset_variable_name}' has no tabular payload to return.")
+        if not isinstance(variable.output, DataFrameObject):
+            raise TypeError(
+                f"Dataset '{dataset_variable_name}' must resolve to a DataFrame; "
+                f"got {type(variable.output).__name__}."
+            )
 
         source_dataset_variable_names = list(variable.source_datasets)
         if not source_dataset_variable_names:
             source_dataset_variable_names = [dataset_variable_name]
 
-        # Collect tags from agent args
         final_tags: list[str] = []
         for t in TypeAdapter(list[str]).validate_python(tags or []):
             s = str(t).strip()
@@ -1581,21 +1786,27 @@ class Agent:
         )
         context.set_returned_dataset(returned_state)
 
-        return Dataset(
+        dataset = Dataset(
             artifact_id=returned_state.artifact_id,
             version=returned_state.version,
-            variable_name=dataset_variable_name,
-            variable_preview=variable.to_frontend_dict(),
             title=title,
             description=description,
             notes=notes,
             tags=final_tags,
             notebook_refs=clean_refs,
         )
+        # Hand the live frame to the streaming dispatcher via the dataset's
+        # transient _payload slot. The dispatcher consumes it to write the
+        # snapshot under .ockham/cards/ and to compute the chat-card preview.
+        return dataset.with_payload(variable.output)
 
     @toolmethod(
         name="return_chart",
-        description="Return one optional chart primitive for an already returned dataset.",
+        description=(
+            "Return one optional chart primitive for an already returned dataset. "
+            "The framework picks the persistence location and embeds curation "
+            "metadata in the on-disk Vega-Lite file."
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
@@ -1613,7 +1824,7 @@ class Agent:
                 },
                 "chart_notebook_ref": {
                     "type": "string",
-                    "description": "Notebook ref for the visualization stage.",
+                    "description": "Notebook path for the visualization stage (e.g. 'notebooks/viz.py').",
                 },
                 "description": {
                     "type": "string",
@@ -1626,6 +1837,7 @@ class Agent:
                 },
             },
             "required": [
+                "title",
                 "source_dataset_variable_name",
                 "chart_variable_name",
                 "chart_notebook_ref",
@@ -1641,13 +1853,16 @@ class Agent:
         self,
         *,
         context: AgentContext,
-        title: str = "",
+        title: str,
         source_dataset_variable_name: str,
         chart_variable_name: str,
         chart_notebook_ref: str,
         description: str,
         notes: list[str],
     ) -> Chart:
+        title = title.strip()
+        if not title:
+            raise ValueError("title must be a non-empty string.")
         source_dataset_variable_name = self._require_plain_variable_name(
             value=source_dataset_variable_name,
             parameter_name="source_dataset_variable_name",
@@ -1677,54 +1892,53 @@ class Agent:
 
         fig_obj = await self.code_executor.get(chart_variable_name)
         if not isinstance(fig_obj, FigureObject):
-            raise ValueError("chart_variable_name must resolve to an Altair chart.")
+            raise TypeError(
+                f"chart_variable_name '{chart_variable_name}' must resolve to an Altair chart; "
+                f"got {type(fig_obj).__name__}."
+            )
         if fig_obj.name is None:
             fig_obj.name = chart_variable_name
 
+        source_dataset_path_value = snapshot_path(
+            artifact_id=returned_state.artifact_id,
+            version=returned_state.version,
+            kind="dataset",
+        )
         existing_chart = context.get_returned_chart()
         artifact_id = (
             existing_chart.artifact_id
             if existing_chart is not None
-            and existing_chart.source_dataset_artifact_id == returned_state.artifact_id
+            and existing_chart.source_dataset_path == source_dataset_path_value
             and existing_chart.chart_variable_name == chart_variable_name
             and existing_chart.chart_notebook_ref == chart_ref
             else ""
         )
         version = existing_chart.version if artifact_id else 1
-        now = datetime.now(UTC)
         returned_chart = ReturnedChartState(
             artifact_id=artifact_id,
             version=version,
-            title=(title or "").strip(),
-            source_dataset_artifact_id=returned_state.artifact_id,
+            title=title,
+            source_dataset_path=source_dataset_path_value,
             source_dataset_variable_name=source_dataset_variable_name,
-            source_dataset_version=returned_state.version,
-            latest_source_dataset_version=returned_state.version,
-            is_stale=False,
             chart_variable_name=chart_variable_name,
             chart_notebook_ref=chart_ref,
             description=description,
             notes=notes,
-            last_refreshed_at=now,
         )
         context.set_returned_chart(returned_chart)
 
-        return Chart(
+        chart = Chart(
             artifact_id=returned_chart.artifact_id,
             version=returned_chart.version,
-            title=(title or "").strip(),
-            source_dataset_artifact_id=returned_state.artifact_id,
-            source_dataset_variable_name=source_dataset_variable_name,
-            source_dataset_version=returned_state.version,
-            latest_source_dataset_version=returned_state.version,
-            is_stale=False,
-            chart_variable_name=chart_variable_name,
-            figure=fig_obj,
+            title=title,
+            source_dataset_path=source_dataset_path_value,
             chart_notebook_ref=chart_ref,
             description=description,
             notes=notes,
-            last_refreshed_at=now,
         )
+        # Hand the live FigureObject to the streaming dispatcher; it writes
+        # the Vega-Lite snapshot and computes the card preview.
+        return chart.with_payload(fig_obj)
 
     @staticmethod
     def _require_plain_variable_name(*, value: str, parameter_name: str) -> str:
@@ -1812,7 +2026,7 @@ class Agent:
             else:
                 source_datasets = self._extract_source_datasets(
                     context=context,
-                    notebook_name=producing_notebook_ref,
+                    notebook_ref=producing_notebook_ref,
                     exclude_variable_name=dataset_variable_name,
                 )
                 artifact_var = Variable(
@@ -1877,17 +2091,15 @@ class Agent:
             }
         )
         context.set_returned_dataset(refreshed_state)
-        context.mark_charts_stale_for_dataset(
-            dataset_artifact_id=returned_state.artifact_id,
-            latest_version=next_version,
-        )
-        refreshed_artifact = refreshed.data.model_copy(
+        # Reuse the previous artifact_id and bump version so the chat card
+        # cleanly upgrades to the new snapshot. ``_payload`` is preserved by
+        # ``model_copy`` (PrivateAttr semantics in pydantic v2).
+        return refreshed.data.model_copy(
             update={
                 "artifact_id": returned_state.artifact_id,
                 "version": next_version,
             }
         )
-        return refreshed_artifact
 
     async def refresh_returned_chart(
         self,
@@ -1898,19 +2110,19 @@ class Agent:
         returned_chart = context.get_returned_chart(artifact_id)
         if returned_chart is None:
             raise ValueError("No returned chart is available to refresh.")
-        returned_state = context.get_returned_dataset(returned_chart.source_dataset_artifact_id)
+        # Resolve the source dataset by re-deriving its artifact_id from the
+        # snapshot path the chart already points at; falls back to the
+        # session's active returned dataset when no path is recorded.
+        source_artifact_id = _artifact_id_from_dataset_snapshot_path(
+            returned_chart.source_dataset_path
+        )
+        returned_state = context.get_returned_dataset(source_artifact_id)
         if returned_state is None:
             raise ValueError("No returned dataset is available to refresh the chart against.")
 
         chart_ref = (returned_chart.chart_notebook_ref or "").strip()
         if not chart_ref:
             raise ValueError("The returned chart is missing refreshable notebook metadata.")
-
-        if returned_chart.source_dataset_artifact_id != returned_state.artifact_id:
-            raise ValueError(
-                "Chart source must match the returned dataset artifact "
-                f"'{returned_state.artifact_id}'."
-            )
 
         self._validate_return_chart_refs(
             context=context,
@@ -1921,59 +2133,56 @@ class Agent:
 
         context.bump_state_version()
         await self.code_executor.replace_state(context.data_context)
-        context.active_notebook_name = chart_ref
+        context.active_notebook_path = chart_ref
         chart_notebook = context.notebooks[chart_ref]
         await chart_notebook.execute(code_executor=self.code_executor, update_outputs=True)
         await self.code_executor.set_sandbox_state_version(context.state_version)
 
         fig_obj = await self.code_executor.get(returned_chart.chart_variable_name)
         if not isinstance(fig_obj, FigureObject):
-            raise ValueError("chart_variable_name must resolve to an Altair chart.")
+            raise TypeError(
+                f"chart_variable_name '{returned_chart.chart_variable_name}' must resolve to an "
+                f"Altair chart; got {type(fig_obj).__name__}."
+            )
         if fig_obj.name is None:
             fig_obj.name = returned_chart.chart_variable_name
 
-        now = datetime.now(UTC)
         next_version = returned_chart.version + 1
+        refreshed_source_path = snapshot_path(
+            artifact_id=returned_state.artifact_id,
+            version=returned_state.version,
+            kind="dataset",
+        )
         updated_chart_state = returned_chart.model_copy(
             update={
                 "version": next_version,
-                "source_dataset_artifact_id": returned_state.artifact_id,
+                "source_dataset_path": refreshed_source_path,
                 "source_dataset_variable_name": returned_state.dataset_variable_name,
-                "source_dataset_version": returned_state.version,
-                "latest_source_dataset_version": returned_state.version,
-                "is_stale": False,
-                "last_refreshed_at": now,
             }
         )
         context.set_returned_chart(updated_chart_state)
 
-        return Chart(
+        chart = Chart(
             artifact_id=updated_chart_state.artifact_id,
             version=updated_chart_state.version,
             title=updated_chart_state.title,
-            source_dataset_artifact_id=updated_chart_state.source_dataset_artifact_id,
-            source_dataset_variable_name=updated_chart_state.source_dataset_variable_name,
-            source_dataset_version=updated_chart_state.source_dataset_version,
-            latest_source_dataset_version=updated_chart_state.latest_source_dataset_version,
-            is_stale=False,
-            chart_variable_name=updated_chart_state.chart_variable_name,
-            figure=fig_obj,
+            source_dataset_path=updated_chart_state.source_dataset_path,
             chart_notebook_ref=chart_ref,
             description=updated_chart_state.description,
             notes=updated_chart_state.notes,
-            last_refreshed_at=now,
         )
+        return chart.with_payload(fig_obj)
 
     def _extract_source_datasets(
         self,
         *,
         context: AgentContext,
-        notebook_name: str,
+        notebook_ref: str,
         exclude_variable_name: str | None = None,
     ) -> list[str]:
-        if notebook_name not in context.notebooks:
+        if notebook_ref not in context.notebooks:
             return []
-        notebook_code = context.notebooks[notebook_name].code
+        notebook_code = context.notebooks[notebook_ref].code
         source_variables = []
         for variable_name in context.data_context.variables.keys():
             if exclude_variable_name is not None and variable_name == exclude_variable_name:
@@ -1990,10 +2199,10 @@ class Agent:
         producing_notebook_ref: str | None = None,
     ) -> Variable:
         value = await self.code_executor.get(variable_name)
-        notebook_ref = producing_notebook_ref or context.active_notebook_name
+        notebook_ref = producing_notebook_ref or context.active_notebook_path
         source_datasets = self._extract_source_datasets(
             context=context,
-            notebook_name=notebook_ref,
+            notebook_ref=notebook_ref,
             exclude_variable_name=variable_name,
         )
 

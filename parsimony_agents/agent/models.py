@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import uuid4
@@ -14,19 +15,22 @@ import statsmodels
 from pydantic import BaseModel, Field, model_validator
 
 from parsimony_agents.agent.outputs import SystemToolMessage, SystemToolOutput, UtilityToolOutput
-from parsimony_agents.artifacts import (
-    Chart,
-    Dataset,
-    _stable_chart_artifact_id,
-    _stable_dataset_artifact_id,
-)
+from parsimony_agents.artifacts import Chart, Dataset
 from parsimony_agents.execution import KernelOutput
 from parsimony_agents.messages import Message, MessageContent, Reasoning, Text
-from parsimony_agents.notebook import Script
+from parsimony_agents.notebook import DEFAULT_NOTEBOOK_PATH, Script
 from parsimony_agents.variable import Variable, VariableStore
 
 
 class ReturnedDatasetState(BaseModel):
+    """Session-only bookkeeping for a dataset the agent has returned.
+
+    Holds the executor variable name (so refresh / re-run tools can find
+    the live frame again) and a snapshot of the curation envelope. Does
+    not own a workspace path: snapshots are framework-managed under
+    ``.ockham/cards/`` keyed by ``artifact_id`` + ``version``.
+    """
+
     artifact_id: str = ""
     version: int = 1
     dataset_variable_name: str
@@ -39,54 +43,42 @@ class ReturnedDatasetState(BaseModel):
     @model_validator(mode="after")
     def populate_identity(self) -> ReturnedDatasetState:
         if not self.artifact_id:
-            self.artifact_id = _stable_dataset_artifact_id(
-                variable_name=self.dataset_variable_name,
-                notebook_refs=self.notebook_refs,
-            )
+            self.artifact_id = str(uuid.uuid4())
         if self.version < 1:
             self.version = 1
         return self
 
 
 class ReturnedChartState(BaseModel):
+    """Session-only bookkeeping for a chart the agent has returned.
+
+    Holds the executor variable names (chart + source dataset) and a
+    snapshot of the curation envelope. The source dataset is referenced by
+    its workspace-relative snapshot path (``source_dataset_path``); see
+    :func:`parsimony_agents.artifacts.snapshot_path`. Path is identity.
+    """
+
     artifact_id: str = ""
     version: int = 1
     title: str = ""
-    source_dataset_artifact_id: str = ""
+    source_dataset_path: str = ""
     source_dataset_variable_name: str
-    source_dataset_version: int = 1
-    latest_source_dataset_version: int = 1
-    is_stale: bool = False
     chart_variable_name: str
     chart_notebook_ref: str | None = None
     description: str = ""
     notes: list[str] = Field(default_factory=list)
-    last_refreshed_at: datetime | None = None
 
     @model_validator(mode="after")
     def populate_identity(self) -> ReturnedChartState:
-        if not self.source_dataset_artifact_id:
-            self.source_dataset_artifact_id = _stable_dataset_artifact_id(
-                variable_name=self.source_dataset_variable_name,
-            )
         if not self.artifact_id:
-            self.artifact_id = _stable_chart_artifact_id(
-                source_dataset_artifact_id=self.source_dataset_artifact_id,
-                chart_variable_name=self.chart_variable_name,
-                chart_notebook_ref=self.chart_notebook_ref or "",
-            )
+            self.artifact_id = str(uuid.uuid4())
         if self.version < 1:
             self.version = 1
-        if self.source_dataset_version < 1:
-            self.source_dataset_version = 1
-        if self.latest_source_dataset_version < self.source_dataset_version:
-            self.latest_source_dataset_version = self.source_dataset_version
-        self.is_stale = self.source_dataset_version < self.latest_source_dataset_version
         return self
 
 
 def _default_notebooks() -> dict[str, Script]:
-    return {"main": Script(id="main")}
+    return {DEFAULT_NOTEBOOK_PATH: Script(path=DEFAULT_NOTEBOOK_PATH)}
 
 
 class AgentContextSnapshot(MessageContent):
@@ -94,7 +86,12 @@ class AgentContextSnapshot(MessageContent):
     data_context: VariableStore
     notebooks: dict[str, Script] = Field(default_factory=_default_notebooks)
     files_list: list[str]
-    active_notebook_name: str = "main"
+    active_notebook_path: str = DEFAULT_NOTEBOOK_PATH
+    #: Pre-rendered catalog of connectors bound into the executor this turn,
+    #: as produced by :func:`parsimony_agents.agent.helpers.render_connector_catalog`.
+    #: Empty string means no connectors are bound and the corresponding XML
+    #: block is omitted from :meth:`to_llm`.
+    connectors_catalog: str = ""
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
         chunks: list[dict[str, Any]] = []
@@ -160,6 +157,18 @@ class AgentContextSnapshot(MessageContent):
             }
         )
 
+        if self.connectors_catalog:
+            chunks.append(
+                {
+                    "type": "text",
+                    "text": (
+                        "<available_connectors>\n"
+                        f"{self.connectors_catalog}\n"
+                        "</available_connectors>\n"
+                    ),
+                }
+            )
+
         """
 
         if self.working_memory:
@@ -179,21 +188,21 @@ class AgentContextSnapshot(MessageContent):
 
         """
 
-        if len(self.notebooks) == 1 and "main" in self.notebooks:
+        if len(self.notebooks) == 1 and DEFAULT_NOTEBOOK_PATH in self.notebooks:
             chunks.extend(
                 [
                     {"type": "text", "text": "<notebook>\n"},
-                    *self.notebooks["main"].to_llm(mode=mode),
+                    *self.notebooks[DEFAULT_NOTEBOOK_PATH].to_llm(mode=mode),
                     {"type": "text", "text": "\n</notebook>\n"},
                 ]
             )
         else:
             chunks.append({"type": "text", "text": "<notebooks>\n"})
-            for notebook_name, notebook in self.notebooks.items():
+            for notebook_path, notebook in self.notebooks.items():
                 chunks.append(
                     {
                         "type": "text",
-                        "text": f'<notebook name="{notebook_name}" active="{str(notebook_name == self.active_notebook_name).lower()}">\n',
+                        "text": f'<notebook path="{notebook_path}" active="{str(notebook_path == self.active_notebook_path).lower()}">\n',
                     }
                 )
                 chunks.extend(notebook.to_llm(mode=mode))
@@ -225,7 +234,7 @@ class AgentContext(MessageContent):
     data_context: VariableStore = Field(default_factory=VariableStore)
     messages: list[AgentMessage] = Field(default_factory=list)
     notebooks: dict[str, Script] = Field(default_factory=_default_notebooks)
-    active_notebook_name: str = Field(default="main")
+    active_notebook_path: str = Field(default=DEFAULT_NOTEBOOK_PATH)
     returned_datasets: dict[str, ReturnedDatasetState] = Field(default_factory=dict)
     returned_charts: dict[str, ReturnedChartState] = Field(default_factory=dict)
     active_returned_dataset_id: str | None = Field(default=None)
@@ -249,14 +258,20 @@ class AgentContext(MessageContent):
 
     def get_or_create_notebook(
         self,
-        notebook_name: str,
+        path: str,
     ) -> Script:
-        normalized_name = notebook_name.strip()
-        if not normalized_name:
-            raise ValueError("notebook_name must be a non-empty string.")
-        if normalized_name not in self.notebooks:
-            self.notebooks[normalized_name] = Script(id=normalized_name)
-        return self.notebooks[normalized_name]
+        """Look up a notebook by its workspace path (creating it if missing).
+
+        ``path`` is a relative workspace path like
+        ``notebooks/inflation.py``. Path safety is enforced by the
+        storage boundary on persistence; here we only require non-empty.
+        """
+        normalized = path.strip()
+        if not normalized:
+            raise ValueError("notebook path must be a non-empty string.")
+        if normalized not in self.notebooks:
+            self.notebooks[normalized] = Script(path=normalized)
+        return self.notebooks[normalized]
 
     def get_returned_dataset(self, artifact_id: str | None = None) -> ReturnedDatasetState | None:
         target_id = artifact_id or self.active_returned_dataset_id
@@ -282,20 +297,6 @@ class AgentContext(MessageContent):
         self.returned_chart = state
         return state
 
-    def mark_charts_stale_for_dataset(self, *, dataset_artifact_id: str, latest_version: int) -> None:
-        for artifact_id, chart_state in list(self.returned_charts.items()):
-            if chart_state.source_dataset_artifact_id != dataset_artifact_id:
-                continue
-            updated = chart_state.model_copy(
-                update={
-                    "latest_source_dataset_version": latest_version,
-                    "is_stale": chart_state.source_dataset_version < latest_version,
-                }
-            )
-            self.returned_charts[artifact_id] = updated
-            if self.active_returned_chart_id == artifact_id:
-                self.returned_chart = updated
-
     @model_validator(mode="after")
     def sync_returned_artifacts(self) -> AgentContext:
         if self.returned_dataset is not None:
@@ -313,13 +314,13 @@ class AgentContext(MessageContent):
 
     @property
     def notebook(self) -> Script:
-        return self.get_or_create_notebook("main")
+        return self.get_or_create_notebook(DEFAULT_NOTEBOOK_PATH)
 
     @notebook.setter
     def notebook(self, value: Script) -> None:
-        self.notebooks[value.id] = value
-        if value.id == "main":
-            self.active_notebook_name = "main"
+        self.notebooks[value.path] = value
+        if value.path == DEFAULT_NOTEBOOK_PATH:
+            self.active_notebook_path = DEFAULT_NOTEBOOK_PATH
 
     async def execute_notebooks(
         self,
@@ -328,19 +329,22 @@ class AgentContext(MessageContent):
         update_outputs: bool = True,
     ) -> dict[str, KernelOutput]:
         outputs: dict[str, KernelOutput] = {}
-        for notebook_name, notebook in self.notebooks.items():
-            outputs[notebook_name] = await notebook.execute(
+        for notebook_path, notebook in self.notebooks.items():
+            outputs[notebook_path] = await notebook.execute(
                 code_executor=code_executor, update_outputs=update_outputs
             )
         return outputs
 
-    async def to_snapshot(self) -> AgentContextSnapshot:
+    async def to_snapshot(self, *, connectors: Any = None) -> AgentContextSnapshot:
+        from parsimony_agents.agent.helpers import render_connector_catalog
+
         files_list = await self.files.list_files() if self.files is not None else []
         return AgentContextSnapshot(
             data_context=self.data_context.model_copy(deep=True),
-            notebooks={name: notebook.model_copy(deep=True) for name, notebook in self.notebooks.items()},
+            notebooks={path: notebook.model_copy(deep=True) for path, notebook in self.notebooks.items()},
             files_list=files_list,
-            active_notebook_name=self.active_notebook_name,
+            active_notebook_path=self.active_notebook_path,
+            connectors_catalog=render_connector_catalog(connectors),
         )
 
     def _get_ref_name(self, key: str = str(uuid4())[:8], subdir: str = "artifacts") -> str:

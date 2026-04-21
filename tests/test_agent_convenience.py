@@ -92,19 +92,38 @@ class TestAgentConvenience:
 
         assert isinstance(agent.code_executor, CodeExecutor)
 
-    def test_connectors_appends_dynamic_catalog(self):
-        mock_connectors = MagicMock()
-        mock_connectors.to_llm.return_value = "\n## Data connectors\n\nclient catalog here\n"
-        agent = Agent(model="test-model", connectors=mock_connectors)
-        assert agent.instructions.startswith(DEFAULT_DATA_ANALYSIS_PROMPT)
-        assert "client catalog here" in agent.instructions
-        mock_connectors.to_llm.assert_called_once()
-        assert agent._connectors is mock_connectors
+    def test_connectors_stored_but_not_appended_to_instructions(self):
+        # Connectors flow through the per-turn AgentContextSnapshot, not the
+        # system prompt. The system prompt stays cache-friendly across turns.
+        from parsimony.connector import Connectors
 
-    def test_no_connectors_omits_connector_prompt(self):
+        bundle = MagicMock(spec=Connectors)
+        bundle.to_llm.return_value = "BUNDLE BODY"
+        agent = Agent(model="test-model", connectors=bundle)
+        assert agent.instructions == DEFAULT_DATA_ANALYSIS_PROMPT
+        assert "BUNDLE BODY" not in agent.instructions
+        bundle.to_llm.assert_not_called()
+        assert agent._connectors is bundle
+
+    def test_connectors_mapping_stored_but_not_in_instructions(self):
+        from parsimony.connector import Connectors
+
+        fetch = MagicMock(spec=Connectors)
+        fetch.to_llm.return_value = "FETCH"
+        search = MagicMock(spec=Connectors)
+        search.to_llm.return_value = "SEARCH"
+        agent = Agent(model="test-model", connectors={"fetch": fetch, "search": search})
+        assert agent.instructions == DEFAULT_DATA_ANALYSIS_PROMPT
+        fetch.to_llm.assert_not_called()
+        search.to_llm.assert_not_called()
+
+    def test_invalid_connectors_type_raises(self):
+        with pytest.raises(TypeError, match="Connectors or Mapping"):
+            Agent(model="test-model", connectors="not-a-bundle")
+
+    def test_no_connectors_keeps_default_prompt(self):
         agent = Agent(model="test-model")
         assert agent.instructions == DEFAULT_DATA_ANALYSIS_PROMPT
-        assert "client" not in agent.instructions
 
 
 # ---------------------------------------------------------------------------

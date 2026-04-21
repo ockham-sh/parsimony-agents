@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
+
+from parsimony.connector import Connectors
 
 
 @runtime_checkable
@@ -12,13 +15,25 @@ class ExecutorWithLocals(Protocol):
     locals: dict[str, Any]
 
 
-def inject_connectors(executor: ExecutorWithLocals, connectors: Any) -> None:
-    """Add ``connectors`` to the executor's base locals as ``client``.
+def inject_connectors(
+    executor: ExecutorWithLocals,
+    connectors: Connectors | Mapping[str, Connectors],
+) -> None:
+    """Bind ``connectors`` into the executor's locals.
 
-    Works with both :class:`~parsimony_agents.execution.executor.CodeExecutor` (local)
-    and any remote executor that follows the same ``locals`` dict pattern.
-
-    The value is injected under the name ``"client"`` — matching the sandbox pattern
-    ``await client[\"fred_fetch\"](series_id=\"...\")`` (keyword args validated by each connector's params model).
+    A bare :class:`Connectors` is bound as ``client`` (matches the OSS
+    quick-start ``await client["fred"](series_id="...")``). A mapping
+    ``{name: Connectors}`` binds each entry under its key — for example
+    ``{"fetch": fetch_bundle, "search": search_bundle}`` exposes them as
+    ``await fetch["fred"](...)`` and ``await search["fred"](query="...")``.
     """
-    executor.locals["client"] = connectors
+    if isinstance(connectors, Connectors):
+        executor.locals["client"] = connectors
+        return
+    if isinstance(connectors, Mapping):
+        for name, bundle in connectors.items():
+            executor.locals[str(name)] = bundle
+        return
+    raise TypeError(
+        f"connectors must be a Connectors or Mapping[str, Connectors]; got {type(connectors).__name__}"
+    )

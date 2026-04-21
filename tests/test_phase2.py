@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 import pytest
+from parsimony.connector import Connectors
 from parsimony.result import Provenance, Result
 
 from parsimony_agents.execution.helpers import inject_connectors
@@ -20,12 +21,22 @@ class _Exec:
 # ── inject_connectors ─────────────────────────────────────────────────────
 
 
-def test_inject_connectors_sets_locals() -> None:
+def test_inject_connectors_binds_bare_connectors_as_client() -> None:
     ex = _Exec()
     ex.locals = {}
-    sentinel = object()
-    inject_connectors(ex, sentinel)
-    assert ex.locals["client"] is sentinel
+    bundle = Connectors([])
+    inject_connectors(ex, bundle)
+    assert ex.locals["client"] is bundle
+
+
+def test_inject_connectors_binds_mapping_by_name() -> None:
+    ex = _Exec()
+    ex.locals = {}
+    fetch_bundle = Connectors([])
+    search_bundle = Connectors([])
+    inject_connectors(ex, {"fetch": fetch_bundle, "search": search_bundle})
+    assert ex.locals["fetch"] is fetch_bundle
+    assert ex.locals["search"] is search_bundle
 
 
 # ── FetchLogEntry / CodeExecutor.fetch_log ────────────────────────────────

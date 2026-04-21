@@ -95,6 +95,7 @@ The snapshot contains:
 - All current variables (with schema, sample data, and data quality reports)
 - Returned artifacts from previous turns
 - The list of accessible files
+- The catalog of connector bundles bound into the executor this turn (`<available_connectors>`), rendered from the connectors passed to `Agent(connectors=...)`. The system prompt stays stable — the live tool catalog rides on the per-turn snapshot.
 
 ---
 

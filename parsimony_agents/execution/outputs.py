@@ -6,6 +6,7 @@ import base64
 import json
 import traceback
 from functools import cached_property
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import altair as alt
@@ -58,6 +59,27 @@ class DataFrameObject(BaseOutputObject):
     @cached_property
     def value(self) -> pd.DataFrame:
         return self.ref.materialize_sync()
+
+    @classmethod
+    def from_pandas(
+        cls,
+        dataframe: pd.DataFrame | pd.Series,
+        *,
+        local_dir: str | Path,
+        ref: str = "anonymous",
+    ) -> DataFrameObject:
+        """Build a self-contained DataFrameObject from a pandas frame.
+
+        Convenience for tests, scripts, and any non-executor caller that
+        needs the canonical executor wrapper without going through a live
+        kernel. Production agents always receive ``DataFrameObject`` from
+        the executor itself; this factory exists so the same payload type
+        is the only one anything in the codebase ever has to manufacture.
+        """
+
+        return cls(
+            ref=DataframeRef.from_pandas(dataframe, ref=ref, local_dir=local_dir)
+        )
 
     @computed_field
     @property
@@ -261,7 +283,18 @@ _kernel_output_type_adapter = TypeAdapter(KernelOutputType)
 
 
 class FetchLogEntry(BaseModel):
-    """One recorded data operation from sandbox code (via the product ``fetch()`` wrapper → ``_fetch_log``)."""
+    """One recorded data operation from sandbox code (via the product ``fetch()`` wrapper → ``_fetch_log``).
+
+    The in-memory shape is the agent's: it carries ``head``/``tail``/
+    ``columns``/``provenance`` for the LLM context window. The wire shape
+    served by ``_notebook_payload`` is independent and intentionally
+    smaller — the renderer reaches the rich content by following
+    ``workspace_path``.
+
+    ``workspace_path`` is the framework-managed content-addressed path
+    (``.ockham/data_objects/<sha>.parquet``) when the executor was wired
+    with a data-object persister; ``None`` otherwise. Path is identity.
+    """
 
     source: str
     source_description: str = ""
@@ -272,6 +305,7 @@ class FetchLogEntry(BaseModel):
     provenance: Provenance = Field(default_factory=Provenance)
     head: dict[str, Any] | None = None
     tail: dict[str, Any] | None = None
+    workspace_path: str | None = None
 
 
 class KernelOutput(MessageContent):

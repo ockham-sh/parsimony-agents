@@ -102,6 +102,9 @@ def _parse_script_steps(code: str) -> list[ScriptStepPreview]:
     return root_steps
 
 
+DEFAULT_NOTEBOOK_PATH = "notebooks/main.py"
+
+
 class Script(BaseModel):
     """
     A named, re-executable Python script with execution state.
@@ -111,10 +114,17 @@ class Script(BaseModel):
     - Edits are either full replacement (`code_set`) or a single targeted replacement (`code_edit`)
     - Execution produces a single `KernelOutput`
     - Version increments are handled by the agent after successful tool calls
+
+    The script's identity is its workspace ``path`` (e.g.
+    ``notebooks/inflation.py``). Persistence layers write to exactly this
+    path; ``AgentContext.notebooks`` is keyed by it.
     """
 
     type: Literal["script"] = "script"
-    id: str = Field(default="main", description="Stable id for referencing in logs/LLM views.")
+    path: str = Field(
+        default=DEFAULT_NOTEBOOK_PATH,
+        description="Workspace path where this notebook lives, e.g. notebooks/<name>.py.",
+    )
     code: str = Field(default="", description="Full script contents.")
     output: KernelOutput = Field(default_factory=lambda: KernelOutput(outputs=[]))
     lint_issues: list[str] = Field(default_factory=list)
@@ -229,7 +239,7 @@ class Script(BaseModel):
 
     def to_preview(self) -> ScriptPreview:
         return ScriptPreview(
-            id=self.id,
+            path=self.path,
             code=self.code,
             error_message=self._first_error_line(),
             version=self.version,
@@ -239,7 +249,7 @@ class Script(BaseModel):
 
 class ScriptPreview(BaseModel):
     type: Literal["script_preview"] = "script_preview"
-    id: str = "main"
+    path: str = DEFAULT_NOTEBOOK_PATH
     code: str
     error_message: str | None = None
     version: int = 1
@@ -255,15 +265,9 @@ class ScriptPreview(BaseModel):
         arbitrary_types_allowed = True
 
 
-# Backward-compatible aliases (deprecated; use Script / ScriptPreview).
-JupytextScript = Script
-JupytextScriptPreview = ScriptPreview
-
-
 __all__ = [
+    "DEFAULT_NOTEBOOK_PATH",
     "Script",
     "ScriptPreview",
     "ScriptStepPreview",
-    "JupytextScript",
-    "JupytextScriptPreview",
 ]
