@@ -14,9 +14,19 @@ from uuid import uuid4
 
 import litellm
 import pandas as pd
+from litellm.exceptions import (
+    APIConnectionError,
+    APIError,
+    AuthenticationError,
+    BadRequestError,
+    InternalServerError,
+    NotFoundError,
+    RateLimitError,
+    ServiceUnavailableError,
+    Timeout,
+)
 from parsimony.connector import Connectors
 from parsimony.result import Result
-from litellm.exceptions import APIError, InternalServerError, RateLimitError, ServiceUnavailableError, Timeout
 from opentelemetry import trace
 from pydantic import TypeAdapter
 
@@ -163,9 +173,9 @@ class Agent:
     .. code-block:: python
 
         from parsimony_agents import Agent
-        from parsimony.connectors.fred import CONNECTORS as FRED
+        from parsimony_fred import CONNECTORS as FRED
 
-        agent = Agent(model="claude-sonnet-4-6", connectors=FRED.bind_deps(api_key="..."))
+        agent = Agent(model="claude-sonnet-4-6", connectors=FRED.bind(api_key="..."))
         result = await agent.ask("Show me US GDP trends")
         print(result.text, result.datasets)
 
@@ -658,14 +668,90 @@ class Agent:
                         delta=False,
                         section="final_response",
                     )
+                elif isinstance(last_exception, AuthenticationError):
+                    error_logger.error(
+                        f"LLM authentication failed: {str(last_exception)}",
+                        exc_info=True
+                    )
+                    model_name = self.model_config.get("model", "the configured model")
+                    detail = str(last_exception).splitlines()[0] if str(last_exception) else ""
+                    yield AgentError(
+                        message=f"Authentication failed for {model_name}: {detail}",
+                        recoverable=False,
+                        error_type="authentication",
+                        section="final_response" if turn_state.final_response_started else "analysis",
+                    )
+                    yield TextDeltaEvent(
+                        content=(
+                            f"Authentication failed for `{model_name}`. "
+                            "Check that the required API key environment variable is set "
+                            "(e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`) "
+                            "and is valid for the selected model provider."
+                        ),
+                        message_id=text_message_id,
+                        delta=False,
+                        section="final_response",
+                    )
+                elif isinstance(last_exception, (BadRequestError, NotFoundError)):
+                    error_logger.error(
+                        f"LLM bad request: {str(last_exception)}",
+                        exc_info=True
+                    )
+                    model_name = self.model_config.get("model", "the configured model")
+                    detail = str(last_exception).splitlines()[0] if str(last_exception) else ""
+                    yield AgentError(
+                        message=f"Invalid request to {model_name}: {detail}",
+                        recoverable=False,
+                        error_type="bad_request",
+                        section="final_response" if turn_state.final_response_started else "analysis",
+                    )
+                    yield TextDeltaEvent(
+                        content=(
+                            f"The request to `{model_name}` was rejected by the provider. "
+                            "This usually means the model name is invalid, unavailable in your region, "
+                            f"or the request payload is malformed. Provider said: {detail}"
+                        ),
+                        message_id=text_message_id,
+                        delta=False,
+                        section="final_response",
+                    )
+                elif isinstance(last_exception, APIConnectionError):
+                    error_logger.error(
+                        f"LLM connection error: {str(last_exception)}",
+                        exc_info=True
+                    )
+                    yield AgentError(
+                        message=f"Could not reach the model provider: {last_exception}",
+                        recoverable=False,
+                        error_type="connection",
+                        section="final_response" if turn_state.final_response_started else "analysis",
+                    )
+                    yield TextDeltaEvent(
+                        content=(
+                            "Could not connect to the AI model provider. "
+                            "Check your network connection and try again."
+                        ),
+                        message_id=text_message_id,
+                        delta=False,
+                        section="final_response",
+                    )
                 else:
                     error_logger.error(
                         f"LLM error ({type(last_exception).__name__}): {str(last_exception)}",
                         exc_info=True
                     )
-                    error_msg = "I'm sorry, but an error occurred while trying to communicate with the AI model, and your request cannot proceed."
+                    detail = str(last_exception).splitlines()[0] if str(last_exception) else type(last_exception).__name__
+                    yield AgentError(
+                        message=f"LLM call failed ({type(last_exception).__name__}): {detail}",
+                        recoverable=False,
+                        error_type="llm_error",
+                        section="final_response" if turn_state.final_response_started else "analysis",
+                    )
                     yield TextDeltaEvent(
-                        content=error_msg,
+                        content=(
+                            f"An error occurred while communicating with the AI model "
+                            f"({type(last_exception).__name__}): {detail}"
+                        ),
                         message_id=text_message_id,
                         delta=False,
                         section="final_response" if turn_state.final_response_started else "analysis",

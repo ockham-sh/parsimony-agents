@@ -18,7 +18,8 @@ The agent loop connects them: it serializes the conversation state into an LLM-r
 
 ## Core Components
 
-### 1. Agent (`parsimony_agents/agent/`)
+### 1. Agent (`
+`)
 
 The main orchestrator that manages the LLM loop, tool invocation, and execution state.
 
@@ -127,21 +128,34 @@ AgentResult (text, datasets, charts, code)
 
 ## Key Design Patterns
 
-### 1. Composable Data Sources
+### 1. Composable Data Sources with Tool-Tag Bridging
 
-Data sources are plugged in via `parsimony` connectors:
+Data sources are plugged in via `parsimony` connectors. Use `discover.load_all()` to autoload every installed connector plugin and `bind_env()` to inject any required credentials from environment variables:
 
 ```python
-agent = Agent(
-    connectors=(
-        FRED.bind_deps(api_key="...")
-        + SDMX
-        + FMP.bind_deps(api_key="...")
-    )
+from parsimony import Connectors, discover
+from parsimony_fred import CONNECTORS as FRED
+from parsimony_sdmx import CONNECTORS as SDMX
+from parsimony_fmp import CONNECTORS as FMP
+
+# Autoload + env-bind (recommended)
+connectors = discover.load_all().bind_env()
+
+# Or compose explicitly
+connectors = Connectors.merge(
+    FRED.bind(api_key="..."),
+    SDMX,
+    FMP.bind(api_key="..."),
 )
+
+agent = Agent(connectors=connectors)
 ```
 
-Agents discover available data sources via the MCP server or connectors list.
+Connectors tagged `"tool"` (search, discovery) are automatically registered as **native agent tools** via `_connector_to_agent_tool()`. The agent can invoke them directly in conversation to get compact, context-friendly results. Non-tool connectors remain available through the `client` variable in the code executor for bulk data fetching via generated code.
+
+This creates a clear two-tier access model:
+- **Direct tools** (tool-tagged): agent calls them natively, results land in context window — suited for small, targeted queries (search, discovery, screener)
+- **Code execution** (non-tool): agent writes Python code using `client`, results land in the executor namespace — suited for bulk data fetch and analysis
 
 ### 2. Dual Consumption Modes
 
@@ -303,7 +317,9 @@ Test end-to-end agent workflows with mock or real connectors:
 ```python
 @pytest.mark.asyncio
 async def test_agent_ask():
-    agent = Agent(connectors=FRED.bind_deps(api_key="test"))
+    from parsimony_fred import CONNECTORS as FRED
+
+    agent = Agent(connectors=FRED.bind(api_key="test"))
     result = await agent.ask("What is the current unemployment rate?")
     assert result.ok
     assert "unemployment" in result.text.lower()
@@ -864,7 +880,7 @@ This is an unconditional import — `opentelemetry-api` must be installed even i
 
 ### In-process execution trust boundary
 
-`CodeExecutor` runs LLM-generated code via `exec()` inside the same Python process. The only restriction is that `__builtins__` is explicitly set (preventing accidental access to eval/exec from within executed code). There is no module import restriction — executed code can `import os`, `import subprocess`, etc. Deployments must isolate the host process.
+`CodeExecutor` runs LLM-generated code via `exec()` inside the same Python process. `__builtins__` is explicitly set (preventing accidental access to eval/exec from within executed code). A **restricted `__import__` allowlist** gates which modules can be imported: CPython lazy imports (e.g. `time`, `_strptime`) and common stdlib modules (`math`, `json`, `re`, `collections`, etc.) are permitted, while arbitrary imports are blocked. This is a defense-in-depth measure — deployments should still isolate the host process for production use.
 
 ### Guardrail default mismatch
 

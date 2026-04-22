@@ -22,7 +22,7 @@ from __future__ import annotations
 import asyncio
 import os
 
-from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony_fred import CONNECTORS as FRED
 
 from parsimony_agents import Agent, AgentResult
 
@@ -36,7 +36,7 @@ async def main() -> None:
 
     agent = Agent(
         model="gemini/gemini-3-flash-preview",
-        connectors=FRED.bind_deps(api_key=fred_key),
+        connectors=FRED.bind(api_key=fred_key),
     )
 
     # -----------------------------------------------------------------

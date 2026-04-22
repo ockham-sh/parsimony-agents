@@ -39,14 +39,14 @@ uv pip install -e ".[all]"
 
 ```python
 from parsimony_agents import Agent
-from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony import discover
 
 # Test basic import and instantiation
 agent = Agent(
     model="claude-sonnet-4-6",
-    connectors=FRED.bind_deps(api_key="test"),
+    connectors=discover.load_all().bind_env(),
 )
-print("✓ parsimony-agents installed successfully")
+print("parsimony-agents installed successfully")
 ```
 
 ## Configuration
@@ -76,19 +76,22 @@ export LITELLM_PROXY_URL="http://localhost:4000"
 from parsimony_agents import Agent
 from parsimony_agents.agent.config import AgentGuardrails
 from parsimony_agents.execution.executor import CodeExecutor
-from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony import discover
+
+# Autodiscover installed connectors and bind credentials from env vars
+connectors = discover.load_all().bind_env()
 
 # Minimal config (production-safe defaults)
 agent = Agent(
     model="claude-sonnet-4-6",
-    connectors=FRED.bind_deps(api_key="..."),
+    connectors=connectors,
 )
 
 # Advanced config with guardrails
 agent = Agent(
     model="claude-sonnet-4-6",
     instructions="You are an economic analyst...",
-    connectors=FRED.bind_deps(api_key="..."),
+    connectors=connectors,
     code_executor=CodeExecutor(cwd="/tmp/work", timeout_s=120),
     guardrails=AgentGuardrails(
         max_iterations=30,          # Max LLM turns
@@ -107,12 +110,12 @@ agent = Agent(
 ```python
 import asyncio
 from parsimony_agents import Agent
-from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony import discover
 
 async def main():
     agent = Agent(
         model="claude-sonnet-4-6",
-        connectors=FRED.bind_deps(api_key="your-key"),
+        connectors=discover.load_all().bind_env(),
     )
     
     result = await agent.ask("Show me US unemployment rate for the last 10 years")
@@ -134,12 +137,12 @@ asyncio.run(main())
 ```python
 import asyncio
 from parsimony_agents import Agent, stream_to_display
-from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony import discover
 
 async def main():
     agent = Agent(
         model="claude-sonnet-4-6",
-        connectors=FRED.bind_deps(api_key="your-key"),
+        connectors=discover.load_all().bind_env(),
     )
     
     async for event in agent.run("Analyze GDP trends"):
@@ -163,12 +166,12 @@ asyncio.run(main())
 ```python
 import asyncio
 from parsimony_agents import Agent
-from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony import discover
 
 async def main():
     agent = Agent(
         model="claude-sonnet-4-6",
-        connectors=FRED.bind_deps(api_key="your-key"),
+        connectors=discover.load_all().bind_env(),
     )
     
     # State persists across calls
@@ -218,13 +221,13 @@ Example FastAPI service:
 ```python
 from fastapi import FastAPI
 from parsimony_agents import Agent
-from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony import discover
 
 app = FastAPI()
 
 agent = Agent(
     model="claude-sonnet-4-6",
-    connectors=FRED.bind_deps(api_key="..."),
+    connectors=discover.load_all().bind_env(),
 )
 
 @app.post("/analyze")
@@ -446,9 +449,9 @@ Verify connector sets `result.provenance`:
 
 ```python
 # Check connector output
-from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony_fred import CONNECTORS as FRED
 
-client = FRED.bind_deps(api_key="...")
+client = FRED.bind(api_key="...")
 result = await client["fred_fetch"](series_id="UNRATE")
 print("Provenance:", result.provenance)  # Should not be empty
 ```

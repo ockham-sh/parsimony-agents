@@ -3,9 +3,9 @@
 Quick start::
 
     from parsimony_agents import Agent
-    from parsimony.connectors.fred import CONNECTORS as FRED
+    from parsimony_fred import CONNECTORS as FRED
 
-    agent = Agent(model="claude-sonnet-4-6", connectors=FRED.bind_deps(api_key="..."))
+    agent = Agent(model="claude-sonnet-4-6", connectors=FRED.bind(api_key="..."))
     result = await agent.ask("Show me US GDP trends")
 """
 

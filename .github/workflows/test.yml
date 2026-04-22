@@ -2,16 +2,52 @@ name: Test
 
 on: [push, pull_request]
 
+# Kernel + plugin sources are pinned editable in pyproject's
+# [tool.uv.sources]. CI checks out both repos side-by-side so the paths
+# resolve. Drop these checkouts (and the editable overrides) once kernel
+# 0.4.0 + plugins 0.4.0 ship to PyPI.
+env:
+  KERNEL_REPO: ockham-sh/parsimony
+  KERNEL_REF: main
+  CONNECTORS_REPO: ockham-sh/parsimony-connectors
+  CONNECTORS_REF: main
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: parsimony-agents
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+        with:
+          path: parsimony-agents
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KERNEL_REPO }}
+          ref: ${{ env.KERNEL_REF }}
+          path: parsimony
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CONNECTORS_REPO }}
+          ref: ${{ env.CONNECTORS_REF }}
+          path: parsimony-connectors
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e ".[all]" pytest pytest-asyncio
-      - run: pytest tests/ -v
+
+      - name: Sync workspace
+        run: uv sync --all-extras
+
+      - name: Pytest
+        # pytest + pytest-asyncio aren't declared deps; install ephemerally
+        # via --with (matches the prior `pip install ... pytest pytest-asyncio`
+        # inline pattern). If a dev dep group lands later, switch to that.
+        run: uv run --with pytest --with pytest-asyncio pytest tests/ -v
