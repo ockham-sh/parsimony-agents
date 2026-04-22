@@ -15,11 +15,13 @@ LLM frameworks are generic by design. `parsimony-agents` is purpose-built for da
 
 ```python
 from parsimony_agents import Agent
-from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony import discover
+
+connectors = discover.load_all().bind_env()
 
 agent = Agent(
     model="claude-sonnet-4-6",
-    connectors=FRED.bind_deps(api_key="your-fred-key"),
+    connectors=connectors,
 )
 
 result = await agent.ask("Show me US GDP trends over the last 20 years")
@@ -54,17 +56,24 @@ gdp = result.data  # pandas DataFrame with provenance attached
 Plug in any combination of data sources via [parsimony](../parsimony) connectors:
 
 ```python
-from parsimony.connectors.fred import CONNECTORS as FRED
-from parsimony.connectors.sdmx import CONNECTORS as SDMX
-from parsimony.connectors.fmp import CONNECTORS as FMP
+from parsimony import Connectors, discover
+from parsimony_fred import CONNECTORS as FRED
+from parsimony_sdmx import CONNECTORS as SDMX
+from parsimony_fmp import CONNECTORS as FMP
+
+# Either compose explicitly...
+connectors = Connectors.merge(
+    FRED.bind(api_key="..."),
+    SDMX,
+    FMP.bind(api_key="..."),
+)
+
+# ...or autodiscover everything installed and bind from env vars.
+connectors = discover.load_all().bind_env()
 
 agent = Agent(
     model="claude-sonnet-4-6",
-    connectors=(
-        FRED.bind_deps(api_key="...")
-        + SDMX
-        + FMP.bind_deps(api_key="...")
-    ),
+    connectors=connectors,
 )
 ```
 

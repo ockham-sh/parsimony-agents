@@ -25,7 +25,7 @@ import asyncio
 import signal
 import sys
 
-from parsimony.connectors import build_connectors_from_env
+from parsimony import discover
 
 from parsimony_agents import Agent, stream_to_display
 
@@ -41,11 +41,9 @@ _CLEAR_LINE = "\033[A\033[2K"
 
 
 async def main() -> None:
-    try:
-        connectors = build_connectors_from_env()
-    except ValueError as e:
-        print(f"Missing environment variable: {e}")
-        return
+    connectors = discover.load_all().bind_env()
+    for name in connectors.unbound:
+        print(f"Warning: connector {name!r} is unbound (missing environment variable)")
 
     agent = Agent(
         model="gemini/gemini-3-flash-preview",

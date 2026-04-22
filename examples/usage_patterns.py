@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 logging.basicConfig(level=logging.INFO)
 
 from parsimony_agents import Agent
-from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony_fred import CONNECTORS as FRED
 
 load_dotenv()
 
@@ -48,7 +48,7 @@ async def main():
         
     agent = Agent(
         model="gemini/gemini-3-flash-preview", # Using gemini as it is available
-        connectors=FRED.bind_deps(api_key=fred_key)
+        connectors=FRED.bind(api_key=fred_key)
     )
 
     # Pattern 1: Single dataset retrieval
@@ -69,7 +69,7 @@ async def main():
     # Pattern 3: Complex Multi-Series Retrieval and Comparison
     agent2 = Agent(
         model="gemini/gemini-3-flash-preview",
-        connectors=FRED.bind_deps(api_key=fred_key)
+        connectors=FRED.bind(api_key=fred_key)
     )
     
     await run_pattern(
