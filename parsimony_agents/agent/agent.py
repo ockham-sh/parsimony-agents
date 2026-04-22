@@ -6,7 +6,7 @@ import logging
 import re
 import tempfile
 import time
-from collections.abc import AsyncGenerator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -320,6 +320,157 @@ class Agent:
             return raw_path.strip()
         return None
 
+    async def _handle_llm_error(
+        self,
+        last_exception: Exception,
+        text_message_id: str,
+        turn_state: TurnState,
+        agent_span: Any,
+    ) -> AsyncIterator[AgentError | TextDeltaEvent]:
+        """Classify an LLM exception into a typed ``AgentError`` plus a
+        user-facing ``TextDeltaEvent``, and record it on the active span.
+
+        The branches are exhaustive — the trailing ``else`` is the catch-all
+        for unexpected provider errors. Each branch emits exactly the same
+        two-event shape so the caller always yields a uniform error frame.
+        """
+        section = "final_response" if turn_state.final_response_started else "analysis"
+        model_name = self.model_config.get("model", "the configured model")
+
+        if isinstance(last_exception, RateLimitError):
+            error_logger.error("Rate limit exceeded: %s", last_exception, exc_info=True)
+            yield AgentError(
+                message="Rate limit exceeded",
+                recoverable=False,
+                error_type="rate_limit",
+                section=section,
+            )
+            yield TextDeltaEvent(
+                content=(
+                    "We're currently in beta and experiencing high demand. "
+                    "The AI model has hit its rate limit, please wait a moment and try again. "
+                    "This is expected during peak usage and will be resolved as we scale."
+                ),
+                message_id=text_message_id,
+                delta=False,
+                section="final_response",
+            )
+        elif isinstance(last_exception, Timeout):
+            error_logger.error("Request timeout: %s", last_exception, exc_info=True)
+            yield AgentError(
+                message="Request timeout",
+                recoverable=False,
+                error_type="timeout",
+                section=section,
+            )
+            yield TextDeltaEvent(
+                content=(
+                    "The AI model took too long to respond, please wait a moment and try again. "
+                    "We're currently in beta and this will be resolved as we improve the service."
+                ),
+                message_id=text_message_id,
+                delta=False,
+                section="final_response",
+            )
+        elif isinstance(last_exception, ServiceUnavailableError) or (
+            isinstance(last_exception, APIError) and "unavailable" in str(last_exception).lower()
+        ):
+            error_logger.error("Model unavailable: %s", last_exception, exc_info=True)
+            yield AgentError(
+                message="Model unavailable",
+                recoverable=False,
+                error_type="unavailable",
+                section=section,
+            )
+            yield TextDeltaEvent(
+                content=(
+                    "The selected AI model is currently unavailable. "
+                    "Please try again in a moment or select a different model."
+                ),
+                message_id=text_message_id,
+                delta=False,
+                section="final_response",
+            )
+        elif isinstance(last_exception, AuthenticationError):
+            error_logger.error("LLM authentication failed: %s", last_exception, exc_info=True)
+            detail = str(last_exception).splitlines()[0] if str(last_exception) else ""
+            yield AgentError(
+                message=f"Authentication failed for {model_name}: {detail}",
+                recoverable=False,
+                error_type="authentication",
+                section=section,
+            )
+            yield TextDeltaEvent(
+                content=(
+                    f"Authentication failed for `{model_name}`. "
+                    "Check that the required API key environment variable is set "
+                    "(e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`) "
+                    "and is valid for the selected model provider."
+                ),
+                message_id=text_message_id,
+                delta=False,
+                section="final_response",
+            )
+        elif isinstance(last_exception, (BadRequestError, NotFoundError)):
+            error_logger.error("LLM bad request: %s", last_exception, exc_info=True)
+            detail = str(last_exception).splitlines()[0] if str(last_exception) else ""
+            yield AgentError(
+                message=f"Invalid request to {model_name}: {detail}",
+                recoverable=False,
+                error_type="bad_request",
+                section=section,
+            )
+            yield TextDeltaEvent(
+                content=(
+                    f"The request to `{model_name}` was rejected by the provider. "
+                    "This usually means the model name is invalid, unavailable in your region, "
+                    f"or the request payload is malformed. Provider said: {detail}"
+                ),
+                message_id=text_message_id,
+                delta=False,
+                section="final_response",
+            )
+        elif isinstance(last_exception, APIConnectionError):
+            error_logger.error("LLM connection error: %s", last_exception, exc_info=True)
+            yield AgentError(
+                message=f"Could not reach the model provider: {last_exception}",
+                recoverable=False,
+                error_type="connection",
+                section=section,
+            )
+            yield TextDeltaEvent(
+                content=(
+                    "Could not connect to the AI model provider. "
+                    "Check your network connection and try again."
+                ),
+                message_id=text_message_id,
+                delta=False,
+                section="final_response",
+            )
+        else:
+            error_logger.error(
+                "LLM error (%s): %s", type(last_exception).__name__, last_exception, exc_info=True
+            )
+            detail = str(last_exception).splitlines()[0] if str(last_exception) else type(last_exception).__name__
+            yield AgentError(
+                message=f"LLM call failed ({type(last_exception).__name__}): {detail}",
+                recoverable=False,
+                error_type="llm_error",
+                section=section,
+            )
+            yield TextDeltaEvent(
+                content=(
+                    f"An error occurred while communicating with the AI model "
+                    f"({type(last_exception).__name__}): {detail}"
+                ),
+                message_id=text_message_id,
+                delta=False,
+                section=section,
+            )
+
+        if agent_span and agent_span.is_recording():
+            agent_span.record_exception(last_exception)
+
     async def ask(
         self,
         message: str | Text,
@@ -599,168 +750,10 @@ class Agent:
                     break
 
             if last_exception is not None:
-                # Determine error message based on exception type
-                if isinstance(last_exception, RateLimitError):
-                    error_logger.error(
-                        f"Rate limit exceeded: {str(last_exception)}",
-                        exc_info=True
-                    )
-                    # Toast: short technical message
-                    yield AgentError(
-                        message="Rate limit exceeded",
-                        recoverable=False,
-                        error_type="rate_limit",
-                        section="final_response" if turn_state.final_response_started else "analysis",
-                    )
-                    rate_limit_user_msg = (
-                        "We're currently in beta and experiencing high demand. "
-                        "The AI model has hit its rate limit, please wait a moment and try again. "
-                        "This is expected during peak usage and will be resolved as we scale."
-                    )
-                    yield TextDeltaEvent(
-                        content=rate_limit_user_msg,
-                        message_id=text_message_id,
-                        delta=False,
-                        section="final_response",
-                    )
-                elif isinstance(last_exception, Timeout):
-                    error_logger.error(
-                        f"Request timeout: {str(last_exception)}",
-                        exc_info=True
-                    )
-                    # Toast: short technical message
-                    yield AgentError(
-                        message="Request timeout",
-                        recoverable=False,
-                        error_type="timeout",
-                        section="final_response" if turn_state.final_response_started else "analysis",
-                    )
-                    timeout_user_msg = (
-                        "The AI model took too long to respond, please wait a moment and try again. "
-                        "We're currently in beta and this will be resolved as we improve the service."
-                    )
-                    yield TextDeltaEvent(
-                        content=timeout_user_msg,
-                        message_id=text_message_id,
-                        delta=False,
-                        section="final_response",
-                    )
-                elif isinstance(last_exception, ServiceUnavailableError) or (
-                    isinstance(last_exception, APIError) and "unavailable" in str(last_exception).lower()
+                async for event in self._handle_llm_error(
+                    last_exception, text_message_id, turn_state, agent_span
                 ):
-                    error_logger.error(
-                        f"Model unavailable: {str(last_exception)}",
-                        exc_info=True
-                    )
-                    yield AgentError(
-                        message="Model unavailable",
-                        recoverable=False,
-                        error_type="unavailable",
-                        section="final_response" if turn_state.final_response_started else "analysis",
-                    )
-                    model_unavailable_user_msg = (
-                        "The selected AI model is currently unavailable. "
-                        "Please try again in a moment or select a different model."
-                    )
-                    yield TextDeltaEvent(
-                        content=model_unavailable_user_msg,
-                        message_id=text_message_id,
-                        delta=False,
-                        section="final_response",
-                    )
-                elif isinstance(last_exception, AuthenticationError):
-                    error_logger.error(
-                        f"LLM authentication failed: {str(last_exception)}",
-                        exc_info=True
-                    )
-                    model_name = self.model_config.get("model", "the configured model")
-                    detail = str(last_exception).splitlines()[0] if str(last_exception) else ""
-                    yield AgentError(
-                        message=f"Authentication failed for {model_name}: {detail}",
-                        recoverable=False,
-                        error_type="authentication",
-                        section="final_response" if turn_state.final_response_started else "analysis",
-                    )
-                    yield TextDeltaEvent(
-                        content=(
-                            f"Authentication failed for `{model_name}`. "
-                            "Check that the required API key environment variable is set "
-                            "(e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`) "
-                            "and is valid for the selected model provider."
-                        ),
-                        message_id=text_message_id,
-                        delta=False,
-                        section="final_response",
-                    )
-                elif isinstance(last_exception, (BadRequestError, NotFoundError)):
-                    error_logger.error(
-                        f"LLM bad request: {str(last_exception)}",
-                        exc_info=True
-                    )
-                    model_name = self.model_config.get("model", "the configured model")
-                    detail = str(last_exception).splitlines()[0] if str(last_exception) else ""
-                    yield AgentError(
-                        message=f"Invalid request to {model_name}: {detail}",
-                        recoverable=False,
-                        error_type="bad_request",
-                        section="final_response" if turn_state.final_response_started else "analysis",
-                    )
-                    yield TextDeltaEvent(
-                        content=(
-                            f"The request to `{model_name}` was rejected by the provider. "
-                            "This usually means the model name is invalid, unavailable in your region, "
-                            f"or the request payload is malformed. Provider said: {detail}"
-                        ),
-                        message_id=text_message_id,
-                        delta=False,
-                        section="final_response",
-                    )
-                elif isinstance(last_exception, APIConnectionError):
-                    error_logger.error(
-                        f"LLM connection error: {str(last_exception)}",
-                        exc_info=True
-                    )
-                    yield AgentError(
-                        message=f"Could not reach the model provider: {last_exception}",
-                        recoverable=False,
-                        error_type="connection",
-                        section="final_response" if turn_state.final_response_started else "analysis",
-                    )
-                    yield TextDeltaEvent(
-                        content=(
-                            "Could not connect to the AI model provider. "
-                            "Check your network connection and try again."
-                        ),
-                        message_id=text_message_id,
-                        delta=False,
-                        section="final_response",
-                    )
-                else:
-                    error_logger.error(
-                        f"LLM error ({type(last_exception).__name__}): {str(last_exception)}",
-                        exc_info=True
-                    )
-                    detail = str(last_exception).splitlines()[0] if str(last_exception) else type(last_exception).__name__
-                    yield AgentError(
-                        message=f"LLM call failed ({type(last_exception).__name__}): {detail}",
-                        recoverable=False,
-                        error_type="llm_error",
-                        section="final_response" if turn_state.final_response_started else "analysis",
-                    )
-                    yield TextDeltaEvent(
-                        content=(
-                            f"An error occurred while communicating with the AI model "
-                            f"({type(last_exception).__name__}): {detail}"
-                        ),
-                        message_id=text_message_id,
-                        delta=False,
-                        section="final_response" if turn_state.final_response_started else "analysis",
-                    )
-                
-                # Record error on span
-                if agent_span and agent_span.is_recording():
-                    agent_span.record_exception(last_exception)
-                
+                    yield event
                 break
 
             if response is None or len(response.choices) == 0:
