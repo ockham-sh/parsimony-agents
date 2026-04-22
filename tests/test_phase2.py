@@ -55,7 +55,11 @@ def test_fetch_log_entry_roundtrip() -> None:
 
 @pytest.mark.asyncio
 async def test_code_executor_drains_fetch_log() -> None:
-    from server.execution import CodeExecutor
+    server_execution = pytest.importorskip(
+        "server.execution",
+        reason="requires terminal repo's server.execution package",
+    )
+    CodeExecutor = server_execution.CodeExecutor
 
     cwd = tempfile.mkdtemp()
     ex = CodeExecutor(cwd=cwd)
@@ -80,7 +84,11 @@ _fetch_log.append({
 @pytest.mark.asyncio
 async def test_code_executor_await_cell_runs() -> None:
     """Cells containing ``await`` use the async wrapper and must execute without error."""
-    from server.execution import CodeExecutor
+    server_execution = pytest.importorskip(
+        "server.execution",
+        reason="requires terminal repo's server.execution package",
+    )
+    CodeExecutor = server_execution.CodeExecutor
 
     cwd = tempfile.mkdtemp()
     ex = CodeExecutor(cwd=cwd)
