@@ -12,7 +12,7 @@ import os
 import secrets
 import string
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -26,6 +26,7 @@ import pandas as pd
 from parsimony.connector import Connectors
 
 from parsimony_agents.execution.factory import OutputFactory
+from parsimony_agents.execution.helpers import normalize_connector_bundles
 from parsimony_agents.execution.outputs import (
     FetchLogEntry,
     FigureObject,
@@ -143,24 +144,6 @@ def _drain_fetch_log(exec_locals: dict[str, Any]) -> list[FetchLogEntry]:
             out.append(FetchLogEntry.model_validate(item))
     raw.clear()
     return out
-
-
-def _normalize_connector_bundles(connectors: Any) -> dict[str, Connectors]:
-    """Coerce caller input into a ``{binding_name: Connectors}`` mapping.
-
-    A bare :class:`Connectors` is treated as ``{"client": connectors}`` to keep
-    the OSS quick-start (``Agent(..., connectors=FRED)``) working unchanged.
-    A mapping is shallow-copied; ``None`` becomes an empty dict.
-    """
-    if connectors is None:
-        return {}
-    if isinstance(connectors, Connectors):
-        return {"client": connectors}
-    if isinstance(connectors, Mapping):
-        return {str(k): v for k, v in connectors.items()}
-    raise TypeError(
-        f"connectors must be a Connectors or Mapping[str, Connectors]; got {type(connectors).__name__}"
-    )
 
 
 def generate_cell_id(length: int = 6) -> str:
@@ -344,7 +327,7 @@ class CodeExecutor(BaseCodeExecutor):
         wrapping every connector. A single :class:`Connectors` is also accepted
         and treated as ``{"client": connectors}`` for backwards compatibility.
         """
-        self._connectors = _normalize_connector_bundles(connectors)
+        self._connectors = normalize_connector_bundles(connectors)
         self._apply_connectors()
 
     def _apply_connectors(self) -> None:

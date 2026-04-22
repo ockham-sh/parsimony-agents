@@ -9,6 +9,7 @@ from parsimony.connector import Connectors
 from pydantic import BaseModel, Field
 
 from parsimony_agents.agent.outputs import SystemToolOutput
+from parsimony_agents.execution.helpers import normalize_connector_bundles
 from parsimony_agents.messages import Text
 
 _CELL_REF_RE = re.compile(r"^(\w+)\[(\d+),([^\]]+)\]$")
@@ -52,17 +53,9 @@ def render_connector_catalog(
     Returns the empty string when no connectors are bound, so callers can
     cleanly skip the ``<available_connectors>`` block.
     """
-    if connectors is None:
+    bundles = normalize_connector_bundles(connectors)
+    if not bundles:
         return ""
-    if isinstance(connectors, Connectors):
-        bundles: Mapping[str, Connectors] = {"client": connectors}
-    elif isinstance(connectors, Mapping):
-        bundles = {str(name): bundle for name, bundle in connectors.items()}
-    else:
-        raise TypeError(
-            "connectors must be a Connectors or Mapping[str, Connectors]; "
-            f"got {type(connectors).__name__}"
-        )
 
     sections: list[str] = []
     for binding, bundle in bundles.items():

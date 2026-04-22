@@ -1,39 +1,37 @@
-"""Helpers for injecting Connectors into code executors."""
+"""Shared helpers for wiring connector bundles into the executor."""
 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Protocol, runtime_checkable
 
 from parsimony.connector import Connectors
 
 
-@runtime_checkable
-class ExecutorWithLocals(Protocol):
-    """Minimal interface for executors that support local variable injection."""
+def normalize_connector_bundles(
+    connectors: Connectors | Mapping[str, Connectors] | None,
+) -> dict[str, Connectors]:
+    """Coerce caller input into a ``{binding_name: Connectors}`` mapping.
 
-    locals: dict[str, Any]
+    A bare :class:`Connectors` is treated as ``{"client": connectors}`` to
+    keep the OSS quick-start (``Agent(..., connectors=FRED)``) working
+    unchanged. A mapping is shallow-copied with string-coerced keys.
+    ``None`` becomes an empty dict so callers can branch on emptiness
+    without an extra ``is None`` guard.
 
-
-def inject_connectors(
-    executor: ExecutorWithLocals,
-    connectors: Connectors | Mapping[str, Connectors],
-) -> None:
-    """Bind ``connectors`` into the executor's locals.
-
-    A bare :class:`Connectors` is bound as ``client`` (matches the OSS
-    quick-start ``await client["fred"](series_id="...")``). A mapping
-    ``{name: Connectors}`` binds each entry under its key — for example
-    ``{"fetch": fetch_bundle, "search": search_bundle}`` exposes them as
-    ``await fetch["fred"](...)`` and ``await search["fred"](query="...")``.
+    The single normalisation point is the source of truth for what the
+    executor's :meth:`set_connectors` accepts and what the per-turn
+    context renders in the system prompt — they cannot drift.
     """
+    if connectors is None:
+        return {}
     if isinstance(connectors, Connectors):
-        executor.locals["client"] = connectors
-        return
+        return {"client": connectors}
     if isinstance(connectors, Mapping):
-        for name, bundle in connectors.items():
-            executor.locals[str(name)] = bundle
-        return
+        return {str(name): bundle for name, bundle in connectors.items()}
     raise TypeError(
-        f"connectors must be a Connectors or Mapping[str, Connectors]; got {type(connectors).__name__}"
+        "connectors must be a Connectors or Mapping[str, Connectors]; "
+        f"got {type(connectors).__name__}"
     )
+
+
+__all__ = ["normalize_connector_bundles"]

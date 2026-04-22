@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
-from typing import Any, ClassVar, Final, Literal
+from typing import Any, Final, Literal
 
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
@@ -85,15 +85,14 @@ def snapshot_path(*, artifact_id: str, version: int, kind: str) -> str:
 
 
 class _ArtifactBase(MessageContent):
-    """Identity + payload machinery shared by :class:`Dataset` / :class:`Chart`.
+    """Identity machinery shared by :class:`Dataset` / :class:`Chart`.
 
-    Subclasses set :attr:`_payload_type` to the concrete payload class
-    they accept (``DataFrameObject`` or ``FigureObject``); :meth:`with_payload`
-    enforces it and ``TypeError`` is raised on mismatch — never ``ValueError``.
-    Pydantic models are deliberately *permissive* about ``title`` so that
-    reading a vanilla file (no embedded curation) produces an empty
-    placeholder envelope rather than failing validation. Non-emptiness is
-    enforced at the agent tool boundary.
+    Subclass-specific payload typing is enforced by each subclass's
+    :meth:`with_payload` (``isinstance`` + ``TypeError``) — never
+    ``ValueError``. Pydantic models are deliberately *permissive* about
+    ``title`` so that reading a vanilla file (no embedded curation)
+    produces an empty placeholder envelope rather than failing
+    validation. Non-emptiness is enforced at the agent tool boundary.
     """
 
     schema_version: int = 1
@@ -102,9 +101,6 @@ class _ArtifactBase(MessageContent):
     title: str = ""
     description: str = ""
     notes: list[str] = Field(default_factory=list)
-
-    # Subclass-defined: the concrete payload class accepted by with_payload.
-    _payload_type: ClassVar[type] = object  # overridden in subclasses
 
     @model_validator(mode="after")
     def populate_identity(self) -> _ArtifactBase:
@@ -147,7 +143,6 @@ class Dataset(_ArtifactBase):
     # to the streaming dispatcher (or :meth:`save`) without a side channel.
     # Never serialized.
     _payload: DataFrameObject | None = PrivateAttr(default=None)
-    _payload_type: ClassVar[type] = DataFrameObject
 
     def with_payload(self, payload: DataFrameObject) -> Dataset:
         """Attach the executor's DataFrameObject for this dataset and return self."""
@@ -243,7 +238,6 @@ class Chart(_ArtifactBase):
     chart_notebook_ref: str = ""
 
     _payload: FigureObject | None = PrivateAttr(default=None)
-    _payload_type: ClassVar[type] = FigureObject
 
     def with_payload(self, payload: FigureObject) -> Chart:
         """Attach the executor's FigureObject for this chart and return self."""
