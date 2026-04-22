@@ -19,7 +19,6 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
-import pytest
 from parsimony.result import Provenance, Result
 
 from parsimony_agents.execution.data_objects import (

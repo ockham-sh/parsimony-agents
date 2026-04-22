@@ -25,9 +25,9 @@ from litellm.exceptions import (
     ServiceUnavailableError,
     Timeout,
 )
+from opentelemetry import trace
 from parsimony.connector import Connectors
 from parsimony.result import Result
-from opentelemetry import trace
 from pydantic import TypeAdapter
 
 from parsimony_agents.agent.config import AgentGuardrails, FileStore
@@ -57,7 +57,6 @@ from parsimony_agents.agent.models import (
     ReturnedChartState,
     ReturnedDatasetState,
 )
-from parsimony_agents.notebook import Script
 from parsimony_agents.agent.outputs import SystemToolMessage, SystemToolOutput, UtilityToolOutput
 from parsimony_agents.agent.tracing import trace_tool_execution
 from parsimony_agents.artifacts import (
@@ -73,12 +72,13 @@ from parsimony_agents.execution import (
     StringPaginator,
 )
 from parsimony_agents.execution.executor import BaseCodeExecutor
-from parsimony_agents.execution.parquet_helpers import parquet_summary
 from parsimony_agents.execution.factory import OutputFactory as FrameworkOutputFactory
+from parsimony_agents.execution.parquet_helpers import parquet_summary
 from parsimony_agents.messages import Message, Text, blocks_to_text
+from parsimony_agents.notebook import Script
 from parsimony_agents.rag.keyword_store import get_or_create_session_keyword_store
 from parsimony_agents.rag.vector_store import get_or_create_session_vector_store
-from parsimony_agents.tools import Tools, toolmethod
+from parsimony_agents.tools import ToolMethod, Tools, toolmethod
 from parsimony_agents.variable import Variable, VariableStore
 from parsimony_agents.views import get_llm_view_defaults
 
@@ -157,12 +157,10 @@ class AgentResult:
             result = getattr(event, "result", None)
             if result is None:
                 return
-            if isinstance(result, Dataset):
-                if result.artifact_id:
-                    self.datasets[result.artifact_id] = result
-            elif isinstance(result, Chart):
-                if result.artifact_id:
-                    self.charts[result.artifact_id] = result
+            if isinstance(result, Dataset) and result.artifact_id:
+                self.datasets[result.artifact_id] = result
+            elif isinstance(result, Chart) and result.artifact_id:
+                self.charts[result.artifact_id] = result
 
 
 class Agent:
@@ -513,8 +511,6 @@ class Agent:
         if isinstance(user_message, str):
             user_message = Text(content=user_message)
 
-        response_id = str(uuid4())
-
         agent_span = trace.get_current_span()
 
         logger.info("Agent run started", extra={"prompt_preview": user_message.content[:1000]})
@@ -580,9 +576,6 @@ class Agent:
                 ctx.messages.append(AgentMessage(role="user", content=user_message))
 
         iteration = 0
-        data_context_iteration = 0
-        notebook_iteration = 0
-
 
         tool_choice = "auto"
 
@@ -843,15 +836,16 @@ class Agent:
                 # Defined as a factory so each coroutine captures its arguments by value,
                 # avoiding the classic Python closure-over-loop-variable pitfall.
                 def _build_coroutine(
-                    name: str,
+                    tool: ToolMethod,
                     args_with_ctx: dict,
+                    name: str,
                     t_type: str,
                     raw_args: dict,
                     timeout_s: float,
                 ):
                     @trace_tool_execution(name, t_type, logger, error_logger, timeout_s)
                     async def _execute():
-                        return await tools[name](**args_with_ctx)
+                        return await tool(**args_with_ctx)
                     return _execute(tool_args=raw_args)
 
                 # ── Phase 1: validate, yield "started" UI chunks, build coroutines ──────
@@ -935,8 +929,9 @@ class Agent:
                         call_signature,
                         repeat_count,
                         _build_coroutine(
-                            tool_name,
+                            tools[tool_name],
                             {**tool_args, "context": ctx},
+                            tool_name,
                             tool_type,
                             tool_args,
                             tool_timeout_s,
@@ -955,7 +950,9 @@ class Agent:
                 # ── Phase 3: flush results sequentially into shared state ────────────────
                 # Results are committed in the original tool-call order so the LLM sees a
                 # well-formed message sequence, and ctx mutations stay serialised.
-                for (tool_call, call_signature, repeat_count, _), raw_result in zip(tool_executions, raw_results):
+                for (tool_call, call_signature, repeat_count, _), raw_result in zip(
+                    tool_executions, raw_results, strict=True
+                ):
                     tool_name = tool_call.function.name
                     tool_args = json.loads(tool_call.function.arguments)
                     # Re-extract _ui_message (already stripped during Phase 1,
@@ -1277,16 +1274,15 @@ class Agent:
         var = context.data_context[variable_name]
         output = var.output
 
-        if output is not None:
-            if output.type in ("dataframe", "primitive"):
-                tasks = []
-                if context.keyword_store and not keyword_indexed:
-                    tasks.append(context.keyword_store.index_output(output, variable_name))
-                if context.vector_store and not vector_indexed:
-                    tasks.append(context.vector_store.index_output(output, variable_name))
-                if tasks:
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-                    return all(r is True or not isinstance(r, Exception) for r in results)
+        if output is not None and output.type in ("dataframe", "primitive"):
+            tasks = []
+            if context.keyword_store and not keyword_indexed:
+                tasks.append(context.keyword_store.index_output(output, variable_name))
+            if context.vector_store and not vector_indexed:
+                tasks.append(context.vector_store.index_output(output, variable_name))
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                return all(r is True or not isinstance(r, Exception) for r in results)
 
         return False
 
@@ -1649,8 +1645,7 @@ class Agent:
         for figure in kernel_output.get_figures():
             self.figures.append(figure)
 
-        message = "Executed " + ("with errors." if notebook.has_errors() else "successfully." + " Check next User message for outputs.")
-        return kernel_output # Text(content=message)
+        return kernel_output
 
     @toolmethod(
         name="code_edit",
@@ -1688,8 +1683,7 @@ class Agent:
         for figure in kernel_output.get_figures():
             self.figures.append(figure)
 
-        message = "Executed " + ("with errors." if notebook.has_errors() else "successfully.") + " Check next User message for outputs."
-        return kernel_output # Text(content=message)
+        return kernel_output
 
     def _stamp_data_objects(self, notebook: Any) -> None:
         """Copy :attr:`KernelOutput.fetch_log` onto the notebook for the UI."""
@@ -2263,7 +2257,7 @@ class Agent:
             return []
         notebook_code = context.notebooks[notebook_ref].code
         source_variables = []
-        for variable_name in context.data_context.variables.keys():
+        for variable_name in context.data_context.variables:
             if exclude_variable_name is not None and variable_name == exclude_variable_name:
                 continue
             if re.search(rf"\b{re.escape(variable_name)}\b", notebook_code):
