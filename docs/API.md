@@ -8,11 +8,11 @@ Main orchestrator for data analysis workflows.
 
 ```python
 from parsimony_agents import Agent
-from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony import discover
 
 agent = Agent(
     model="claude-sonnet-4-6",
-    connectors=FRED.bind_deps(api_key="your-key")
+    connectors=discover.load_all().bind_env(),
 )
 ```
 

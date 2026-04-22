@@ -3,7 +3,7 @@
 Prerequisites::
 
     pip install parsimony-agents[display]
-    export ANTHROPIC_API_KEY="sk-ant-..."   # or any litellm-supported provider
+    export GEMINI_API_KEY="..."   # or any litellm-supported provider
     export FRED_API_KEY="..."               # free: https://fred.stlouisfed.org/docs/api/api_key.html
 
 Run::
@@ -14,10 +14,15 @@ For direct event access (custom UIs, websockets), see ``event_stream.py``.
 
 This example uses FRED (free API key) but you can compose any connectors::
 
-    from parsimony.connectors.sdmx import CONNECTORS as SDMX
-    from parsimony.connectors.fmp import CONNECTORS as FMP
+    from parsimony.connector import Connectors
+    from parsimony_sdmx import CONNECTORS as SDMX
+    from parsimony_fmp import CONNECTORS as FMP
 
-    connectors = FRED.bind_deps(api_key="...") + SDMX + FMP.bind_deps(api_key="...")
+    connectors = Connectors.merge(
+        FRED.bind(api_key="..."),
+        SDMX,
+        FMP.bind(api_key="..."),
+    )
 """
 
 from __future__ import annotations
@@ -25,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import os
 
-from parsimony.connectors.fred import CONNECTORS as FRED
+from parsimony_fred import CONNECTORS as FRED
 
 from parsimony_agents import Agent, stream_to_display
 
@@ -39,7 +44,7 @@ async def main() -> None:
 
     agent = Agent(
         model="gemini/gemini-3-flash-preview",
-        connectors=FRED.bind_deps(api_key=fred_key),
+        connectors=FRED.bind(api_key=fred_key),
     )
 
     # Example 1: Ask a question — full display with spinner, datasets, code
