@@ -219,6 +219,7 @@ class DisplayBackend(Protocol):
     def start_response(self) -> None: ...
     def stream_text(self, chunk: str) -> None: ...
     def end_response(self, full_text: str) -> None: ...
+    def show_error(self, message: str, error_type: str | None = None) -> None: ...
     def show_datasets(self, datasets: dict[str, Any], max_rows: int, context: Any | None = None) -> None: ...
     def show_code(self, code: dict[str, Any], max_lines: int) -> None: ...
     def show_charts(self, charts: dict[str, Any]) -> None: ...
@@ -499,6 +500,16 @@ class _RichDisplay:
                 self._console.print("  [dim]~ render failed[/]")
             self._console.print()
 
+    def show_error(self, message: str, error_type: str | None = None) -> None:
+        # Stop spinner so the panel is visible
+        if self._status:
+            self._status.stop()
+            self._status = None
+        title = f"Error: {error_type}" if error_type else "Error"
+        self._console.print()
+        self._console.print(Panel(message, title=title, border_style="red", expand=False))
+        self._console.print()
+
     def show_status(
         self,
         ok: bool,
@@ -702,6 +713,13 @@ class _PlainDisplay:
             print()
         print()
 
+    def show_error(self, message: str, error_type: str | None = None) -> None:
+        header = f"--- Error ({error_type}) " if error_type else "--- Error "
+        print()
+        print(header + "-" * max(0, 60 - len(header)))
+        print(f"  {message}")
+        print()
+
     def show_status(
         self,
         ok: bool,
@@ -823,6 +841,11 @@ async def stream_to_display(
 
             elif etype == "error":
                 error_count += 1
+                display.spinner_stop()
+                display.show_error(
+                    getattr(event, "message", "Unknown error"),
+                    error_type=getattr(event, "error_type", None),
+                )
 
     finally:
         # Restore logger levels

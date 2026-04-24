@@ -7,6 +7,7 @@ import hashlib
 import logging
 import shutil
 import tempfile
+import warnings
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -167,7 +168,19 @@ class DataframeRef(BaseModel):
         if needs_copy:
             dataframe = dataframe.copy()
             for col in dataframe.columns:
-                if dataframe[col].dtype == object:
+                if dataframe[col].dtype != object:
+                    continue
+                sample = dataframe[col].dropna()
+                if sample.empty:
+                    continue
+                # Only attempt datetime coercion when the first non-null value
+                # is already a datetime-like Python object. This avoids invoking
+                # dateutil parsing (and its noisy UserWarning) on plain string
+                # columns that happen to be object dtype.
+                if not isinstance(sample.iloc[0], (pd.Timestamp, )) and not hasattr(sample.iloc[0], "isoformat"):
+                    continue
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
                     try:
                         dataframe[col] = pd.to_datetime(dataframe[col])
                     except (ValueError, TypeError):
