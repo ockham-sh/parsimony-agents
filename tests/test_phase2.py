@@ -50,7 +50,12 @@ def test_fetch_log_entry_roundtrip() -> None:
             {"name": "date", "dtype": "datetime", "role": "data"},
             {"name": "value", "dtype": "numeric", "role": "data"},
         ],
-        "provenance": {"source": "fred", "params": {"series_id": "GDPC1"}},
+        "provenance": {
+            "source": "fred",
+            "params": {"series_id": "GDPC1"},
+            "description": "US macro series",
+            "tags": ["macro", "monthly"],
+        },
         "head": {"schema": {}, "data": []},
         "tail": None,
     }
@@ -60,6 +65,8 @@ def test_fetch_log_entry_roundtrip() -> None:
     dumped = e.model_dump(mode="json")
     e2 = FetchLogEntry.model_validate(dumped)
     assert e2.source == e.source
+    assert e2.provenance.description == "US macro series"
+    assert e2.provenance.tags == ["macro", "monthly"]
 
 
 @pytest.mark.asyncio

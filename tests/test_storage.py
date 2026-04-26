@@ -25,6 +25,17 @@ def test_read_write_delete_exists(tmp_path: Path) -> None:
     _run(body())
 
 
+def test_append_creates_and_extends(tmp_path: Path) -> None:
+    storage = LocalFileStorage(tmp_path)
+
+    async def body() -> None:
+        await storage.append("logs/t.jsonl", b'{"a":1}\n')
+        await storage.append("logs/t.jsonl", b'{"a":2}\n')
+        assert await storage.read("logs/t.jsonl") == b'{"a":1}\n{"a":2}\n'
+
+    _run(body())
+
+
 def test_list_keys_includes_dot_path_components(tmp_path: Path) -> None:
     """Storage returns everything; visibility filtering is the caller's job."""
     storage = LocalFileStorage(tmp_path)

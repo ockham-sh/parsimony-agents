@@ -11,8 +11,10 @@ deliberately a caller concern. The storage layer returns whatever it has.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
+import uuid
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
@@ -30,6 +32,10 @@ class FileStorage(Protocol):
     async def read(self, key: str) -> bytes: ...
 
     async def write(self, key: str, data: bytes) -> None: ...
+
+    async def append(self, key: str, data: bytes) -> None:
+        """Append *data* to the object at *key*; create the file if missing."""
+        ...
 
     async def delete(self, key: str) -> None: ...
 
@@ -62,6 +68,23 @@ class FileStorage(Protocol):
         ...
 
 
+def _read_key_bytes(root: Path, key: str) -> bytes:
+    return (root / key).read_bytes()
+
+
+def _write_key_bytes(root: Path, key: str, data: bytes) -> None:
+    path = root / key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        tmp.write_bytes(data)
+        tmp.replace(path)
+    except Exception:
+        if tmp.exists():
+            tmp.unlink(missing_ok=True)
+        raise
+
+
 class LocalFileStorage:
     """Filesystem-backed :class:`FileStorage` under a single root directory."""
 
@@ -69,19 +92,19 @@ class LocalFileStorage:
         self._root = root.resolve()
 
     async def read(self, key: str) -> bytes:
-        return (self._root / key).read_bytes()
+        return await asyncio.to_thread(_read_key_bytes, self._root, key)
 
     async def write(self, key: str, data: bytes) -> None:
+        await asyncio.to_thread(_write_key_bytes, self._root, key, data)
+
+    def _append_bytes_sync(self, key: str, data: bytes) -> None:
         path = self._root / key
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        try:
-            tmp.write_bytes(data)
-            tmp.replace(path)
-        except Exception:
-            if tmp.exists():
-                tmp.unlink(missing_ok=True)
-            raise
+        with open(path, "ab") as f:
+            f.write(data)
+
+    async def append(self, key: str, data: bytes) -> None:
+        await asyncio.to_thread(self._append_bytes_sync, key, data)
 
     async def delete(self, key: str) -> None:
         (self._root / key).unlink(missing_ok=True)

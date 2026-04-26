@@ -20,7 +20,7 @@ dependencies = [
     "pandas>=2.3.3,<3",
     "numpy>=1.24.0,<3",
     "httpx>=0.28.1",
-    "litellm",
+    "litellm>=1.83.3,<2",
     "altair>=6.0.0,<7",
     "vl-convert-python>=1.8.0,<2",
     "dateparser>=1.3.0,<2",
@@ -34,13 +34,18 @@ dependencies = [
 rag = ["chromadb>=1.4.0,<2", "tantivy>=0.25.0,<1"]
 sql = ["duckdb>=1.4.3,<2"]
 display = ["rich>=14.0.0"]
+documents = [
+    "pypdf>=5.0.0,<6",
+    "openpyxl>=3.1.0,<4",
+    "python-pptx>=1.0.0,<2",
+]
 examples = [
     "parsimony-fred",
     "parsimony-sdmx",
     "parsimony-fmp",
     "python-dotenv>=1.0.0",
 ]
-all = ["parsimony-agents[rag,sql,display]"]
+all = ["parsimony-agents[rag,sql,display,documents]"]
 
 [project.urls]
 Homepage = "https://parsimony.dev"
@@ -64,7 +69,10 @@ parsimony-core = { path = "../parsimony", editable = true }
 parsimony-fred = { path = "../parsimony-connectors/packages/fred", editable = true }
 parsimony-sdmx = { path = "../parsimony-connectors/packages/sdmx", editable = true }
 parsimony-fmp = { path = "../parsimony-connectors/packages/fmp", editable = true }
-litellm = { git = "https://github.com/espinetandreu/litellm.git", rev = "db745405eb84f2c693599f6959d21af0785e7bf5" }
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [build-system]
 requires = ["hatchling"]
@@ -73,4 +81,5 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "pytest-asyncio>=0.25.0",
 ]

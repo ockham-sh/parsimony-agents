@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
 import tempfile
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Mapping
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,12 +28,14 @@ from litellm.exceptions import (
 )
 from opentelemetry import trace
 from parsimony.connector import Connectors
-from parsimony.result import Result
+from parsimony.result import Provenance, Result
 from pydantic import TypeAdapter
 
+from parsimony_agents.agent.cancellation import CancellationRequest
 from parsimony_agents.agent.config import AgentGuardrails, FileStore
 from parsimony_agents.agent.events import (
     AgentError,
+    RunCancelled,
     StateSnapshot,
     ToolEvent,
 )
@@ -57,7 +60,12 @@ from parsimony_agents.agent.models import (
     ReturnedChartState,
     ReturnedDatasetState,
 )
-from parsimony_agents.agent.outputs import SystemToolMessage, SystemToolOutput, UtilityToolOutput
+from parsimony_agents.agent.outputs import (
+    ArtifactLlmResult,
+    SystemToolMessage,
+    SystemToolOutput,
+    UtilityToolOutput,
+)
 from parsimony_agents.agent.tracing import trace_tool_execution
 from parsimony_agents.artifacts import (
     Chart,
@@ -71,15 +79,19 @@ from parsimony_agents.execution import (
     PrimitiveObject,
     StringPaginator,
 )
+from parsimony_agents.execution.outputs import KernelOutput
 from parsimony_agents.execution.executor import BaseCodeExecutor
 from parsimony_agents.execution.factory import OutputFactory as FrameworkOutputFactory
 from parsimony_agents.execution.parquet_helpers import parquet_summary
 from parsimony_agents.messages import Message, Text, blocks_to_text
-from parsimony_agents.notebook import Script
+
+# Tool message for cooperative cancellation; keeps one tool output per tool call id.
+CANCELLED_TOOL_TEXT = "Cancelled by user before the tool completed."
+from parsimony_agents.notebook import Script, ScriptPreview, stamp_fetch_log_to_script
+from parsimony_agents.notebook_io import deserialize_notebook, serialize_notebook
 from parsimony_agents.rag.keyword_store import get_or_create_session_keyword_store
 from parsimony_agents.rag.vector_store import get_or_create_session_vector_store
 from parsimony_agents.tools import ToolMethod, Tools, toolmethod
-from parsimony_agents.variable import Variable, VariableStore
 from parsimony_agents.views import get_llm_view_defaults
 
 logger = logging.getLogger("parsimony_agents")
@@ -87,27 +99,36 @@ error_logger = logging.getLogger("parsimony_agents.errors")
 
 litellm.REPEATED_STREAMING_CHUNK_LIMIT = 100  # TODO: Monitor how many repeated chunks appear naturally before hitting the limit
 
+# Read-only system tools that never touch the CodeExecutor; safe to run concurrently.
+# All other tool names require sequential execution in one batch to avoid re-entrant
+# kernel or workspace races (see ``_tool_batch_allows_concurrent``).
+_TOOL_NAMES_SAFE_CONCURRENT: frozenset[str] = frozenset(
+    {
+        "get_context",
+        "list_files",
+        "read_artifact",
+        "read_data",
+        "read_file",
+    }
+)
+
+
+def _tool_batch_allows_concurrent(
+    tool_names: list[str],
+    tools: Tools,
+) -> bool:
+    if not tool_names:
+        return True
+    for name in tool_names:
+        if name not in tools:
+            return False
+        if tools[name].tool_type == "return":
+            return False
+    return all(n in _TOOL_NAMES_SAFE_CONCURRENT for n in tool_names)
+
 
 def _serialize_and_hash_object(obj: Any) -> int:
     return hash(json.dumps(obj, sort_keys=True))
-
-
-def _artifact_id_from_dataset_snapshot_path(path: str) -> str | None:
-    """Recover the source-dataset artifact id from a ``.ockham/cards/`` path.
-
-    Returns ``None`` when *path* is empty (no source link recorded yet) or
-    doesn't follow the ``.ockham/cards/<artifact_id>/v<n>.parquet`` shape;
-    the caller falls back to the session's active returned dataset.
-    """
-
-    if not path:
-        return None
-    parts = path.split("/")
-    if len(parts) >= 4 and parts[0] == ".ockham" and parts[1] == "cards":
-        return parts[2]
-    return None
-
-
 
 
 @dataclass
@@ -150,9 +171,6 @@ class AgentResult:
             self.text += event.content
         elif etype == "state_snapshot":
             self.context = event.context
-            if self.context is not None:
-                for nb_path, nb in getattr(self.context, "notebooks", {}).items():
-                    self.code[nb_path] = nb
         elif etype == "tool_event" and getattr(event, "completed", False):
             result = getattr(event, "result", None)
             if result is None:
@@ -201,6 +219,7 @@ class Agent:
         guardrails: AgentGuardrails = AgentGuardrails(),
         session_id: str | None = None,
         file_store: FileStore | None = None,
+        read_artifact_fn: Callable[[str, dict[str, Any]], Awaitable[ArtifactLlmResult]] | None = None,
     ):
         from parsimony_agents.agent.prompts import DEFAULT_DATA_ANALYSIS_PROMPT
         from parsimony_agents.execution.executor import CodeExecutor as _LocalExecutor
@@ -247,18 +266,25 @@ class Agent:
         self._output_factory = output_factory
 
         self.figures = []
+        self._read_artifact_fn = read_artifact_fn
 
-        self.system_tools = Tools(
+        _system_tool_methods: list[ToolMethod] = [
+            self.code_set,
+            self.code_edit,
+            self.dry_execute_code,
+            self.write_file,
+            self.edit_file,
+            self.execute_workspace_tool,
+            self.read_file,
+            self.read_data,
+        ]
+        if read_artifact_fn is not None:
+            _system_tool_methods.append(self.read_artifact)
+        _system_tool_methods.extend(
             [
-                self.code_set,
-                self.code_edit,
-                self.dry_execute_code,
-                self.write_file,
-                self.edit_file,
-                self.execute_workspace_tool,
-                self.read_file,
-                self.read_data,
                 self.list_files,
+                self.run_notebook,
+                self.restart_kernel,
                 self.return_dataset,
                 self.return_chart,
                 self.output_read,
@@ -266,6 +292,7 @@ class Agent:
                 self.get_context,
             ]
         )
+        self.system_tools = Tools(_system_tool_methods)
 
         self.model_config = resolved_config
 
@@ -507,6 +534,7 @@ class Agent:
         *,
         ctx: AgentContext | None = None,
         tool_choice: str = "auto",
+        cancellation: CancellationRequest | None = None,
     ) -> AsyncGenerator[Any, None]:
         if isinstance(user_message, str):
             user_message = Text(content=user_message)
@@ -534,24 +562,7 @@ class Agent:
 
             await self.code_executor.set_cwd(str(ctx.files.get_files_dir()), session_id=self.session_id)
 
-        remote_v = await self.code_executor.get_sandbox_state_version()
-        skip_initial_replay = (
-            ctx is not None
-            and remote_v is not None
-            and remote_v == ctx.state_version
-        )
-
-        if not skip_initial_replay:
-            await self.code_executor.push_state(ctx.data_context)
-
-            await self._setup_connectors()
-
-            await ctx.execute_notebooks(code_executor=self.code_executor, update_outputs=True)
-
-            await self.code_executor.set_sandbox_state_version(ctx.state_version)
-        else:
-            # Warm executor: namespace already matches ctx.state_version.
-            pass
+        await self._setup_connectors()
 
         turn_state = TurnState()
 
@@ -661,7 +672,11 @@ class Agent:
 
                     # Process streaming response
                     chunks = []
+                    user_broke_stream = False
                     async for chunk in response:
+                        if cancellation and cancellation.is_set():
+                            user_broke_stream = True
+                            break
                         chunks.append(chunk)
                         if chunk.choices[0].delta.content:
                             yield TextDeltaEvent(
@@ -693,33 +708,31 @@ class Agent:
 
                             tool_type = tools[name].tool_type
                             loading_label = tools[name].ui_message
-                            match tool_type:
-                                case "utility":
-                                    yield ToolEvent(
-                                        tool_name=name,
-                                        tool_call_id=tool_call_id,
-                                        tool_type="utility",
-                                        completed=False,
-                                        result=UtilityToolOutput(
-                                            ui_message=loading_label or f"Executing {name}",
-                                        ),
-                                        ui_message=loading_label or f"Executing {name}",
-                                        section="final_response" if turn_state.final_response_started else "analysis",
-                                    )
-                                case "system":
-                                    if loading_label is not None:
-                                        yield ToolEvent(
-                                            tool_name=name,
-                                            tool_call_id=tool_call_id,
-                                            tool_type="system",
-                                            completed=False,
-                                            result=SystemToolMessage(message=loading_label),
-                                            ui_message=loading_label,
-                                            section="final_response" if turn_state.final_response_started else "analysis",
-                                        )
-                                case _:
-                                    pass
+                            # Utility tools: the card appears with full metadata ("In") once
+                            # args are complete (Phase 1 planning, below), not here during
+                            # streaming when args are only partially known. This produces two
+                            # clean file writes: args-known → completed, matching the two
+                            # visible chunks the UI needs (In, then In+Out).
+                            if tool_type == "system" and loading_label is not None:
+                                yield ToolEvent(
+                                    tool_name=name,
+                                    tool_call_id=tool_call_id,
+                                    tool_type="system",
+                                    completed=False,
+                                    result=SystemToolMessage(message=loading_label),
+                                    ui_message=loading_label,
+                                    section="final_response" if turn_state.final_response_started else "analysis",
+                                )
 
+                    if user_broke_stream and cancellation is not None:
+                        yield RunCancelled(
+                            message="Generation was cancelled before the assistant message completed.",
+                            reason=cancellation.reason,
+                            section="final_response" if turn_state.final_response_started else "analysis",
+                        )
+                        turn_state.stopped = True
+                        last_exception = None
+                        break
 
                     response = litellm.stream_chunk_builder(chunks, messages=llm_messages)
 
@@ -742,6 +755,9 @@ class Agent:
                     )
                     break
 
+            if turn_state.stopped:
+                break
+
             if last_exception is not None:
                 async for event in self._handle_llm_error(
                     last_exception, text_message_id, turn_state, agent_span
@@ -758,23 +774,15 @@ class Agent:
 
             _new_tool_calls = []
 
-            _has_return_tool_call = False
-
             for tool_call in (response_message.tool_calls or []):
                 _new_tool_calls.append(tool_call)
                 if tool_call.function.name in self._CODE_EDIT_TOOL_NAMES:
-                    # Notebook/script will be re-executed by the tool implementation.
+                    # Notebook may run in the same call when ``execute`` is true.
                     pass
-                if tool_call.function.name in self.RETURN_TOOLS:  # type: ignore[comparison-overlap]
-                    _has_return_tool_call = True
-                    break 
 
             if len(_new_tool_calls) == 0:
                 turn_state.stopped = True
                 turn_state.final_response_started = True
-            elif len(_new_tool_calls) > 1 and _has_return_tool_call:
-                # filter the speculative return tool call
-                _new_tool_calls = _new_tool_calls[:-1]
 
             response_message.tool_calls = _new_tool_calls if _new_tool_calls else None
 
@@ -866,6 +874,22 @@ class Agent:
                     # Extract LLM-provided UI description before hashing/execution.
                     llm_ui_message = tool_args.pop("_ui_message", None)
 
+                    if tool_name == "dry_execute_code" and not (
+                        isinstance(llm_ui_message, str) and llm_ui_message.strip()
+                    ):
+                        ctx.messages.append(
+                            AgentMessage(
+                                role="tool",
+                                content=(
+                                    "dry_execute_code requires a non-empty _ui_message: one short, plain-language, "
+                                    "past-tense line describing what this run does for the user (e.g. 'Previewed a rolling mean')."
+                                ),
+                                name=tool_name,
+                                tool_call_id=tool_call.id,
+                            )
+                        )
+                        continue
+
                     # Loop detection: same tool + same args called repeatedly.
                     args_hash = _serialize_and_hash_object(tool_args)
                     call_signature = (tool_name, args_hash)
@@ -911,8 +935,17 @@ class Agent:
 
                     loading_label = tools[tool_name].ui_message
                     if tool_type == "code":
-                        notebook = ctx.get_or_create_notebook(notebook_path)
-                        preview = notebook.to_preview()
+                        if tool_name == "code_set" and tool_args.get("execute") is True:
+                            loading_label = "Writing and running notebook"
+                        elif tool_name == "code_edit" and tool_args.get("execute") is True:
+                            loading_label = "Editing and running notebook"
+                        if tool_name in ("code_set", "code_edit"):
+                            preview = ScriptPreview(
+                                path=notebook_path,
+                                code=tool_args.get("code", "") or "",
+                            )
+                        else:
+                            preview = ScriptPreview(path=notebook_path, code="")
                         preview.ui_message = loading_label
                         yield ToolEvent(
                             tool_name=tool_name,
@@ -921,6 +954,27 @@ class Agent:
                             completed=False,
                             result=preview,
                             ui_message=loading_label,
+                            section="final_response" if turn_state.final_response_started else "analysis",
+                        )
+                    elif tool_type == "utility":
+                        # Emit a second file write with the full tool args in metadata,
+                        # before execution starts. The loading event (Phase 1 streaming)
+                        # already wrote the file with just ui_message; this overwrites it
+                        # with metadata so the frontend can display "In [·]: <code>" while
+                        # the tool is running, before the output ("Out") is known.
+                        yield ToolEvent(
+                            tool_name=tool_name,
+                            tool_call_id=tool_call.id,
+                            tool_type="utility",
+                            completed=False,
+                            result=UtilityToolOutput(
+                                ui_message=loading_label or f"Executing {tool_name}",
+                                metadata=self._utility_tool_metadata(
+                                    tool_name=tool_name,
+                                    tool_description=tools[tool_name].ui_description or tools[tool_name].description,
+                                    tool_args=tool_args,
+                                ),
+                            ),
                             section="final_response" if turn_state.final_response_started else "analysis",
                         )
 
@@ -938,13 +992,44 @@ class Agent:
                         ),
                     ))
 
-                # ── Phase 2: execute all tool coroutines concurrently ────────────────────
-                # For single-tool turns this degrades to a plain await with zero overhead.
-                # For multi-tool retrieval turns (utility) this parallelises
-                # external I/O and per-tool LLM summary calls.
-                raw_results = await asyncio.gather(
-                    *(coro for _, _, _, coro in tool_executions),
-                    return_exceptions=True,
+                if tool_executions and cancellation and cancellation.is_set():
+                    for tool_call, call_signature, repeat_count, _ in tool_executions:
+                        tool_name = tool_call.function.name
+                        if tool_name not in tools:
+                            continue
+                        tool_args = json.loads(tool_call.function.arguments)
+                        tool_args.pop("_ui_message", None)
+                        for tev in self._emit_cancelled_tool_events(
+                            tools, tool_name, tool_args, tool_call, turn_state
+                        ):
+                            yield tev
+                        ctx.messages.append(
+                            AgentMessage(
+                                role="tool",
+                                content=CANCELLED_TOOL_TEXT,
+                                name=tool_name,
+                                tool_call_id=tool_call.id,
+                            )
+                        )
+                        tool_call_history.append(call_signature)
+                    yield RunCancelled(
+                        message="The run was cancelled before the remaining tools could finish.",
+                        reason=cancellation.reason,  # cancellation is not None here
+                        section="final_response" if turn_state.final_response_started else "analysis",
+                    )
+                    turn_state.stopped = True
+                    yield StateSnapshot(context=ctx.model_copy(deep=False), section="analysis")
+                    break
+
+                # ── Phase 2: execute tool coroutines ───────────────────────────────────────
+                # Batches of read-only tools may run concurrently. Any batch with a
+                # return tool, a kernel/executor tool, a workspace-mutating tool, etc.
+                # runs sequentially in tool-call order. See
+                # ``_TOOL_NAMES_SAFE_CONCURRENT`` and ``_tool_batch_allows_concurrent``.
+                batch_names = [t.function.name for t, _, _, _ in tool_executions]
+                concurrent_batch = _tool_batch_allows_concurrent(batch_names, tools)
+                raw_results = await self._run_tool_coros_with_cancellation(
+                    tool_executions, cancellation, concurrent_batch
                 )
 
                 # ── Phase 3: flush results sequentially into shared state ────────────────
@@ -960,7 +1045,20 @@ class Agent:
                     llm_ui_message = tool_args.pop("_ui_message", None)
 
                     if isinstance(raw_result, asyncio.CancelledError):
-                        raise raw_result
+                        for tev in self._emit_cancelled_tool_events(
+                            tools, tool_name, tool_args, tool_call, turn_state
+                        ):
+                            yield tev
+                        ctx.messages.append(
+                            AgentMessage(
+                                role="tool",
+                                content=CANCELLED_TOOL_TEXT,
+                                name=tool_name,
+                                tool_call_id=tool_call.id,
+                            )
+                        )
+                        tool_call_history.append(call_signature)
+                        continue
 
                     if isinstance(raw_result, Exception):
                         ctx.messages.append(
@@ -983,13 +1081,6 @@ class Agent:
 
                             if tool_result.data:
                                 tool_call_output = tool_result.data
-
-                                if (new_obj := tool_call_output.content) is not None and isinstance(new_obj, Variable):
-                                    ctx.bump_state_version()
-                                    ctx.data_context.extend([new_obj])
-                                    push_store = VariableStore(variables={new_obj.name: new_obj})
-                                    await self.code_executor.push_state(push_store)
-                                    await self.code_executor.set_sandbox_state_version(ctx.state_version)
 
                                 # Propagate into the output object (consumed by UI).
                                 if ui_message_completed and not tool_call_output.ui_message_completed:
@@ -1033,6 +1124,7 @@ class Agent:
                                 return_types = (Dataset, Chart)
                                 if isinstance(tool_call_output, return_types):
                                     turn_state.final_response_started = True
+                                    turn_state.stopped = True
                                     yield ToolEvent(
                                         tool_name=tool_name,
                                         tool_call_id=tool_call.id,
@@ -1052,10 +1144,35 @@ class Agent:
                                 notebook_path = self._resolve_code_tool_path(tool_args)
                                 if notebook_path is None:
                                     raise ValueError("code tools require a non-empty 'path'.")
-                                notebook = ctx.get_or_create_notebook(notebook_path)
-
-                                preview = notebook.to_preview()
-                                preview.ui_message = llm_ui_message
+                                ran_kernel = tool_name == "run_notebook" or (
+                                    tool_name in ("code_set", "code_edit") and tool_args.get("execute") is True
+                                )
+                                also_executed = tool_name in ("code_set", "code_edit") and tool_args.get(
+                                    "execute"
+                                ) is True
+                                if ran_kernel:
+                                    ko = tool_result.data
+                                    if not isinstance(ko, KernelOutput):
+                                        raise TypeError(
+                                            f"{tool_name} with kernel run did not return KernelOutput"
+                                        )
+                                    raw = await self.code_executor.read_workspace_file(notebook_path)
+                                    script = deserialize_notebook(raw, path=notebook_path)
+                                    script.output = ko
+                                    script.data_objects = stamp_fetch_log_to_script(ko)
+                                    notebook = script
+                                    preview = script.to_preview()
+                                else:
+                                    # code_set or code_edit — re-read the written file (no execution)
+                                    raw = await self.code_executor.read_workspace_file(notebook_path)
+                                    script = deserialize_notebook(raw, path=notebook_path)
+                                    notebook = script
+                                    preview = script.to_preview()
+                                if tool_name == "code_set":
+                                    preview.ui_message = (llm_ui_message or "").strip() or None
+                                else:
+                                    # run_notebook, code_edit: no optional detail in the file-ref line on the wire.
+                                    preview.ui_message = None
 
                                 yield ToolEvent(
                                     tool_name=tool_name,
@@ -1064,10 +1181,9 @@ class Agent:
                                     completed=True,
                                     result={"notebook": notebook, "preview": preview},
                                     ui_message_completed=llm_ui_message,
+                                    also_executed=also_executed,
                                     section="final_response" if turn_state.final_response_started else "analysis",
                                 )
-
-                                turn_state.edited_notebook_paths.add(notebook.path)
 
                         case "system":
                             tool_call_output = tool_result.data
@@ -1099,6 +1215,15 @@ class Agent:
                         AgentMessage(role="tool", content=tool_call_output, name=tool_name, tool_call_id=tool_call.id)
                     )
                     tool_call_history.append(call_signature)
+
+                if any(isinstance(r, asyncio.CancelledError) for r in raw_results) and not turn_state.stopped:
+                    cancel_reason = cancellation.reason if cancellation is not None else "user_request"
+                    yield RunCancelled(
+                        message="The run was cancelled while tools were executing.",
+                        reason=cancel_reason,
+                        section="final_response" if turn_state.final_response_started else "analysis",
+                    )
+                    turn_state.stopped = True
 
                 # Persist tool results immediately so a client disconnect mid-turn can recover.
                 yield StateSnapshot(context=ctx.model_copy(deep=False), section="analysis")
@@ -1135,11 +1260,108 @@ class Agent:
                 section="final_response" if turn_state.final_response_started else "analysis",
             )
 
-        if turn_state.edited_notebook_paths:
-            for notebook_path in turn_state.edited_notebook_paths:
-                ctx.get_or_create_notebook(notebook_path).increment_version()
-
         yield StateSnapshot(context=ctx.model_copy(deep=False), section="analysis")
+
+    async def _run_tool_coros_with_cancellation(
+        self,
+        tool_executions: list,
+        cancellation: CancellationRequest | None,
+        concurrent_batch: bool,
+    ) -> list[object]:
+        if not tool_executions:
+            return []
+        if cancellation and cancellation.is_set():
+            return [asyncio.CancelledError() for _ in tool_executions]
+        coros = [te[3] for te in tool_executions]
+        if not concurrent_batch:
+            out: list[object] = []
+            for c in coros:
+                if cancellation and cancellation.is_set():
+                    return out + [asyncio.CancelledError() for _ in coros[len(out) :]]
+                try:
+                    r = await c
+                    out.append(r)
+                except BaseException as exc:  # noqa: BLE001
+                    out.append(exc)
+            return out
+        t_tasks = [asyncio.create_task(c) for c in coros]
+
+        async def _gather_tool_tasks() -> list[object]:
+            return list(await asyncio.gather(*t_tasks, return_exceptions=True))
+
+        t_gather = asyncio.create_task(_gather_tool_tasks())
+        if cancellation is None:
+            return list(await t_gather)
+        t_cancel = asyncio.create_task(cancellation.event.wait())
+        d, _ = await asyncio.wait({t_gather, t_cancel}, return_when=asyncio.FIRST_COMPLETED)
+        if t_cancel in d:
+            t_gather.cancel()
+            for tt in t_tasks:
+                if not tt.done():
+                    tt.cancel()
+            for tt in t_tasks:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await tt
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await t_gather
+            return [asyncio.CancelledError() for _ in coros]
+        t_cancel.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await t_cancel
+        return list(await t_gather)
+
+    def _emit_cancelled_tool_events(
+        self,
+        tools: Tools,
+        tool_name: str,
+        tool_args: dict,
+        tool_call: Any,
+        turn_state: TurnState,
+    ) -> list[ToolEvent]:
+        ttype = tools[tool_name].tool_type
+        section = "final_response" if turn_state.final_response_started else "analysis"
+        msg = CANCELLED_TOOL_TEXT
+        if ttype == "utility":
+            ui = tools[tool_name].ui_message or f"Executing {tool_name}"
+            uic = None  # completed message when cancelling (optional)
+            uo = UtilityToolOutput(
+                ui_message=ui,
+                ui_message_completed=uic,
+                metadata=self._utility_tool_metadata(
+                    tool_name=tool_name,
+                    tool_description=tools[tool_name].ui_description or tools[tool_name].description,
+                    tool_args=tool_args,
+                ),
+                content=Text(content=msg),
+            )
+            return [
+                ToolEvent(
+                    tool_name=tool_name,
+                    tool_call_id=tool_call.id,
+                    tool_type="utility",
+                    completed=True,
+                    result=uo,
+                    ui_message_completed=uic,
+                    section=section,
+                )
+            ]
+        if ttype == "system":
+            if tools[tool_name].ui_message is not None or tools[tool_name].ui_message_completed is not None:
+                return [
+                    ToolEvent(
+                        tool_name=tool_name,
+                        tool_call_id=tool_call.id,
+                        tool_type="system",
+                        completed=True,
+                        result=SystemToolMessage(
+                            message=msg,
+                            tool_name=tool_name,
+                            tool_args=tool_args,
+                        ),
+                        section=section,
+                    )
+                ]
+        return []
 
     @toolmethod(
         name="get_context",
@@ -1155,15 +1377,12 @@ class Agent:
 
     @toolmethod(
         name="output_read",
-        description="""Read specific pages of a long output by variable name (up to 5 pages per call). 
-        This tool is used to inspect, page through, and extract detailed content from large outputs.
-        It can be used on its own when page locations are known, and works best in combination 
-        with `output_search` to explore search hits in full context or continue sequential review.
+        description="""[LIVE KERNEL ONLY] Read pages from a value already in the Python kernel namespace
+        (e.g. a large DataFrame or primitive) — not for workspace files. For persisted .parquet, charts,
+        notebooks, and .output.json on disk, use `read_artifact` with the appropriate `view` and `locator`.
 
-        For DataFrames, cells may be truncated (shown with "..."). To read the full content of a 
-        specific cell and paginate through it, use variable_name="df[row,col]" with 0-indexed row 
-        and column name or index (e.g. df[5,2] or df[5,description]). Pages then refer to character 
-        chunks within that cell, same as for primitives.
+        Up to 5 pages per call. Combine with `output_search` to jump to search hits. For large DataFrames,
+        use variable_name="df[row,col]" for cell character pagination (0-indexed row and column name).
         """,
         parameters_schema={
             "type": "object",
@@ -1185,7 +1404,7 @@ class Agent:
         cell_ref = _parse_cell_ref(variable_name)
         if cell_ref is not None:
             base_name, row, col = cell_ref
-            prim, err = await self._get_cell_as_primitive(cell_ref, context, from_data_context=False)
+            prim, err = await self._get_cell_as_primitive(cell_ref, context)
             if err:
                 return _system_error(err)
             page_chars = get_llm_view_defaults("primitive")["default"].page_chars
@@ -1203,10 +1422,9 @@ class Agent:
 
     @toolmethod(
         name="output_search",
-        description="""Perform a hybrid (keyword and semantic) search across all indexed content, including long dataframes and text assets. 
-        This tool is used to locate specific terms, codes, values, or headers within large variables / utility tool outputs.
-        Results include page numbers and excerpts, enabling targeted follow-up with `output_read` for full context or sequential review.
-        For DataFrames, you can also search within a specific cell using variable_name='df[row,col]' (0-indexed); the cell is indexed on demand for full-text search.
+        description="""[LIVE KERNEL] Search within large in-kernel values (e.g. DataFrames) and utility output buffers.
+        Use `read_artifact` (not this tool) to inspect persisted workspace files. Results include page
+        numbers for `output_read`. For DataFrames, variable_name can be 'df[row,col]' for a single cell.
         """,
         parameters_schema={
             "type": "object",
@@ -1269,54 +1487,37 @@ class Agent:
         if cell_ref is not None:
             return await self._ensure_cell_indexed(cell_ref, variable_name, context)
 
-        if variable_name not in context.data_context:
+        output = await self.code_executor.get(variable_name)
+        if output is None or output.type not in ("dataframe", "primitive"):
             return False
-        var = context.data_context[variable_name]
-        output = var.output
-
-        if output is not None and output.type in ("dataframe", "primitive"):
-            tasks = []
-            if context.keyword_store and not keyword_indexed:
-                tasks.append(context.keyword_store.index_output(output, variable_name))
-            if context.vector_store and not vector_indexed:
-                tasks.append(context.vector_store.index_output(output, variable_name))
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                return all(r is True or not isinstance(r, Exception) for r in results)
-
+        tasks = []
+        if context.keyword_store and not keyword_indexed:
+            tasks.append(context.keyword_store.index_output(output, variable_name))
+        if context.vector_store and not vector_indexed:
+            tasks.append(context.vector_store.index_output(output, variable_name))
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            return all(r is True or not isinstance(r, Exception) for r in results)
         return False
 
     async def _get_cell_as_primitive(
         self,
         cell_ref: tuple[str, int, str],
         context: AgentContext,
-        *,
-        from_data_context: bool,
     ) -> tuple[PrimitiveObject | None, str | None]:
-        """
-        Resolve a cell ref to a PrimitiveObject. Returns (prim, None) on success, (None, error_msg) on failure.
-        from_data_context: True = use context.data_context (for indexing), False = use code_executor.eval (for read).
-        """
+        """Resolve a cell ref to a PrimitiveObject (kernel is source of truth)."""
+        _ = context
         base_name, row, col = cell_ref
         df: pd.DataFrame | None = None
-
-        if from_data_context:
-            if base_name not in context.data_context:
-                return (None, f"Variable '{base_name}' not in data context.")
-            output = context.data_context[base_name].output
-            if output is None or not isinstance(output, DataFrameObject):
-                return (None, f"'{base_name}' is not a DataFrame.")
-            df = output.value
-        else:
-            obj_kernel = await self.code_executor.eval(base_name)
-            if not obj_kernel.outputs:
-                return (None, f"Variable '{base_name}' not found or has no output.")
-            output = obj_kernel.outputs[0]
-            if isinstance(output, ExceptionObject):
-                return (None, f"Error evaluating '{base_name}': {output.value}")
-            if not isinstance(output, DataFrameObject):
-                return (None, f"'{base_name}' is not a DataFrame; cell ref requires a DataFrame variable.")
-            df = output.value
+        obj_kernel = await self.code_executor.eval(base_name)
+        if not obj_kernel.outputs:
+            return (None, f"Variable '{base_name}' not found or has no output.")
+        output = obj_kernel.outputs[0]
+        if isinstance(output, ExceptionObject):
+            return (None, f"Error evaluating '{base_name}': {output.value}")
+        if not isinstance(output, DataFrameObject):
+            return (None, f"'{base_name}' is not a DataFrame; cell ref requires a DataFrame variable.")
+        df = output.value
 
         try:
             col_idx = int(col) if str(col).lstrip("-").isdigit() else df.columns.get_loc(col)
@@ -1338,7 +1539,7 @@ class Agent:
         context: AgentContext,
     ) -> bool:
         """Index a DataFrame cell as a primitive for search (lazy, on demand)."""
-        prim, _ = await self._get_cell_as_primitive(cell_ref, context, from_data_context=True)
+        prim, _ = await self._get_cell_as_primitive(cell_ref, context)
         if prim is None:
             return False
         tasks = []
@@ -1371,7 +1572,11 @@ class Agent:
 
     @toolmethod(
         name="dry_execute_code",
-        description="Execute temporary Python code without modifying notebook code or session state. Use for quick inspections, ad-hoc calculations, or exploratory checks.",
+        description=(
+            "Execute temporary Python code without modifying notebook code or session state. "
+            "Use for quick inspections, ad-hoc calculations, or exploratory checks. "
+            "Requires _ui_message: a short plain-language, past-tense line for the user describing what this run does."
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
@@ -1382,9 +1587,17 @@ class Agent:
                 "timeout_seconds": {
                     "type": "number",
                     "description": "Optional execution timeout in seconds. Defaults to 120; capped by the global tool timeout."
-                }
+                },
+                "_ui_message": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": (
+                        "Required. One line for the user (not the LLM): past tense, what this temporary run does or shows. "
+                        "E.g. 'Checked CPI year-over-year growth'."
+                    ),
+                },
             },
-            "required": ["code"],
+            "required": ["code", "_ui_message"],
             "additionalProperties": False
         },
         tool_type="utility",
@@ -1526,7 +1739,8 @@ class Agent:
 
     @toolmethod(
         name="read_file",
-        description="Read a text file from the workspace (UTF-8). For Parquet data files use read_data.",
+        description="Read a text file as raw UTF-8. Prefer `read_artifact` for .parquet, .vl.json, and .py "
+        "notebooks. Optional legacy Parquet head: `read_data`.",
         parameters_schema={
             "type": "object",
             "properties": {"path": {"type": "string", "description": "Relative file path."}},
@@ -1544,7 +1758,9 @@ class Agent:
 
     @toolmethod(
         name="read_data",
-        description="Read schema, provenance, and a short preview of a .parquet file (parsimony.result metadata).",
+        description="Read schema, provenance, and a short head of a .parquet (compact XML). Prefer "
+        "`read_artifact` (view=outline|page) for registry projections and row paging; use this for a "
+        "one-shot legacy preview.",
         parameters_schema={
             "type": "object",
             "properties": {"path": {"type": "string", "description": "Path ending in .parquet"}},
@@ -1583,8 +1799,67 @@ class Agent:
         return SystemToolOutput(content=Text(content="\n".join(lines)))
 
     @toolmethod(
+        name="read_artifact",
+        description=(
+            "Read a workspace artifact via the kind registry. Use list_files to discover paths. "
+            "view=summary (default) is a compact one-screen read; outline exposes structure; "
+            "page requires a locator (e.g. rows offset/limit for Parquet, section_index for .py). "
+            "view=full is the most useful complete view: notebook code, dataset outline + row paging "
+            "guidance, chart as a rendered image (Vega-Lite JSON only with locator {kind: chart_spec}). "
+            "Prefer this over read_file for .parquet, .vl.json, .py notebooks, and .output.json. "
+            "mode=summary|full is a legacy alias when view is omitted (maps to view)."
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Workspace-relative file path."},
+                "view": {
+                    "type": "string",
+                    "description": "summary (default) | outline | page | full",
+                    "enum": ["summary", "outline", "page", "full"],
+                },
+                "mode": {
+                    "type": "string",
+                    "description": "Deprecated. Use view. summary (default) or full if view is omitted.",
+                    "enum": ["summary", "full"],
+                },
+                "locator": {
+                    "type": "object",
+                    "description": "Optional pagination locator, e.g. {kind: rows, offset, limit} or {kind: section, section_index: 0}.",
+                },
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        tool_type="system",
+        ui_message="Reading artifact",
+        ui_message_completed="Read artifact",
+    )
+    async def read_artifact(
+        self,
+        *,
+        path: str,
+        view: str | None = None,
+        mode: str | None = None,
+        locator: dict | None = None,
+        context: AgentContext,
+    ) -> SystemToolOutput:
+        if self._read_artifact_fn is None:
+            raise RuntimeError("read_artifact is not enabled for this agent configuration")
+        options: dict[str, Any] = {
+            "view": view,
+            "mode": mode,
+            "locator": locator,
+        }
+        result = await self._read_artifact_fn(path, options)
+        if result.kernel_output is not None:
+            return SystemToolOutput(content=result.kernel_output)
+        return SystemToolOutput(content=Text(content=result.text))
+
+    @toolmethod(
         name="list_files",
-        description="List files in the workspace with sizes; Parquet files include a one-line metadata summary.",
+        description="Lightweight directory discovery: list paths and sizes. Use read_artifact for .parquet, "
+        ".vl.json, and notebooks, not for bulk inspection here.",
         parameters_schema={
             "type": "object",
             "properties": {
@@ -1614,17 +1889,92 @@ class Agent:
         return SystemToolOutput(content=Text(content="\n".join(lines)))
 
     @toolmethod(
+        name="run_notebook",
+        description=(
+            "[CODE CELLS TOOL] Execute an existing workspace .py notebook in the current "
+            "kernel namespace (additive — like running a cell in Jupyter). Variables it "
+            "produces are immediately available for subsequent tool calls. Use this to "
+            "restore prior computation after a kernel restart, or to load a dependency "
+            "notebook before writing new code."
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Workspace-relative path to the .py notebook file.",
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+        tool_type="code",
+        ui_message="Running notebook",
+        ui_message_completed="Ran notebook",
+    )
+    async def run_notebook(self, *, path: str, context: AgentContext) -> KernelOutput:
+        raw = await self.code_executor.read_workspace_file(path)
+        script = deserialize_notebook(raw, path=path)
+        return await self.code_executor.execute(script.code)
+
+    @toolmethod(
+        name="restart_kernel",
+        description=(
+            "[SYSTEM TOOL] Clear the Python kernel namespace. All variables are lost; "
+            "workspace files and notebooks are preserved. Use before starting a new "
+            "independent analysis or when you want to verify a notebook runs cleanly "
+            "from scratch."
+        ),
+        parameters_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
+        tool_type="system",
+        ui_message="Restarting kernel",
+        ui_message_completed="Kernel restarted",
+    )
+    async def restart_kernel(self, *, context: AgentContext) -> SystemToolOutput:
+        await self.code_executor.clear_namespace()
+        return SystemToolOutput(content=Text(content="Kernel restarted. Namespace cleared."))
+
+    @toolmethod(
         name="code_set",
-        description="Replace the entire analysis script. This overwrites previous code and re-executes the full script.",
+        description=(
+            "Replace the entire analysis notebook .py file on disk. "
+            "By default does not execute the kernel — use ``execute``: true to write and run in one step, "
+            "or call ``run_notebook`` after writing when you only need execution. "
+            "Always start ``code`` with a one-line module docstring (triple-quoted) written "
+            "for a non-technical reader. State what the notebook produces and briefly note any "
+            "methodological choice that materially affects interpretation. "
+            "Optional _ui_message: short plain-language line for the user after '>' in the file-ref row."
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required. Workspace path for the notebook, e.g. 'notebooks/inflation_analysis.py'. The path is the notebook's identity; reusing it overwrites; using a new path creates a new notebook.",
+                    "description": (
+                        "Required. Workspace path, e.g. 'notebooks/inflation_analysis.py'. The path is "
+                        "the notebook's identity; reusing it overwrites; a new path creates a new notebook."
+                    ),
                 },
-                "code": {"type": "string", "description": "The full Python script to set."}
+                "code": {
+                    "type": "string",
+                    "description": (
+                        "Full Python source. Must begin with a triple-quoted module docstring that "
+                        "describes what this notebook produces for a non-technical reader and notes "
+                        "material methodological choices. Use ``# # Heading`` comments for major "
+                        "sections and ``# plain comment`` comment blocks before each code block to "
+                        "explain the step's intent and any choice that materially affects coverage, "
+                        "comparability, or interpretation. Do not narrate routine code mechanics."
+                    ),
+                },
+                "execute": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "If true, run the notebook in the kernel immediately after writing (same as "
+                        "``run_notebook`` on the new file). If false, only persist the file."
+                    ),
+                },
             },
             "required": ["path", "code"],
             "additionalProperties": False,
@@ -1632,34 +1982,57 @@ class Agent:
         tool_type="code",
         ui_message="Writing notebook",
     )
-    async def code_set(self, *, path: str, code: str, context: AgentContext) -> str:
-        notebook = context.get_or_create_notebook(path)
-        context.active_notebook_path = notebook.path
-        context.bump_state_version()
-        notebook.code_set(code=code)
-        await self._reexecute_context_notebooks(context=context)
-        self._stamp_data_objects(notebook)
-        self._invalidate_notebook_dependent_state(context=context, notebook_ref=notebook.path)
-        kernel_output = notebook.output
-
-        for figure in kernel_output.get_figures():
-            self.figures.append(figure)
-
-        return kernel_output
+    async def code_set(
+        self, *, path: str, code: str, context: AgentContext, execute: bool = False
+    ) -> str | KernelOutput:
+        normalized = path.strip()
+        if not normalized:
+            raise ValueError("path must be a non-empty string.")
+        script = Script(path=normalized, code=code)
+        raw = serialize_notebook(script)
+        await self.code_executor.write_workspace_file(normalized, raw)
+        if execute:
+            raw2 = await self.code_executor.read_workspace_file(normalized)
+            loaded = deserialize_notebook(raw2, path=normalized)
+            return await self.code_executor.execute(loaded.code)
+        return f"Wrote {normalized} (not executed; use run_notebook to execute)."
 
     @toolmethod(
         name="code_edit",
-        description="Edit the analysis script by replacing exactly one occurrence of old_str with new_str. Use sufficiently long and specific context to ensure uniqueness. Re-executes the full script after applying the edit.",
+        description=(
+            "Edit the notebook on disk: replace one occurrence of old_str with new_str. "
+            "Use sufficiently long and specific context to ensure uniqueness. "
+            "By default does not execute — set ``execute``: true to run the updated file in the kernel "
+            "in the same call, or call ``run_notebook`` afterward."
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": "Required. Workspace path for the notebook to edit, e.g. 'notebooks/inflation_analysis.py'.",
+                    "description": (
+                        "Required. Workspace path to edit, e.g. 'notebooks/inflation_analysis.py'."
+                    ),
                 },
-                "old_str": {"type": "string", "description": "Exact substring to replace (must occur exactly once)."},
-                "new_str": {"type": "string", "description": "Replacement text."},
+                "old_str": {
+                    "type": "string",
+                    "description": (
+                        "Substring to replace (must occur exactly once), or empty string to replace the whole file."
+                    ),
+                },
+                "new_str": {
+                    "type": "string",
+                    "description": "Replacement text, or the full new file when old_str is empty.",
+                },
+                "execute": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "If true, run the notebook in the kernel immediately after saving (same as "
+                        "``run_notebook`` on the updated file)."
+                    ),
+                },
             },
             "required": ["path", "old_str", "new_str"],
             "additionalProperties": False,
@@ -1667,79 +2040,41 @@ class Agent:
         tool_type="code",
         ui_message="Editing notebook",
     )
-    async def code_edit(self, *, path: str, old_str: str, new_str: str, context: AgentContext) -> str:
+    async def code_edit(
+        self,
+        *,
+        path: str,
+        old_str: str,
+        new_str: str,
+        context: AgentContext,
+        execute: bool = False,
+    ) -> str | KernelOutput:
         if old_str == "":
-            return await self.code_set(path=path, code=new_str, context=context)
-
-        notebook = context.get_or_create_notebook(path)
-        context.active_notebook_path = notebook.path
-        context.bump_state_version()
-        notebook.code_edit(old_str=old_str, new_str=new_str)
-        await self._reexecute_context_notebooks(context=context)
-        self._stamp_data_objects(notebook)
-        self._invalidate_notebook_dependent_state(context=context, notebook_ref=notebook.path)
-        kernel_output = notebook.output
-
-        for figure in kernel_output.get_figures():
-            self.figures.append(figure)
-
-        return kernel_output
-
-    def _stamp_data_objects(self, notebook: Any) -> None:
-        """Copy :attr:`KernelOutput.fetch_log` onto the notebook for the UI."""
-        from parsimony_agents.execution.outputs import FetchLogEntry
-
-        ko = notebook.output
-        if not ko or not ko.fetch_log:
-            notebook.data_objects = []
-            return
-
-        seen: set[str] = set()
-        deduped: list[FetchLogEntry] = []
-        for item in ko.fetch_log:
-            entry = item if isinstance(item, FetchLogEntry) else FetchLogEntry.model_validate(item)
-            key = f"{entry.source}:{json.dumps(entry.params, sort_keys=True, default=str)}"
-            if key in seen:
-                continue
-            seen.add(key)
-            deduped.append(entry)
-        notebook.data_objects = deduped
-
-    async def _reexecute_context_notebooks(self, *, context: AgentContext) -> None:
-        await self.code_executor.replace_state(context.data_context)
-        await context.execute_notebooks(code_executor=self.code_executor, update_outputs=True)
-        await self.code_executor.set_sandbox_state_version(context.state_version)
-
-    def _invalidate_notebook_dependent_state(self, *, context: AgentContext, notebook_ref: str) -> None:
-        """Drop derived variables and returned-dataset state for ``notebook_ref``.
-
-        Chart staleness is derived at card-build time from path resolution
-        against the latest dataset snapshot path, so no staleness
-        bookkeeping is needed here.
-        """
-        derived_variable_names = [
-            name
-            for name, var in context.data_context.variables.items()
-            if var.notebook_ref == notebook_ref
-        ]
-        for variable_name in derived_variable_names:
-            context.data_context.variables.pop(variable_name, None)
-
-        returned = context.returned_dataset
-        if returned is not None and notebook_ref in returned.notebook_refs:
-            context.returned_datasets.pop(returned.artifact_id, None)
-            if context.active_returned_dataset_id == returned.artifact_id:
-                context.active_returned_dataset_id = None
-                context.returned_dataset = None
-
+            return await self.code_set(path=path, code=new_str, context=context, execute=execute)
+        raw = await self.code_executor.read_workspace_file(path)
+        script = deserialize_notebook(raw, path=path)
+        n = script.code.count(old_str)
+        if n == 0:
+            raise ValueError("old_str not found in script body.")
+        if n > 1:
+            raise ValueError("old_str occurs multiple times; provide a more specific target.")
+        script.code = script.code.replace(old_str, new_str, 1)
+        out = serialize_notebook(script)
+        await self.code_executor.write_workspace_file(path, out)
+        if execute:
+            raw2 = await self.code_executor.read_workspace_file(path)
+            loaded = deserialize_notebook(raw2, path=path)
+            return await self.code_executor.execute(loaded.code)
+        return f"Modified {path} (not executed; use run_notebook to execute)."
 
     @toolmethod(
         name="return_dataset",
         description=(
-            "Return exactly one validated dataset. ``dataset_variable_name`` must be a "
+            "Return exactly one validated dataset when the user should receive the table. "
+            "``dataset_variable_name`` must be a "
             "plain notebook variable name. Provide notebook refs for the stages used in "
             "the pipeline. The framework picks the persistence location and embeds curation "
-            "metadata in the on-disk file."
+            "metadata in the on-disk file. Charts can be delivered with return_chart alone."
         ),
         parameters_schema={
             "type": "object",
@@ -1804,34 +2139,24 @@ class Agent:
             raise ValueError("title must be a non-empty string.")
         notes = TypeAdapter(list[str]).validate_python(notes)
         clean_refs = [(r or "").strip() for r in (notebook_refs or []) if (r or "").strip()]
-        self._validate_return_dataset_refs(
+        await self._validate_return_dataset_refs(
             context=context,
             dataset_variable_name=dataset_variable_name,
             notebook_refs=clean_refs,
         )
 
-        # Find the first notebook that produces the dataset variable (contains the variable name in its code)
-        producing_ref = None
-        for ref in clean_refs:
-            if ref in context.notebooks and dataset_variable_name in context.notebooks[ref].code:
-                producing_ref = ref
-                break
-        variable = await self._resolve_returned_dataset(
-            context=context,
-            dataset_variable_name=dataset_variable_name,
-            producing_notebook_ref=producing_ref,
-        )
-        if variable.output is None:
-            raise ValueError(f"Dataset '{dataset_variable_name}' has no tabular payload to return.")
-        if not isinstance(variable.output, DataFrameObject):
-            raise TypeError(
-                f"Dataset '{dataset_variable_name}' must resolve to a DataFrame; "
-                f"got {type(variable.output).__name__}."
+        out_obj = await self.code_executor.get(dataset_variable_name)
+        if out_obj is None:
+            raise ValueError(
+                f"Variable '{dataset_variable_name}' is not in the kernel. "
+                "Run the relevant notebook with run_notebook (or use dry_execute_code) first."
             )
-
-        source_dataset_variable_names = list(variable.source_datasets)
-        if not source_dataset_variable_names:
-            source_dataset_variable_names = [dataset_variable_name]
+        if not isinstance(out_obj, DataFrameObject):
+            raise TypeError(
+                f"Dataset '{dataset_variable_name}' must resolve to a pandas DataFrame; "
+                f"got {type(out_obj).__name__}."
+            )
+        source_dataset_variable_names = [dataset_variable_name]
 
         final_tags: list[str] = []
         for t in TypeAdapter(list[str]).validate_python(tags or []):
@@ -1859,24 +2184,25 @@ class Agent:
         )
         context.set_returned_dataset(returned_state)
 
+        curated_provenance = Provenance(
+            title=title,
+            description=description or None,
+            tags=final_tags,
+        )
         dataset = Dataset(
             artifact_id=returned_state.artifact_id,
             version=returned_state.version,
-            title=title,
-            description=description,
+            provenance=curated_provenance,
             notes=notes,
-            tags=final_tags,
             notebook_refs=clean_refs,
         )
-        # Hand the live frame to the streaming dispatcher via the dataset's
-        # transient _payload slot. The dispatcher consumes it to write the
-        # snapshot under .ockham/cards/ and to compute the chat-card preview.
-        return dataset.with_payload(variable.output)
+        return dataset.with_payload(out_obj)
 
     @toolmethod(
         name="return_chart",
         description=(
-            "Return one optional chart primitive for an already returned dataset. "
+            "Return one optional chart primitive built from a clean dataframe in the kernel. "
+            "The source dataframe does not need to have been returned with return_dataset. "
             "The framework picks the persistence location and embeds curation "
             "metadata in the on-disk Vega-Lite file."
         ),
@@ -1889,7 +2215,10 @@ class Agent:
                 },
                 "source_dataset_variable_name": {
                     "type": "string",
-                    "description": "Variable name of the already returned dataset this chart visualizes.",
+                    "description": (
+                        "Name of the kernel variable holding the pandas DataFrame the chart is based on. "
+                        "It does not need to have been returned with return_dataset."
+                    ),
                 },
                 "chart_variable_name": {
                     "type": "string",
@@ -1944,19 +2273,24 @@ class Agent:
             value=chart_variable_name,
             parameter_name="chart_variable_name",
         )
-        returned_state = context.get_returned_dataset()
-        if returned_state is None:
-            raise ValueError("No returned dataset is available. Call return_dataset before return_chart.")
-        if returned_state.dataset_variable_name != source_dataset_variable_name:
-            raise ValueError(
-                "Chart source must match the returned dataset variable "
-                f"'{returned_state.dataset_variable_name}'."
-            )
         notes = TypeAdapter(list[str]).validate_python(notes)
         chart_ref = (chart_notebook_ref or "").strip()
         if not chart_ref:
             raise ValueError("chart_notebook_ref must be a non-empty string.")
-        self._validate_return_chart_refs(
+
+        source_obj = await self.code_executor.get(source_dataset_variable_name)
+        if source_obj is None:
+            raise ValueError(
+                f"Variable '{source_dataset_variable_name}' is not in the kernel. "
+                "If session_state lists it, use it directly; otherwise run the notebook that creates it."
+            )
+        if not isinstance(source_obj, DataFrameObject):
+            raise TypeError(
+                f"source_dataset_variable_name '{source_dataset_variable_name}' must resolve to a "
+                f"pandas DataFrame; got {type(source_obj).__name__}."
+            )
+
+        await self._validate_return_chart_refs(
             context=context,
             source_dataset_variable_name=source_dataset_variable_name,
             chart_variable_name=chart_variable_name,
@@ -1964,6 +2298,11 @@ class Agent:
         )
 
         fig_obj = await self.code_executor.get(chart_variable_name)
+        if fig_obj is None:
+            raise ValueError(
+                f"Variable '{chart_variable_name}' is not in the kernel. "
+                "If session_state lists it, use it directly; otherwise run the notebook that creates it."
+            )
         if not isinstance(fig_obj, FigureObject):
             raise TypeError(
                 f"chart_variable_name '{chart_variable_name}' must resolve to an Altair chart; "
@@ -1972,11 +2311,19 @@ class Agent:
         if fig_obj.name is None:
             fig_obj.name = chart_variable_name
 
-        source_dataset_path_value = snapshot_path(
-            artifact_id=returned_state.artifact_id,
-            version=returned_state.version,
-            kind="dataset",
-        )
+        returned_dataset = context.get_returned_dataset()
+        if (
+            returned_dataset is not None
+            and returned_dataset.dataset_variable_name == source_dataset_variable_name
+        ):
+            source_dataset_path_value = snapshot_path(
+                artifact_id=returned_dataset.artifact_id,
+                version=returned_dataset.version,
+                kind="dataset",
+                title=returned_dataset.title or "",
+            )
+        else:
+            source_dataset_path_value = ""
         existing_chart = context.get_returned_chart()
         artifact_id = (
             existing_chart.artifact_id
@@ -2003,10 +2350,12 @@ class Agent:
         chart = Chart(
             artifact_id=returned_chart.artifact_id,
             version=returned_chart.version,
-            title=title,
+            provenance=Provenance(
+                title=title,
+                description=description or None,
+            ),
             source_dataset_path=source_dataset_path_value,
             chart_notebook_ref=chart_ref,
-            description=description,
             notes=notes,
         )
         # Hand the live FigureObject to the streaming dispatcher; it writes
@@ -2025,31 +2374,31 @@ class Agent:
             )
         return normalized
 
-    def _validate_return_dataset_refs(
+    async def _validate_return_dataset_refs(
         self,
         *,
         context: AgentContext,
         dataset_variable_name: str,
         notebook_refs: list[str],
     ) -> None:
-        # No notebook refs at all — direct return from data context
         if not notebook_refs:
-            if dataset_variable_name not in context.data_context:
+            out = await self.code_executor.get(dataset_variable_name)
+            if out is None:
                 raise ValueError(
-                    "When returning source data as-is without notebooks, the dataset variable must already exist "
-                    f"in the data context (e.g. from a fetch). Variable '{dataset_variable_name}' was not found."
+                    f"Variable '{dataset_variable_name}' is not in the kernel. "
+                    "When not using notebook_refs, the variable must exist in the current namespace."
                 )
             return
 
-        # Validate each notebook ref exists and has no errors
         for ref in notebook_refs:
-            if ref not in context.notebooks:
-                raise ValueError(f"Notebook '{ref}' was not found.")
-            notebook = context.notebooks[ref]
-            if notebook.has_errors():
-                raise ValueError(f"Notebook '{ref}' has execution errors.")
+            try:
+                await self.code_executor.read_workspace_file(ref)
+            except FileNotFoundError as e:  # pragma: no cover
+                raise ValueError(f"Notebook file '{ref}' not found in the workspace.") from e
+            except Exception as e:  # pragma: no cover
+                raise ValueError(f"Could not read notebook file '{ref}': {e}") from e
 
-    def _validate_return_chart_refs(
+    async def _validate_return_chart_refs(
         self,
         *,
         context: AgentContext,
@@ -2057,253 +2406,17 @@ class Agent:
         chart_variable_name: str,
         chart_notebook_ref: str,
     ) -> None:
-        if chart_notebook_ref not in context.notebooks:
-            raise ValueError(f"Chart notebook '{chart_notebook_ref}' was not found.")
-        chart_notebook = context.notebooks[chart_notebook_ref]
-        if chart_notebook.has_errors():
-            raise ValueError(f"Chart notebook '{chart_notebook_ref}' has execution errors.")
-        if source_dataset_variable_name not in chart_notebook.code:
+        _ = context
+        try:
+            raw = await self.code_executor.read_workspace_file(chart_notebook_ref)
+        except Exception as e:  # pragma: no cover
+            raise ValueError(f"Chart notebook '{chart_notebook_ref}' not found or unreadable: {e}") from e
+        code = deserialize_notebook(raw, path=chart_notebook_ref).code
+        if source_dataset_variable_name not in code:
             raise ValueError(
-                f"Chart notebook '{chart_notebook_ref}' must reference dataset '{source_dataset_variable_name}'."
+                f"Chart notebook '{chart_notebook_ref}' should reference the dataset variable '{source_dataset_variable_name}'."
             )
-        if chart_variable_name not in chart_notebook.code:
+        if chart_variable_name not in code:
             raise ValueError(
-                f"Chart notebook '{chart_notebook_ref}' must define chart variable '{chart_variable_name}'."
+                f"Chart notebook '{chart_notebook_ref}' should define chart variable '{chart_variable_name}'."
             )
-
-    async def _resolve_returned_dataset(
-        self,
-        *,
-        context: AgentContext,
-        dataset_variable_name: str,
-        producing_notebook_ref: str,
-    ) -> Variable:
-        if dataset_variable_name in context.data_context:
-            existing = context.data_context[dataset_variable_name]
-            if not existing.is_tabular or existing.output is None:
-                raise ValueError(
-                    f"Variable '{dataset_variable_name}' must resolve to a pandas DataFrame or Series."
-                )
-            if not producing_notebook_ref:
-                return existing
-            if existing.source in {"dataset", "artifact"}:
-                artifact_var = await self._materialize_artifact(
-                    context=context,
-                    variable_name=dataset_variable_name,
-                    producing_notebook_ref=producing_notebook_ref,
-                )
-                if not artifact_var.is_tabular or artifact_var.output is None:
-                    raise ValueError(
-                        f"Variable '{dataset_variable_name}' must resolve to a pandas DataFrame or Series."
-                    )
-            else:
-                source_datasets = self._extract_source_datasets(
-                    context=context,
-                    notebook_ref=producing_notebook_ref,
-                    exclude_variable_name=dataset_variable_name,
-                )
-                artifact_var = Variable(
-                    name=existing.name,
-                    output=existing.output,
-                    source="dataset",
-                    source_description="Dataset prepared from an existing variable via the notebook pipeline.",
-                    source_datasets=source_datasets or [dataset_variable_name],
-                    notebook_ref=producing_notebook_ref or None,
-                    hidden=existing.hidden,
-                )
-            context.data_context[dataset_variable_name] = artifact_var
-            return artifact_var
-
-        artifact_var = await self._materialize_artifact(
-            context=context,
-            variable_name=dataset_variable_name,
-            producing_notebook_ref=producing_notebook_ref,
-        )
-        if not artifact_var.is_tabular or artifact_var.output is None:
-            raise ValueError(
-                f"Variable '{dataset_variable_name}' must resolve to a pandas DataFrame or Series."
-            )
-        context.data_context.extend([artifact_var])
-        return artifact_var
-
-    async def refresh_returned_dataset(
-        self,
-        *,
-        context: AgentContext,
-        artifact_id: str | None = None,
-    ) -> Dataset:
-        returned_state = context.get_returned_dataset(artifact_id)
-        if returned_state is None:
-            raise ValueError("No returned dataset is available to refresh.")
-        if not returned_state.title:
-            raise ValueError("The returned dataset is missing refreshable title metadata.")
-
-        context.bump_state_version()
-        await self.code_executor.replace_state(context.data_context)
-        await context.execute_notebooks(code_executor=self.code_executor, update_outputs=True)
-        await self.code_executor.set_sandbox_state_version(context.state_version)
-
-        refreshed = await self.return_dataset(
-            context=context,
-            dataset_variable_name=returned_state.dataset_variable_name,
-            title=returned_state.title,
-            description=returned_state.description,
-            notes=returned_state.notes,
-            notebook_refs=returned_state.notebook_refs,
-        )
-        if not refreshed.success or refreshed.data is None:
-            raise ValueError(refreshed.exception_message or "Dataset refresh failed.")
-        refreshed_state = context.get_returned_dataset()
-        if refreshed_state is None:
-            raise ValueError("Dataset refresh completed without refresh state.")
-        next_version = returned_state.version + 1
-        refreshed_state = refreshed_state.model_copy(
-            update={
-                "artifact_id": returned_state.artifact_id,
-                "version": next_version,
-            }
-        )
-        context.set_returned_dataset(refreshed_state)
-        # Reuse the previous artifact_id and bump version so the chat card
-        # cleanly upgrades to the new snapshot. ``_payload`` is preserved by
-        # ``model_copy`` (PrivateAttr semantics in pydantic v2).
-        return refreshed.data.model_copy(
-            update={
-                "artifact_id": returned_state.artifact_id,
-                "version": next_version,
-            }
-        )
-
-    async def refresh_returned_chart(
-        self,
-        *,
-        context: AgentContext,
-        artifact_id: str | None = None,
-    ) -> Chart:
-        returned_chart = context.get_returned_chart(artifact_id)
-        if returned_chart is None:
-            raise ValueError("No returned chart is available to refresh.")
-        # Resolve the source dataset by re-deriving its artifact_id from the
-        # snapshot path the chart already points at; falls back to the
-        # session's active returned dataset when no path is recorded.
-        source_artifact_id = _artifact_id_from_dataset_snapshot_path(
-            returned_chart.source_dataset_path
-        )
-        returned_state = context.get_returned_dataset(source_artifact_id)
-        if returned_state is None:
-            raise ValueError("No returned dataset is available to refresh the chart against.")
-
-        chart_ref = (returned_chart.chart_notebook_ref or "").strip()
-        if not chart_ref:
-            raise ValueError("The returned chart is missing refreshable notebook metadata.")
-
-        self._validate_return_chart_refs(
-            context=context,
-            source_dataset_variable_name=returned_chart.source_dataset_variable_name,
-            chart_variable_name=returned_chart.chart_variable_name,
-            chart_notebook_ref=chart_ref,
-        )
-
-        context.bump_state_version()
-        await self.code_executor.replace_state(context.data_context)
-        context.active_notebook_path = chart_ref
-        chart_notebook = context.notebooks[chart_ref]
-        await chart_notebook.execute(code_executor=self.code_executor, update_outputs=True)
-        await self.code_executor.set_sandbox_state_version(context.state_version)
-
-        fig_obj = await self.code_executor.get(returned_chart.chart_variable_name)
-        if not isinstance(fig_obj, FigureObject):
-            raise TypeError(
-                f"chart_variable_name '{returned_chart.chart_variable_name}' must resolve to an "
-                f"Altair chart; got {type(fig_obj).__name__}."
-            )
-        if fig_obj.name is None:
-            fig_obj.name = returned_chart.chart_variable_name
-
-        next_version = returned_chart.version + 1
-        refreshed_source_path = snapshot_path(
-            artifact_id=returned_state.artifact_id,
-            version=returned_state.version,
-            kind="dataset",
-        )
-        updated_chart_state = returned_chart.model_copy(
-            update={
-                "version": next_version,
-                "source_dataset_path": refreshed_source_path,
-                "source_dataset_variable_name": returned_state.dataset_variable_name,
-            }
-        )
-        context.set_returned_chart(updated_chart_state)
-
-        chart = Chart(
-            artifact_id=updated_chart_state.artifact_id,
-            version=updated_chart_state.version,
-            title=updated_chart_state.title,
-            source_dataset_path=updated_chart_state.source_dataset_path,
-            chart_notebook_ref=chart_ref,
-            description=updated_chart_state.description,
-            notes=updated_chart_state.notes,
-        )
-        return chart.with_payload(fig_obj)
-
-    def _extract_source_datasets(
-        self,
-        *,
-        context: AgentContext,
-        notebook_ref: str,
-        exclude_variable_name: str | None = None,
-    ) -> list[str]:
-        if notebook_ref not in context.notebooks:
-            return []
-        notebook_code = context.notebooks[notebook_ref].code
-        source_variables = []
-        for variable_name in context.data_context.variables:
-            if exclude_variable_name is not None and variable_name == exclude_variable_name:
-                continue
-            if re.search(rf"\b{re.escape(variable_name)}\b", notebook_code):
-                source_variables.append(variable_name)
-        return source_variables
-
-    async def _materialize_artifact(
-        self,
-        *,
-        context: AgentContext,
-        variable_name: str,
-        producing_notebook_ref: str | None = None,
-    ) -> Variable:
-        value = await self.code_executor.get(variable_name)
-        notebook_ref = producing_notebook_ref or context.active_notebook_path
-        source_datasets = self._extract_source_datasets(
-            context=context,
-            notebook_ref=notebook_ref,
-            exclude_variable_name=variable_name,
-        )
-
-        if isinstance(value, DataFrameObject):
-            materialized_df = value.value.copy(deep=True)
-            output = self._output_factory.from_value(
-                materialized_df,
-                ref=context._get_ref_name(key=variable_name, subdir="dataset"),
-            )
-            return Variable(
-                name=variable_name,
-                output=output,
-                source="artifact",
-                source_description="Dataset prepared in the notebook pipeline.",
-                source_datasets=source_datasets,
-                notebook_ref=notebook_ref,
-            )
-        if isinstance(value, PrimitiveObject):
-            return Variable(
-                name=variable_name,
-                output=value,
-                source="artifact",
-                source_description="Dataset prepared in the notebook pipeline.",
-                source_datasets=source_datasets,
-                notebook_ref=notebook_ref,
-            )
-        if isinstance(value, ExceptionObject):
-            raise ValueError(f"Variable '{variable_name}' failed during evaluation: {value.value}")
-        raise ValueError(
-            f"Variable '{variable_name}' is not a supported data object type (expected DataFrame, Series, or primitive; got {type(value)})."
-        )

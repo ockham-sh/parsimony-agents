@@ -1,7 +1,9 @@
 """Content-addressed persistence for connector ``Result`` fetches.
 
 Each connector fetch the executor observes is mirrored to a parquet file
-at ``<workspace_root>/.ockham/data_objects/<sha>.parquet``. The SHA is
+at ``<workspace_root>/.ockham/data_objects/<title_slug>_<short_sha>.parquet``.
+The ``<short_sha>`` prefix (12 hex chars) of the full SHA-256 is the
+dedup key; ``<title_slug>`` comes from provenance title or source. The SHA is
 content-addressed (canonical provenance excluding ``fetched_at``, plus
 the Arrow IPC bytes), so two fetches that produce the same data with
 the same parameters dedup to one file.
@@ -39,6 +41,8 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from parsimony_agents._naming import short_sha, slug_from_title
+
 DATA_OBJECTS_NAMESPACE = ".ockham/data_objects"
 
 
@@ -49,7 +53,7 @@ def make_data_object_persister(
 
     Returns a sync callable that takes a ``parsimony.Result`` and writes
     a content-addressed parquet under
-    ``<workspace_root>/.ockham/data_objects/<sha>.parquet``. The callable
+    ``<workspace_root>/.ockham/data_objects/<title_slug>_<short_sha>.parquet``. The callable
     returns the workspace-relative path on success, or ``None`` on
     failure — graceful so a misbehaving codec cannot kill the agent
     turn (the fetch log still records the observation).
@@ -61,7 +65,10 @@ def make_data_object_persister(
         try:
             table = result.to_arrow()
             sha = _content_hash(result.provenance, table)
-            rel = f"{DATA_OBJECTS_NAMESPACE}/{sha}.parquet"
+            title_src = result.provenance.title or result.provenance.source or "fetch"
+            rel = (
+                f"{DATA_OBJECTS_NAMESPACE}/{slug_from_title(title_src)}_{short_sha(sha)}.parquet"
+            )
             target = root / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             if not target.exists():

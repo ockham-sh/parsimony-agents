@@ -1,34 +1,20 @@
 """Notebook I/O: write & read notebooks as plain ``.py`` files.
 
-Notebooks are open-format Python source files with a small PEP 723-style
-metadata block at the top. Anyone can open the file in any editor; running
-``python notebook.py`` Just Works (the metadata block is a comment).
+Notebooks are plain Python source files — no embedded metadata block.
+Running ``python notebook.py`` works without any framework installed.
 
-File layout::
-
-    # /// parsimony_agents
-    # schema_version = 1
-    # version = 2
-    # read_only = false
-    # ///
-    <code body>
-
-Outputs (cell results, figures, exceptions) are intentionally **not** stored
-in the ``.py`` file: that would couple the notebook to a particular
-execution and make the file large and noisy. Instead they live in a
-content-addressed cache at ``notebook-state/<sha>.json`` (relative to the
-host product's framework-private storage root) keyed to the body's SHA-256 —
-the cache self-invalidates whenever the code changes, and deleting it never
-loses authoritative information.
+Outputs (cell results, figures, exceptions) are stored in a content-addressed
+cache at ``notebook-state/<sha>.json`` keyed to the code's SHA-256.  Deleting
+the cache never loses authoritative information.
 """
 
 from __future__ import annotations
 
 __all__ = [
-    "BLOCK_TAG",
-    "NOTEBOOK_SCHEMA_VERSION",
+    "NotebookStateDocument",
     "decode_notebook_state",
     "deserialize_notebook",
+    "encode_notebook_state",
     "load_notebook_state",
     "notebook_state_cache_key",
     "notebook_state_cache_path",
@@ -40,91 +26,27 @@ __all__ = [
 
 import hashlib
 import json
-import re
-import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from parsimony_agents.execution.outputs import KernelOutput
 from parsimony_agents.notebook import Script
 
-BLOCK_TAG = "parsimony_agents"
-NOTEBOOK_SCHEMA_VERSION = 1
 
-_BLOCK_OPEN = re.compile(rf"^# /// {BLOCK_TAG}\s*$")
-_BLOCK_CLOSE = re.compile(r"^# ///\s*$")
-_BLOCK_LINE = re.compile(r"^# ?(.*)$")
+class NotebookStateDocument(BaseModel):
+    """On-disk JSON envelope for :func:`encode_notebook_state` / :func:`decode_notebook_state`.
 
-
-# ----------------------------------------------------------------------
-# Block format helpers (PEP 723-style, custom tag)
-# ----------------------------------------------------------------------
-
-
-def _build_block(payload: dict[str, Any]) -> str:
-    """Render a metadata payload as a PEP 723-style ``# /// parsimony_agents`` block.
-
-    Payload values are restricted to scalars and string lists — enough for
-    notebook metadata, simple to parse, and easy to inspect.
+    ``schema_version`` is bumped when adding fields; decoders for unknown
+    versions return ``None`` (cache miss) at the call site.
     """
 
-    lines = [f"# /// {BLOCK_TAG}"]
-    for key, value in payload.items():
-        lines.append(f"# {key} = {_render_toml_scalar(value)}")
-    lines.append("# ///")
-    return "\n".join(lines)
+    model_config = ConfigDict(extra="forbid")
 
-
-def _render_toml_scalar(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (int, float)):
-        return str(value)
-    if isinstance(value, str):
-        return _toml_string(value)
-    if isinstance(value, list):
-        return "[" + ", ".join(_render_toml_scalar(v) for v in value) + "]"
-    raise TypeError(f"Unsupported metadata value for TOML block: {type(value).__name__}")
-
-
-def _toml_string(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-    return f'"{escaped}"'
-
-
-def _split_block_and_body(text: str) -> tuple[dict[str, Any], str]:
-    """Locate the ``parsimony_agents`` block (if any) and return ``(metadata, body)``.
-
-    The block is removed from the body so downstream consumers see only
-    the user's code. If no block is present the caller gets ``({}, text)``.
-    """
-
-    lines = text.splitlines(keepends=True)
-    block_start = None
-    block_end = None
-    for idx, line in enumerate(lines):
-        stripped = line.rstrip("\n")
-        if block_start is None and _BLOCK_OPEN.match(stripped):
-            block_start = idx
-            continue
-        if block_start is not None and _BLOCK_CLOSE.match(stripped):
-            block_end = idx
-            break
-    if block_start is None or block_end is None:
-        return {}, text
-
-    payload_lines = []
-    for raw in lines[block_start + 1 : block_end]:
-        stripped = raw.rstrip("\n")
-        match = _BLOCK_LINE.match(stripped)
-        payload_lines.append((match.group(1) if match else "") + "\n")
-    metadata = tomllib.loads("".join(payload_lines))
-
-    body_lines = lines[:block_start] + lines[block_end + 1 :]
-    body = "".join(body_lines)
-    if body.startswith("\n"):
-        body = body.lstrip("\n")
-    return metadata, body
+    schema_version: Literal[1] = 1
+    code_sha: str
+    output: KernelOutput
 
 
 # ----------------------------------------------------------------------
@@ -132,38 +54,30 @@ def _split_block_and_body(text: str) -> tuple[dict[str, Any], str]:
 # ----------------------------------------------------------------------
 
 
-def serialize_notebook(script: Script) -> bytes:
-    """Render a ``Script`` to ``.py`` bytes with an embedded ``parsimony_agents`` block."""
+def _normalize_code_newlines(s: str) -> str:
+    """Canonical newlines for stable parsing and SHA-based caching."""
+    t = s.replace("\r\n", "\n").replace("\r", "\n")
+    return t.rstrip("\n")
 
-    payload: dict[str, Any] = {
-        "schema_version": NOTEBOOK_SCHEMA_VERSION,
-        "version": script.version,
-        "read_only": script.read_only,
-    }
-    block = _build_block(payload)
+
+def serialize_notebook(script: Script) -> bytes:
+    """Render a ``Script`` to ``.py`` bytes (plain Python, no metadata block)."""
     body = script.code if script.code.endswith("\n") else script.code + "\n"
-    text = f"{block}\n\n{body}" if body.strip() else f"{block}\n"
-    return text.encode("utf-8")
+    return body.encode("utf-8")
 
 
 def deserialize_notebook(data: bytes, *, path: str | None = None) -> Script:
-    """Inverse of :func:`serialize_notebook`. Vanilla ``.py`` files round-trip."""
-
-    text = data.decode("utf-8")
-    metadata, body = _split_block_and_body(text)
-    script_kwargs: dict[str, Any] = {
-        "code": body.rstrip("\n"),
-        "version": int(metadata.get("version", 1) or 1),
-        "read_only": bool(metadata.get("read_only", False)),
-    }
+    """Read a ``.py`` file into a ``Script``."""
+    text = data.decode("utf-8-sig")
+    code = _normalize_code_newlines(text)
+    kwargs: dict = {"code": code}
     if path:
-        script_kwargs["path"] = path
-    return Script(**script_kwargs)
+        kwargs["path"] = path
+    return Script(**kwargs)
 
 
 def save_notebook(script: Script, path: str | Path) -> None:
     """Persist ``script`` to ``path`` (must end in ``.py``)."""
-
     target = Path(path)
     if target.suffix != ".py":
         raise ValueError(f"save_notebook path must end in .py, got {path!r}")
@@ -172,8 +86,7 @@ def save_notebook(script: Script, path: str | Path) -> None:
 
 
 def read_notebook(path: str | Path) -> Script:
-    """Read a ``.py`` notebook written by :func:`save_notebook`."""
-
+    """Read a ``.py`` notebook from *path*."""
     target = Path(path)
     return deserialize_notebook(target.read_bytes(), path=str(target))
 
@@ -184,79 +97,74 @@ def read_notebook(path: str | Path) -> Script:
 
 
 def _code_sha(code: str) -> str:
-    """Content fingerprint used to address the runtime-state cache.
+    """Fingerprint the code body.
 
-    Trailing whitespace is stripped before hashing so the fingerprint is
-    invariant under the serialize → deserialize round-trip (the on-disk
-    ``.py`` file gets a single trailing newline appended; the parsed
-    ``Script.code`` has it stripped). Without this, every view-side load
-    of a freshly-written notebook would see a stale cache.
+    Trailing whitespace is stripped so the hash is invariant under the
+    serialize → deserialize round-trip (on-disk files get a trailing newline;
+    the parsed ``Script.code`` has it stripped).
     """
-
     return hashlib.sha256(code.rstrip().encode("utf-8")).hexdigest()
 
 
 def notebook_state_cache_key(script: Script) -> str:
-    """Return the canonical cache *relative path* (as a string) for ``script``.
-
-    The cache layout is ``notebook-state/<sha>.json`` with ``sha`` derived
-    from the code body. Callers join this onto an appropriate framework-private
-    root (e.g. the host product's workspace storage prefix).
-    """
-
+    """Return the canonical cache relative path for ``script``."""
     return f"notebook-state/{_code_sha(script.code)}.json"
 
 
 def notebook_state_cache_path(script: Script, root: str | Path) -> Path:
     """Convenience: filesystem path for the cache under ``root``."""
-
     return Path(root) / notebook_state_cache_key(script)
+
+
+def _kernel_output_worth_caching(ko: KernelOutput) -> bool:
+    """True when cell outputs or connector fetch log warrant a cache write."""
+    return bool(ko.outputs) or bool(ko.fetch_log)
+
+
+def encode_notebook_state(script: Script, output: KernelOutput) -> bytes:
+    """Serialize ``output`` for the content-addressed notebook state file (single wire shape)."""
+    doc = NotebookStateDocument(
+        schema_version=1,
+        code_sha=_code_sha(script.code),
+        output=output,
+    )
+    # ``json.dumps`` matches the historical on-disk format (UTF-8, no ``model_dump_json`` quirks).
+    return json.dumps(doc.model_dump(mode="json")).encode("utf-8")
 
 
 def decode_notebook_state(blob: bytes, *, script: Script) -> KernelOutput | None:
     """Decode raw cache bytes into a ``KernelOutput``.
 
-    Returns ``None`` when the cache's ``code_sha`` doesn't match ``script``
-    (cache stale relative to current code). The byte-oriented signature
-    keeps the caller decoupled from how the cache is fetched (local file,
-    object storage, in-memory test fixture, etc.).
+    Returns ``None`` when the blob is invalid, the schema is unsupported, or
+    the cache's ``code_sha`` doesn't match ``script`` (stale relative to code).
     """
-
-    payload = json.loads(blob.decode("utf-8"))
-    if payload.get("code_sha") != _code_sha(script.code):
+    try:
+        data = json.loads(blob.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
         return None
-    return KernelOutput.model_validate(payload["output"])
+    try:
+        doc = NotebookStateDocument.model_validate(data)
+    except ValidationError:
+        return None
+    if doc.code_sha != _code_sha(script.code):
+        return None
+    return doc.output
 
 
 def save_notebook_state(script: Script, root: str | Path) -> None:
-    """Persist ``script.output`` (and lint issues) to the regenerable cache.
+    """Persist ``script.output`` to the regenerable cache.
 
-    No-op when there is no runtime state to cache. The cache is content-
-    addressed and never authoritative: deleting it never destroys user
-    data.
+    No-op when there is no runtime state to cache (no cell output and no fetch log).
     """
-
-    if not script.output.outputs and not script.lint_issues:
+    if not _kernel_output_worth_caching(script.output):
         return
     target = notebook_state_cache_path(script, root)
     target.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "schema_version": NOTEBOOK_SCHEMA_VERSION,
-        "code_sha": _code_sha(script.code),
-        "output": script.output.model_dump(mode="json"),
-        "lint_issues": list(script.lint_issues),
-    }
-    target.write_text(json.dumps(payload))
+    target.write_bytes(encode_notebook_state(script, script.output))
 
 
 def load_notebook_state(script: Script, root: str | Path) -> KernelOutput | None:
-    """Restore the cached ``KernelOutput`` for ``script``, or ``None`` on miss.
-
-    Returns ``None`` when the cache is absent or the code has changed since
-    the cache was written (sha mismatch). For non-local backends prefer
-    fetching the bytes directly and calling :func:`decode_notebook_state`.
-    """
-
+    """Restore the cached ``KernelOutput`` for ``script``, or ``None`` on miss."""
     target = notebook_state_cache_path(script, root)
     if not target.exists():
         return None

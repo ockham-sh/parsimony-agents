@@ -73,10 +73,10 @@ def _build_curated_table(result: Result, dataset: Dataset) -> pa.Table:
     return table.replace_schema_metadata(meta)
 
 
-def _dataset_from_table(table: pa.Table) -> Dataset:
+def _dataset_from_table(table: pa.Table, *, fallback_provenance: Provenance) -> Dataset:
     raw = (table.schema.metadata or {}).get(CURATION_META_KEY)
     if not raw:
-        return Dataset()
+        return Dataset(provenance=fallback_provenance)
     payload: dict[str, Any] = json.loads(raw.decode("utf-8"))
     return Dataset.model_validate(payload)
 
@@ -130,7 +130,7 @@ def deserialize_dataset(data: bytes) -> tuple[Result, Dataset]:
             provenance=Provenance(),
             output_schema=result.output_schema,
         )
-    dataset = _dataset_from_table(table)
+    dataset = _dataset_from_table(table, fallback_provenance=result.provenance)
     return result, dataset
 
 

@@ -12,6 +12,7 @@ from typing import Annotated, Any, Literal
 import altair as alt
 import pandas as pd
 from parsimony.result import Provenance
+from parsimony.transport import redact_sensitive_text
 from pydantic import BaseModel, Field, TypeAdapter, computed_field, field_serializer, field_validator
 
 from parsimony_agents.execution.dataframe_ref import DataframeRef
@@ -44,10 +45,10 @@ class ExceptionObject(BaseOutputObject):
     @classmethod
     def validate_value(cls, v: Any) -> str:
         if isinstance(v, Exception):
-            tb_lines = traceback.format_exception(type(v), v, v.__traceback__)
-            return f"{type(v).__name__}: {v}\nTraceback: {' '.join(tb_lines)}"
+            tb_text = "".join(traceback.format_exception(type(v), v, v.__traceback__))
+            return redact_sensitive_text(f"{type(v).__name__}: {v}\nTraceback:\n{tb_text}")
         if isinstance(v, str):
-            return v
+            return redact_sensitive_text(v)
         raise ValueError(f"Value is not an exception: {type(v)}")
 
     def to_llm(self, mode="default") -> list[dict[str, Any]]:

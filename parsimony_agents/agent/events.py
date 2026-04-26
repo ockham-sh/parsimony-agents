@@ -44,6 +44,7 @@ class ToolEvent(AgentEvent):
     result: Any | None = None
     ui_message: str | None = None
     ui_message_completed: str | None = None
+    also_executed: bool = False
 
 
 class StateSnapshot(AgentEvent):
@@ -62,4 +63,12 @@ class AgentError(AgentEvent):
     error_type: str | None = None
 
 
-AgentEventUnion = TextDelta | ReasoningDelta | ToolEvent | StateSnapshot | AgentError
+class RunCancelled(AgentEvent):
+    """The run was stopped by user (explicit cancel) or by client disconnect."""
+
+    type: Literal["run_cancelled"] = "run_cancelled"
+    message: str
+    reason: Literal["user_request", "client_disconnect"] = "user_request"
+
+
+AgentEventUnion = TextDelta | ReasoningDelta | ToolEvent | StateSnapshot | AgentError | RunCancelled

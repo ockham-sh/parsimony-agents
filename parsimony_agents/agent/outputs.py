@@ -2,21 +2,29 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from parsimony_agents.execution.outputs import KernelOutput
 from parsimony_agents.messages import MessageContent, Text
-from parsimony_agents.variable import Variable
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactLlmResult:
+    """Outcome of a registry-backed ``read_artifact`` read (terminal + agent boundary)."""
+
+    text: str
+    kernel_output: KernelOutput | None = None
 
 
 class UtilityToolOutput(MessageContent):
-    """Tool output shown in the UI for utility (non-code, non-return) tool calls."""
+    """Tool output for utility tools (incl. temporary code). ``ui_message`` / ``ui_message_completed`` are the user-facing label in the terminal."""
 
     type: Literal["utility_tool_output"] = "utility_tool_output"
     ui_message: str
     ui_message_completed: str | None = None
     metadata: dict[str, Any] | None = None
-    content: Variable | KernelOutput | Text | None = None
+    content: KernelOutput | Text | None = None
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
         """Serialize content to LLM message blocks."""
@@ -40,7 +48,7 @@ class SystemToolOutput(MessageContent):
     type: Literal["system_tool_output"] = "system_tool_output"
     ui_message: str | None = None
     ui_message_completed: str | None = None
-    content: Variable | KernelOutput | Text | None = None
+    content: KernelOutput | Text | None = None
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
         if self.content is None:
@@ -72,6 +80,7 @@ class SystemToolMessage(MessageContent):
 
 
 __all__ = [
+    "ArtifactLlmResult",
     "SystemToolMessage",
     "SystemToolOutput",
     "UtilityToolOutput",

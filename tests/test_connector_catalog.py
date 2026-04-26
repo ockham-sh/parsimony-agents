@@ -14,7 +14,7 @@ import pytest
 from parsimony.connector import Connectors
 
 from parsimony_agents.agent.helpers import render_connector_catalog
-from parsimony_agents.agent.models import AgentContext, AgentContextSnapshot, VariableStore
+from parsimony_agents.agent.models import AgentContext, AgentContextSnapshot
 
 
 def _bundle(body: str, length: int = 1) -> Connectors:
@@ -60,7 +60,6 @@ class TestSnapshotEmitsAvailableConnectorsBlock:
 
     def test_empty_catalog_omits_block(self) -> None:
         snap = AgentContextSnapshot(
-            data_context=VariableStore(),
             files_list=[],
             connectors_catalog="",
         )
@@ -68,7 +67,6 @@ class TestSnapshotEmitsAvailableConnectorsBlock:
 
     def test_catalog_text_appears_inside_xml_tags(self) -> None:
         snap = AgentContextSnapshot(
-            data_context=VariableStore(),
             files_list=[],
             connectors_catalog="## `fetch` (1)\n\n### fred",
         )

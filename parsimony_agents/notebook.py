@@ -1,27 +1,38 @@
-"""Named analysis scripts: execution, previews, and step parsing."""
+"""Named analysis scripts: file-backed notebooks and step parsing for the UI."""
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
-import pandas as pd
 from pydantic import BaseModel, Field, computed_field
 
-from parsimony_agents.execution import BaseCodeExecutor, ExceptionObject, FigureObject, KernelOutput
+from parsimony_agents.execution import ExceptionObject, KernelOutput
 from parsimony_agents.execution.outputs import FetchLogEntry
-from parsimony_agents.quality.lints import check_code
-from parsimony_agents.util import truncate_text
+
+DEFAULT_NOTEBOOK_PATH = "notebooks/main.py"
+
+
+def stamp_fetch_log_to_script(
+    kernel_output: KernelOutput,
+) -> list[FetchLogEntry]:
+    """Deduplicate fetch log entries for UI / preview."""
+    if not kernel_output.fetch_log:
+        return []
+    seen: set[str] = set()
+    deduped: list[FetchLogEntry] = []
+    for item in kernel_output.fetch_log:
+        entry = item if isinstance(item, FetchLogEntry) else FetchLogEntry.model_validate(item)
+        key = f"{entry.source}:{json.dumps(entry.params, sort_keys=True, default=str)}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(entry)
+    return deduped
 
 
 class ScriptStepPreview(BaseModel):
-    """
-    A UI-oriented "cell" derived from a single analysis script.
-
-    Contract:
-    - `text` is shown by default (plain text, not markdown).
-    - `code` is revealed on demand.
-    - `children` allows for nested steps.
-    """
+    """A UI-oriented 'cell' derived from a single analysis script."""
 
     text: str = ""
     code: str = ""
@@ -30,23 +41,12 @@ class ScriptStepPreview(BaseModel):
 
 
 def _parse_script_steps(code: str) -> list[ScriptStepPreview]:
-    """
-    Parse a single script into hierarchical steps based on top-level comment blocks.
-
-    A "step" is:
-    - One or more consecutive lines starting with `#` at column 0 (plain text)
-    - Followed by the subsequent code block until the next top-level comment block
-
-    Hierarchy is determined by markdown-style headers in the comments (e.g. "# # Header").
-    Separated comment blocks (by empty lines) are treated as distinct steps.
-    Initial code without comments is excluded from the preview.
-    """
     import re
 
     blocks, curr_text, curr_code, curr_level = [], [], [], 0
     in_comments = False
 
-    def flush():
+    def flush() -> None:
         if curr_text:
             blocks.append(
                 ScriptStepPreview(
@@ -102,22 +102,12 @@ def _parse_script_steps(code: str) -> list[ScriptStepPreview]:
     return root_steps
 
 
-DEFAULT_NOTEBOOK_PATH = "notebooks/main.py"
-
-
 class Script(BaseModel):
-    """
-    A named, re-executable Python script with execution state.
+    """A workspace notebook file: path and code body.
 
-    Design goals:
-    - One authoritative code string (`code`)
-    - Edits are either full replacement (`code_set`) or a single targeted replacement (`code_edit`)
-    - Execution produces a single `KernelOutput`
-    - Version increments are handled by the agent after successful tool calls
-
-    The script's identity is its workspace ``path`` (e.g.
-    ``notebooks/inflation.py``). Persistence layers write to exactly this
-    path; ``AgentContext.notebooks`` is keyed by it.
+    Identity is the workspace path. Persistence uses :mod:`parsimony_agents.notebook_io`.
+    Execution is not implicit unless the agent uses ``code_set``/``code_edit`` with ``execute`` true
+    or calls :func:`run_notebook`. ``output``/``data_objects`` are set after a kernel run for UI previews and the cache.
     """
 
     type: Literal["script"] = "script"
@@ -125,126 +115,29 @@ class Script(BaseModel):
         default=DEFAULT_NOTEBOOK_PATH,
         description="Workspace path where this notebook lives, e.g. notebooks/<name>.py.",
     )
-    code: str = Field(default="", description="Full script contents.")
+    code: str = Field(default="", description="Full script contents (Python source).")
     output: KernelOutput = Field(default_factory=lambda: KernelOutput(outputs=[]))
-    lint_issues: list[str] = Field(default_factory=list)
-    read_only: bool = Field(default=False)
-    version: int = Field(default=1)
     data_objects: list[FetchLogEntry] = Field(default_factory=list)
 
     class Config:
         arbitrary_types_allowed = True
 
-    def increment_version(self) -> None:
-        self.version += 1
-
-    async def execute(self, *, code_executor: BaseCodeExecutor, update_outputs: bool = True) -> KernelOutput:
-        """
-        Execute the full script in the provided executor.
-
-        Note: In production this is expected to be a remote async executor; the local executor
-        is synchronous but can be wrapped in an async adapter in tests.
-        """
-        kernel_output = await code_executor.execute(self.code)
-
-        if update_outputs:
-            self.output = kernel_output
-            locals_dict = code_executor.get_locals()
-
-            type_map: dict[str, Any] = {}
-            for name, type_val in locals_dict.items():
-                if isinstance(type_val, str) and type_val == "dataframe":
-                    type_map[name] = pd.DataFrame
-                elif isinstance(type_val, str) and type_val == "series":
-                    type_map[name] = pd.Series
-                elif isinstance(type_val, type):
-                    type_map[name] = type_val
-                else:
-                    type_map[name] = type(type_val)
-
-            self.lint_issues = check_code(self.code, type_map=type_map)
-
-        return kernel_output
-
-    def code_set(self, *, code: str) -> None:
-        if self.read_only:
-            raise ValueError("Script is read-only.")
-        self.code = code
-
-    def code_edit(self, *, old_str: str, new_str: str) -> None:
-        """
-        Replace exactly one occurrence of `old_str` with `new_str`.
-
-        We fail fast if the target is missing or ambiguous; downstream code relies on strong invariants.
-        """
-        if self.read_only:
-            raise ValueError("Script is read-only.")
-        if old_str == "":
-            raise ValueError("old_str must be non-empty.")
-
-        occurrences = self.code.count(old_str)
-        if occurrences == 0:
-            raise ValueError("old_str not found in script.")
-        if occurrences > 1:
-            raise ValueError("old_str occurs multiple times; provide a more specific target.")
-
-        self.code = self.code.replace(old_str, new_str, 1)
-
-    def has_errors(self) -> bool:
-        return any(isinstance(o, ExceptionObject) for o in self.output.outputs)
-
-    def get_figures(self) -> list[FigureObject]:
-        return [o for o in self.output.outputs if isinstance(o, FigureObject)]
-
-    def _first_error_line(self) -> str | None:
-        exception_output = next((o for o in self.output.outputs if isinstance(o, ExceptionObject)), None)
-        return exception_output.value.split("\n")[0] if exception_output else None
-
-    def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
-        if mode == "minimal":
-            summary = truncate_text(self.code, max_length=200)
-            blocks = [{"type": "text", "text": f"In (summary): {summary}\n"}]
-            if self.has_errors():
-                blocks.append(
-                    {
-                        "type": "text",
-                        "text": f"Output has errors: {self._first_error_line()}\n",
-                    }
-                )
-            return blocks
-
-        blocks = [
-            {
-                "type": "text",
-                "text": f"In:\n```python\n{self.code}\n```",
-            }
-        ]
-
-        if self.lint_issues:
-            lint_text = "\n".join(self.lint_issues)
-            blocks.append(
-                {
-                    "type": "text",
-                    "text": f"Lint issues:\n{lint_text}\n",
-                }
-            )
-
-        out = self.output.to_llm(mode=mode)
-
-        blocks.extend(out)
-        return blocks
-
-    def to_frontend_dict(self) -> dict[str, Any]:
-        return self.to_preview().model_dump(mode="json")
-
     def to_preview(self) -> ScriptPreview:
+        err: str | None = None
+        for o in self.output.outputs:
+            if isinstance(o, ExceptionObject):
+                err = o.value.split("\n")[0]
+                break
         return ScriptPreview(
             path=self.path,
             code=self.code,
-            error_message=self._first_error_line(),
-            version=self.version,
+            error_message=err,
             data_objects=list(self.data_objects),
+            output=self.output if self.output.outputs or self.output.fetch_log else None,
         )
+
+    def to_frontend_dict(self) -> dict[str, Any]:
+        return self.to_preview().model_dump(mode="json")
 
 
 class ScriptPreview(BaseModel):
@@ -252,9 +145,12 @@ class ScriptPreview(BaseModel):
     path: str = DEFAULT_NOTEBOOK_PATH
     code: str
     error_message: str | None = None
-    version: int = 1
     data_objects: list[FetchLogEntry] = Field(default_factory=list)
-    ui_message: str | None = None
+    output: KernelOutput | None = None
+    ui_message: str | None = Field(
+        default=None,
+        description="Optional non-technical detail after '>' in Created/… labels (code_set only; not used for code_edit).",
+    )
 
     @computed_field
     @property
@@ -270,4 +166,5 @@ __all__ = [
     "Script",
     "ScriptPreview",
     "ScriptStepPreview",
+    "stamp_fetch_log_to_script",
 ]

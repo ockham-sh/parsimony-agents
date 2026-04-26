@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 
 logger = logging.getLogger("parsimony_agents")
 
@@ -25,6 +25,7 @@ import pandas as pd
 
 from parsimony.connector import Connectors
 
+from parsimony_agents.execution import documents as _documents
 from parsimony_agents.execution.factory import OutputFactory
 from parsimony_agents.execution.helpers import normalize_connector_bundles
 from parsimony_agents.execution.outputs import (
@@ -37,47 +38,15 @@ from parsimony_agents.theme import register_theme
 
 # ---------------------------------------------------------------------------
 # Security: restrict the builtins available inside user-submitted code.
-# This executor runs code in-process; for full isolation a sandboxed environment
-# (e.g. a separate subprocess, container, or remote kernel) is required.
-# The allowlist below removes dangerous callables (open, exec, eval, compile,
-# etc.) while preserving the builtins needed for normal data-analysis work.
-# __import__ is replaced by _safe_import which only permits a whitelist of
-# safe stdlib modules (CPython internals like strftime trigger lazy imports).
+# This executor runs code in-process; for full isolation use a separate process
+# or remote kernel (e.g. Terminal's optional sandbox executor) and keep secrets
+# out of that environment.
+#
+# We omit dangerous callables (exec, eval, compile, etc.) from the injected
+# builtins while keeping normal data-analysis primitives. Imports are not gated:
+# ``__builtins__.__import__`` is the standard builtin so notebook cells behave
+# like local Python (same model as typical IDE agent runners).
 # ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Restricted __import__: allow only modules that CPython's own C code may
-# lazily import (e.g. ``time`` via ``datetime.strftime``) plus a small set of
-# safe stdlib modules useful for data-analysis cells.
-# ---------------------------------------------------------------------------
-_IMPORT_ALLOWLIST: frozenset[str] = frozenset({
-    # Triggered internally by datetime.strftime / strptime
-    "time", "_strptime",
-    # Common stdlib used in data-analysis code
-    "math", "statistics", "decimal", "fractions",
-    "json", "csv", "re", "collections", "itertools", "functools",
-    "copy", "operator", "string", "textwrap",
-    # typing (pydantic / pandas internals may reference)
-    "typing", "typing_extensions",
-})
-
-
-def _safe_import(name: str, *args: object, **kwargs: object) -> object:
-    """Restricted ``__import__`` that only allows whitelisted modules.
-
-    CPython internally calls ``__import__`` for lazy stdlib imports
-    (e.g. ``datetime.strftime`` imports ``time``).  Blocking it entirely
-    causes cryptic ``KeyError: '__import__'`` for innocent user code.
-    This function permits known-safe modules and rejects everything else
-    with a clear error message.
-    """
-    if name in _IMPORT_ALLOWLIST:
-        return builtins.__import__(name, *args, **kwargs)
-    raise ImportError(
-        f"Importing {name!r} is not allowed in notebook cells. "
-        f"Use the pre-loaded modules (pd, np, alt, datetime, timedelta, timezone) "
-        f"or the client connector instead."
-    )
-
 
 _SAFE_BUILTINS: dict[str, object] = {
     name: getattr(builtins, name)
@@ -93,8 +62,9 @@ _SAFE_BUILTINS: dict[str, object] = {
         # itertools / functional
         "abs", "all", "any", "divmod", "filter", "map", "max", "min",
         "pow", "reversed", "sum", "zip",
-        # I/O safe subset (print is overridden by capturer at call time)
-        "format", "print",
+        # I/O safe subset (print is overridden by capturer at call time; open is
+        # allowed for workspace file access — the executor runs in the workspace cwd)
+        "format", "print", "open",
         # exceptions
         "ArithmeticError", "AssertionError", "AttributeError", "BaseException",
         "BlockingIOError", "BrokenPipeError", "BufferError", "BytesWarning",
@@ -118,16 +88,7 @@ _SAFE_BUILTINS: dict[str, object] = {
     )
     if hasattr(builtins, name)
 }
-_SAFE_BUILTINS["__import__"] = _safe_import
-
-
-@runtime_checkable
-class SerializableContext(Protocol):
-    """Minimal contract for `DataContext` without importing artifact types."""
-
-    def to_locals(self) -> dict[str, Any]: ...
-
-    def model_dump(self, *, mode: str) -> dict[str, Any]: ...
+_SAFE_BUILTINS["__import__"] = builtins.__import__
 
 
 _used_ids: set[str] = set()
@@ -227,18 +188,8 @@ class BaseCodeExecutor(ABC):
         pass
 
     @abstractmethod
-    async def push_state(self, data_context: SerializableContext) -> None:
-        pass
-
-    async def replace_state(self, data_context: SerializableContext) -> None:
-        raise NotImplementedError
-
-    async def get_sandbox_state_version(self) -> int | None:
-        """Remote executors may track the last synced :attr:`AgentContext.state_version`; default none."""
-        return None
-
-    async def set_sandbox_state_version(self, version: int) -> None:
-        """Record that the sandbox namespace matches the given ``AgentContext.state_version``."""
+    async def clear_namespace(self) -> None:
+        """Reset the kernel to base locals, re-apply connectors and setup snippets."""
 
     def get_locals(self) -> dict[str, Any]:
         return {}
@@ -293,9 +244,9 @@ class CodeExecutor(BaseCodeExecutor):
         output_factory: OutputFactory,
         file_session_materializer: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
-        import threading
-
-        self._lock = threading.Lock()
+        # Single async gate: never hold a threading lock across await (would deadlock
+        # the event loop if a second coroutine contends, e.g. two run_notebook tools).
+        self._exec_lock = asyncio.Lock()
         self.cwd = cwd
         self._output_factory = output_factory
         self._file_session_materializer = file_session_materializer
@@ -303,7 +254,6 @@ class CodeExecutor(BaseCodeExecutor):
         self.capturer = StructuredStreamCapturer(output_factory)
         self._setup_snippets: list[str] = []
         self._connectors: dict[str, Connectors] = {}
-        self._sandbox_state_version: int | None = None
         register_theme()
 
     def _base_locals(self) -> dict[str, Any]:
@@ -316,6 +266,9 @@ class CodeExecutor(BaseCodeExecutor):
             "datetime": datetime,
             "timedelta": timedelta,
             "timezone": timezone,
+            "read_pdf_text": _documents.read_pdf_text,
+            "read_excel": _documents.read_excel,
+            "read_pptx_text": _documents.read_pptx_text,
             "__builtins__": _SAFE_BUILTINS,
         }
 
@@ -328,10 +281,13 @@ class CodeExecutor(BaseCodeExecutor):
         and treated as ``{"client": connectors}`` for backwards compatibility.
         """
         self._connectors = normalize_connector_bundles(connectors)
-        self._apply_connectors()
+        async with self._exec_lock:
+            self._apply_connectors()
 
     def _apply_connectors(self) -> None:
         """Wire connector bundles + a shared fetch logger into locals.
+
+        Must be called with :attr:`_exec_lock` held; does not take the lock itself.
 
         The fetch logger captures observational metadata (source, params,
         provenance, head/tail samples) for each connector call so the
@@ -351,10 +307,9 @@ class CodeExecutor(BaseCodeExecutor):
 
         persist_fn = make_data_object_persister(Path(self.cwd))
         fetch_log, log_fetch = make_fetch_logger(persist_fn)
-        with self._lock:
-            for name, bundle in self._connectors.items():
-                self.locals[name] = bundle.with_callback(log_fetch)
-            self.locals["_fetch_log"] = fetch_log
+        for name, bundle in self._connectors.items():
+            self.locals[name] = bundle.with_callback(log_fetch)
+        self.locals["_fetch_log"] = fetch_log
 
     def _workspace_resolved_path(self, path: str) -> Path:
         root = Path(self.cwd).resolve()
@@ -366,13 +321,15 @@ class CodeExecutor(BaseCodeExecutor):
         return candidate
 
     async def read_workspace_file(self, path: str) -> bytes:
-        p = self._workspace_resolved_path(path)
+        async with self._exec_lock:
+            p = self._workspace_resolved_path(path)
         return await asyncio.to_thread(p.read_bytes)
 
     async def write_workspace_file(self, path: str, data: bytes) -> None:
-        p = self._workspace_resolved_path(path)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
+        async with self._exec_lock:
+            p = self._workspace_resolved_path(path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".tmp")
 
         def _write() -> None:
             try:
@@ -386,7 +343,8 @@ class CodeExecutor(BaseCodeExecutor):
         await asyncio.to_thread(_write)
 
     async def delete_workspace_file(self, path: str) -> None:
-        p = self._workspace_resolved_path(path)
+        async with self._exec_lock:
+            p = self._workspace_resolved_path(path)
 
         def _unlink() -> None:
             p.unlink(missing_ok=True)
@@ -394,10 +352,9 @@ class CodeExecutor(BaseCodeExecutor):
         await asyncio.to_thread(_unlink)
 
     async def list_workspace_files(self, prefix: str = "") -> list[tuple[str, int]]:
-        root = Path(self.cwd).resolve()
-        base = (root / prefix) if prefix else root
-
-        def _scan() -> list[tuple[str, int]]:
+        def _scan(cwd: str, pfx: str) -> list[tuple[str, int]]:
+            root = Path(cwd).resolve()
+            base = (root / pfx) if pfx else root
             if not base.exists():
                 return []
             out: list[tuple[str, int]] = []
@@ -410,7 +367,9 @@ class CodeExecutor(BaseCodeExecutor):
                 out.append((str(rel).replace(os.sep, "/"), p.stat().st_size))
             return sorted(out, key=lambda x: x[0])
 
-        return await asyncio.to_thread(_scan)
+        async with self._exec_lock:
+            c = self.cwd or ""
+        return await asyncio.to_thread(_scan, c, prefix)
 
     async def execute_workspace(
         self,
@@ -419,12 +378,11 @@ class CodeExecutor(BaseCodeExecutor):
         timeout_seconds: float | None = None,
     ) -> KernelOutput:
         """Run *code* in a fresh namespace."""
-        with self._lock:
+        async with self._exec_lock:
             self.locals = self._base_locals()
             self.capturer = StructuredStreamCapturer(self._output_factory)
-        if self._connectors is not None:
-            self._apply_connectors()
-        with self._lock:
+            if self._connectors is not None:
+                self._apply_connectors()
             exec_locals = self.locals.copy() if dry_run else self.locals
             self.capturer.flush()
             exec_locals.update(
@@ -459,15 +417,17 @@ class CodeExecutor(BaseCodeExecutor):
         for snippet in self._setup_snippets:
             await self.execute(snippet)
 
-    async def set_cwd(self, cwd: str, session_id: str | None = None):
-        self.cwd = cwd
+    async def set_cwd(self, cwd: str, session_id: str | None = None) -> None:
+        async with self._exec_lock:
+            self.cwd = cwd
         if session_id and self._file_session_materializer is not None:
             await self._file_session_materializer(session_id)
         # Connectors carry a fetch-logger bound to the cwd (for the
         # data-object cache). Rebind so subsequent fetches cache under the
         # new workspace tree rather than the old one.
         if self._connectors is not None:
-            self._apply_connectors()
+            async with self._exec_lock:
+                self._apply_connectors()
 
     @contextmanager
     def _working_directory(self, path: str | None):
@@ -481,25 +441,16 @@ class CodeExecutor(BaseCodeExecutor):
         finally:
             os.chdir(original)
 
-    async def push_state(self, data_context: SerializableContext) -> None:
-        with self._lock:
-            self.locals.update(data_context.to_locals())
-
-    async def replace_state(self, data_context: SerializableContext) -> None:
-        with self._lock:
+    async def clear_namespace(self) -> None:
+        async with self._exec_lock:
             self.locals = self._base_locals()
-            self.locals.update(data_context.to_locals())
-        self._apply_connectors()
+            self.capturer = StructuredStreamCapturer(self._output_factory)
+            if self._connectors is not None:
+                self._apply_connectors()
         await self._run_setup_snippets()
 
-    async def get_sandbox_state_version(self) -> int | None:
-        return self._sandbox_state_version
-
-    async def set_sandbox_state_version(self, version: int) -> None:
-        self._sandbox_state_version = version
-
     async def get(self, key: str) -> KernelOutputType | None:
-        with self._lock:
+        async with self._exec_lock:
             if key not in self.locals:
                 return None
             value = self.locals[key]
@@ -511,7 +462,7 @@ class CodeExecutor(BaseCodeExecutor):
         dry_run: bool = False,
         timeout_seconds: float | None = None,
     ) -> KernelOutput:
-        with self._lock:
+        async with self._exec_lock:
             exec_locals = self.locals.copy() if dry_run else self.locals
             self.capturer.flush()
             exec_locals.update(
@@ -549,7 +500,7 @@ class CodeExecutor(BaseCodeExecutor):
         dry_run: bool = False,
         timeout_seconds: float | None = None,
     ) -> KernelOutput:
-        with self._lock:
+        async with self._exec_lock:
             exec_locals = self.locals.copy() if dry_run else self.locals
             try:
                 val = eval(expr, exec_locals)
@@ -577,7 +528,7 @@ class CodeExecutor(BaseCodeExecutor):
                     )
                 ]
             )
-        with self._lock:
+        async with self._exec_lock:
             con = None
             try:
                 con = duckdb.connect()
@@ -598,8 +549,15 @@ class CodeExecutor(BaseCodeExecutor):
                         logger.debug("Failed to close DuckDB connection", exc_info=True)
 
     def get_locals(self) -> dict[str, Any]:
-        return {
-            k: v
-            for k, v in self.locals.items()
-            if k not in {"pd", "np", "alt", "display", "print", "__builtins__"}
+        _prelude = {
+            "pd",
+            "np",
+            "alt",
+            "display",
+            "print",
+            "__builtins__",
+            "read_pdf_text",
+            "read_excel",
+            "read_pptx_text",
         }
+        return {k: v for k, v in self.locals.items() if k not in _prelude}

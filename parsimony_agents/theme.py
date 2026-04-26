@@ -54,7 +54,7 @@ def get_parsimony_theme() -> dict:
 
     return {
         "config": {
-            "background": "#0d0d0d",
+            "background": "#080808",  # hsl(0, 0%, 3%) — same neutral as terminal app `surface-canvas`
             "font": PARSIMONY_FONT,
             "autosize": {"type": "fit", "contains": "padding"},
             "axis": {

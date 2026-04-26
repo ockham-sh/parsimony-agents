@@ -123,15 +123,15 @@ for name, script in result.code.items():
 
 ### `CodeExecutor`
 
-Sandboxed Python code execution.
+In-process Python code execution with a restricted `__builtins__` and normal imports.
 
 ```python
 from parsimony_agents.execution.executor import CodeExecutor
+from parsimony_agents.execution.factory import OutputFactory
 
 executor = CodeExecutor(
     cwd="/tmp/work",
-    sandbox=True,
-    allowed_imports=["pandas", "numpy", ...]
+    output_factory=OutputFactory(local_dir="/tmp/work"),
 )
 ```
 
@@ -139,11 +139,10 @@ executor = CodeExecutor(
 
 ```python
 CodeExecutor(
-    cwd: str = "/tmp/parsimony-work",
-    sandbox: bool = True,
-    allowed_imports: list[str] | None = None,
-    output_factory: OutputFactory | None = None,
-    timeout_s: float = 120.0,
+    *,
+    cwd: str,
+    output_factory: OutputFactory,
+    file_session_materializer=None,  # optional async hook for workspace file materialization
 )
 ```
 
@@ -340,13 +339,10 @@ Safety limits on agent execution.
 from parsimony_agents.agent.config import AgentGuardrails
 
 guardrails = AgentGuardrails(
-    max_iterations=30,              # Max LLM turns
-    max_execution_time_s=120.0,     # Max execution time
-    max_output_size_mb=100,         # Max output file size
-    max_code_lines=500,             # Max code lines per turn
-    allowed_imports=[               # Whitelist imports
-        "pandas", "numpy", "altair", ...
-    ]
+    max_iterations=30,           # Max LLM turns
+    max_execution_time_s=120.0,  # Max agent run wall time
+    tool_timeout_s=600.0,        # Per-tool timeout
+    llm_timeout_s=60.0,          # Per-LLM-call timeout
 )
 
 agent = Agent(guardrails=guardrails, ...)

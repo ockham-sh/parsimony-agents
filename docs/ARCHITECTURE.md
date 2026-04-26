@@ -42,36 +42,27 @@ Sandboxed Python code execution engine that runs agent-generated code in-process
 - Configurable working directory and environment
 - Timeout enforcement
 - Output capture and provenance tracking
-- Safe namespace with allowed imports
+- Restricted ``__builtins__`` (e.g. no ``exec`` / ``eval`` in the injected set); **imports are not gated**—cells use normal ``__import__`` like local Python. Isolate untrusted runs with a separate process or remote executor and environment hygiene.
 
 **Configuration:**
 ```python
+from parsimony_agents.execution.factory import OutputFactory
+from parsimony_agents.execution.executor import CodeExecutor
+
 CodeExecutor(
-    cwd="/tmp/work",              # Working directory
-    output_factory=OutputFactory(),
-    sandbox=True,                 # Enable/disable sandboxing
-    allowed_imports=["pandas", ...] # Whitelist imports
+    cwd="/tmp/work",
+    output_factory=OutputFactory(local_dir="/tmp/work"),
 )
 ```
 
-### 3. Variable Store (`parsimony_agents/variable.py`)
+### 3. Files, kernel, and `Script` (no `VariableStore`)
 
-Maintains execution state across multiple code executions.
-
-**Features:**
-- Tracks Python variables created during code execution
-- Supports serialization/deserialization
-- Enables multi-turn conversations with persistent state
-- Provides variable inspection and context
+- **Workspace files** are the artifact for notebook code. `code_set` / `code_edit` update on-disk Jupytext-style files; use `execute`: true on those tools or call `run_notebook` (or `dry_execute_code` where appropriate) to populate the kernel.
+- The **CodeExecutor** namespace is **ephemeral** (cleared on `clear_namespace` / `restart_kernel`). `return_dataset` and `return_chart` resolve the Python value with `code_executor.get(name)`; they do not read a parallel in-memory store.
 
 ### 4. Notebooks (`parsimony_agents/notebook.py`)
 
-Organizes agent-generated code into editable, re-executable cells.
-
-**Concepts:**
-- **Script** — A named collection of code cells (immutable execution record)
-- **Notebook** — Editable cells that can be modified and re-executed
-- **Cell** — Individual code block with output and execution metadata
+- **`Script` (`parsimony_agents/notebook.py`)** — The serialization shape for a file path, code body, and (after a run) last `KernelOutput` + fetch log for the notebook viewer. Execution is not implicit unless the agent uses `code_set` / `code_edit` with `execute` or calls `run_notebook`.
 
 ### 5. Artifacts (`parsimony_agents/artifacts/`)
 
@@ -113,13 +104,11 @@ LLM Prompt + Tool Definitions
 LLM generates Tool Calls
     ↓
 Tool Dispatch
-    ├─ code_set → CodeExecutor → outputs → OutputFactory → Artifacts
-    ├─ code_edit → Modify notebook cells
-    ├─ return_dataset → Finalize Dataset artifact
-    ├─ return_chart → Finalize Chart artifact
-    └─ get_context → Return Variable state
+    ├─ code_set / code_edit → write notebook files; optional ``execute`` runs kernel in the same call
+    ├─ run_notebook → CodeExecutor (kernel) + file read from disk
+    ├─ return_dataset / return_chart → `code_executor.get` + emit Dataset / Chart
     ↓
-Outputs stored in VariableStore
+Artifact streaming / `.ockham` snapshots (file-backed in product)
     ↓
 LLM synthesis
     ↓
@@ -181,12 +170,11 @@ Every data fetch is tagged with:
 
 Stored in `Dataset.provenance` and accessible in the execution context.
 
-### 4. Multi-Turn State Management
+### 4. Multi-Turn State
 
-State persists across calls via `VariableStore`:
-- Previous code executions available as variables
-- Notebooks are editable and re-executable
-- Context can be inspected with `get_context` tool
+- The **LLM message list** and session bookkeeping (`AgentContext`, returned artifacts) persist across turns.
+- The **kernel** persists only for the process lifetime of the executor until `restart_kernel` / `clear_namespace`.
+- The **workspace directory** persists the canonical `.py` files and data files; the agent re-runs `run_notebook` after edits when it needs values in the namespace.
 
 ## Extension Points
 
@@ -331,7 +319,7 @@ async def test_agent_ask():
 
 - **CodeExecutor** runs in-process; memory grows with variable size
 - For large datasets, consider pagination or streaming results
-- Use `VariableStore.clear()` to reset execution state
+- Use `CodeExecutor.clear_namespace()` (via `restart_kernel` in the agent) to reset the kernel
 
 ### Execution Time
 
@@ -373,8 +361,7 @@ Key loggers:
 
 **Import errors during code execution:**
 - Install missing packages in your Python environment
-- Check `CodeExecutor.allowed_imports` whitelist
-- Verify package is available in execution environment
+- Verify the package is available in the same environment as the host (or sandbox) process running `CodeExecutor`
 
 **Large outputs causing OOM:**
 - Set `max_output_size_mb` guardrail
@@ -397,13 +384,10 @@ The core loop lives in `agent/agent.py` (~2000 lines). It implements a ReAct-sty
 Entry: Agent.run(user_message, ctx)
   │
   ├─ 1. Context setup
-  │     Build or restore AgentContext
-  │     Seed executor via push_state() or replace_state()
-  │     Inject connectors into executor namespace
+  │     Build or restore AgentContext; inject connectors; bind cwd to workspace
   │
   ├─ 2. Context serialization
-  │     build_context_block(): notebooks + variables + artifacts → text blocks
-  │     Appended as a user-role message to conversation history
+  │     `AgentContextSnapshot` (workspace tree, modules, connector catalog) → LLM
   │
   ├─ 3. LLM streaming call
   │     litellm.acompletion(messages, tools, stream=True)
@@ -412,7 +396,8 @@ Entry: Agent.run(user_message, ctx)
   ├─ 4. Tool call dispatch (repeat until termination)
   │     Parse tool call batch from stream
   │     For each tool: yield ToolEvent(completed=False)
-  │     asyncio.gather(tool1(), tool2(), ...) — parallel execution
+  │     If any tool in the batch is return-type: await each tool in call order
+  │     Else: asyncio.gather(tool1(), tool2(), ...) — parallel execution
   │     For each result: yield ToolEvent(completed=True, result=...)
   │     Append tool results to message history
   │     yield StateSnapshot(context=current_ctx)
@@ -433,7 +418,7 @@ stateDiagram-v2
     ContextSetup : Context Setup\nBuild or restore AgentContext\nSeed executor state
     ContextSerialization : Context Serialization\nbuild_context_block()\nnotebooks + variables + artifacts
     LLMCall : LLM Streaming Call\nlitellm.acompletion(stream=True)\nyield TextDelta / ReasoningDelta
-    ToolDispatch : Tool Dispatch\nasyncio.gather(tool calls)\nyield ToolEvent(completed=False/True)
+    ToolDispatch : Tool Dispatch\nSerial if return tools else gather\nyield ToolEvent(completed=False/True)
     Termination : Termination\nyield StateSnapshot
 
     ContextSetup --> ContextSerialization
@@ -488,7 +473,17 @@ Agent.system_tools
 
 ### Parallel execution
 
-When the LLM calls multiple tools in one response (a tool call batch), they are dispatched concurrently:
+When the LLM calls multiple tools in one response (a tool call batch), the runtime
+chooses how to run them:
+
+- If **any** tool in the batch has `tool_type="return"` (e.g. `return_dataset`,
+  `return_chart`), the coroutines for that entire batch are **awaited sequentially
+  in the model’s tool-call order**. This keeps `AgentContext` mutations ordered
+  (e.g. when both tools run in one response, `return_dataset` runs first so
+  `return_chart` can link to the same-turn dataset snapshot). `return_chart` alone
+  does not require a prior `return_dataset`.
+- If the batch has **no** return tools, coroutines are still dispatched with
+  `asyncio.gather` so independent `utility` work can run concurrently:
 
 ```python
 results = await asyncio.gather(
@@ -496,7 +491,10 @@ results = await asyncio.gather(
 )
 ```
 
-This means two `utility` tools can run at the same time. However, `code` tools are serialized by the `threading.Lock` inside `CodeExecutor` — only one code execution runs at a time, even if two `code` tools are dispatched in the same batch.
+This means two `utility` tools can run at the same time (when the batch is
+utility-only). However, `code` tools are serialized by the `threading.Lock`
+inside `CodeExecutor` — only one code execution runs at a time, even if two
+`code` tools are dispatched in the same batch.
 
 The diagram below illustrates how a tool call batch is dispatched and where serialization occurs.
 
@@ -510,7 +508,7 @@ graph TD
 
     A["LLM response\ntool call batch"]:::llm
     B["yield ToolEvent(completed=False)\nper tool"]:::dispatch
-    C["asyncio.gather(dispatch_tool calls)"]:::dispatch
+    C["Serial if return else gather"]:::dispatch
     D["utility tool 1\noutput_read / output_search"]:::parallel
     E["utility tool 2\n(concurrent)"]:::parallel
     F["code tool\ncode_set / code_edit"]:::serial
@@ -575,17 +573,6 @@ CodeExecutor.locals = {
 
 A single `threading.Lock` guards all reads and writes to `self.locals`. This prevents concurrent corruption when the agent dispatches multiple code tools in parallel (the second waits at the lock while the first runs).
 
-### Warm state optimization
-
-Re-running all prior code every time the agent receives a new message would be slow. The warm state optimization avoids this by versioning the executor state:
-
-1. `AgentContext.state_version` increments each time the variable store changes.
-2. After successfully syncing the executor, `set_sandbox_state_version(version)` records what version the executor reflects.
-3. On the next `run()` call, the agent compares the stored version to the current context version.
-4. If they match, `push_state()` is called (merges in any new variables) instead of `replace_state()` (which resets and re-runs all setup).
-
-This is the reason multi-turn sessions are significantly faster than single-turn sessions for complex analyses.
-
 ### Dry run isolation
 
 `execute(code, dry_run=True)` copies `self.locals` before execution:
@@ -611,7 +598,7 @@ Any `print()` or `display()` call inside executed code routes to the capturer, w
 
 Special handling: if `print()` receives a `pd.DataFrame`, `pd.Series`, or `alt.TopLevelMixin`, it promotes the argument to `display()` instead of converting to string.
 
-The diagram below shows the full path from code execution through output capture to the variable store.
+The diagram below shows the full path from code execution through output capture; values live in `CodeExecutor.locals` until the next `clear_namespace` / `restart_kernel`.
 
 ```mermaid
 graph TD
@@ -631,8 +618,6 @@ graph TD
     I["str / int / float / bool\n→ PrimitiveObject"]:::factory
     J["Exception\n→ ExceptionObject + traceback"]:::factory
     K["capturer.flush()\n→ KernelOutput(outputs)"]:::capturer
-    L["Variable stored in\nVariableStore"]:::store
-
     A --> B --> C --> D --> E --> F
     F --> G
     F --> H
@@ -642,7 +627,6 @@ graph TD
     H --> K
     I --> K
     J --> K
-    K --> L
 ```
 
 ---
@@ -731,8 +715,8 @@ async for event in agent.run("question"):
 
 ```
 User message → Agent LLM
-  → LLM writes Altair code into a notebook cell (code_set tool)
-  → LLM executes the cell (implied by code tools)
+  → LLM writes Altair code into a notebook file (`code_set` / `code_edit`)
+  → LLM runs `run_notebook` to execute the file in the kernel
   → Altair chart object produced in sandbox
   → display(chart) called in user code, or chart returned from exec
   → OutputFactory._from_altair(chart):
@@ -742,7 +726,7 @@ User message → Agent LLM
       4. Call vlc.vegalite_to_png(spec_json) — validation pass
       5. Return FigureObject(value=chart) on success
          or ExceptionObject on spec error
-  → FigureObject stored as Variable in VariableStore
+  → FigureObject held in the kernel; `return_chart` reads it via `code_executor.get`
   → LLM calls return_chart tool
   → Chart artifact built from FigureObject + metadata
   → Chart yielded in ToolEvent.result
@@ -771,13 +755,12 @@ graph TD
     I{"Spec valid?"}:::factory
     J["FigureObject(value=chart)"]:::store
     K["ExceptionObject\nwith Vega-Lite error"]:::error
-    L["Variable stored in\nVariableStore"]:::store
     M["LLM: return_chart tool"]:::llm
     N["Chart artifact\nwith metadata"]:::output
     O["AgentResult.charts[name]"]:::output
 
     A --> B --> C --> D --> E --> F --> G --> H --> I
-    I -->|"valid"| J --> L --> M --> N --> O
+    I -->|"valid"| J --> M --> N --> O
     I -->|"invalid"| K
 ```
 
@@ -805,7 +788,6 @@ parsimony_agents (public API)
 │   ├── tools.py                ← Tool, ToolMethod, Tools, @tool, @toolmethod
 │   ├── notebook.py             ← Script, ScriptPreview
 │   ├── artifacts.py            ← Dataset, Chart (artifact models)
-│   ├── variable.py             ← Variable, VariableStore
 │   ├── messages.py             ← Message, Text, to_litellm, from_litellm
 │   └── execution/executor.py  ← CodeExecutor, BaseCodeExecutor
 │       ├── execution/factory.py    ← OutputFactory
@@ -880,7 +862,7 @@ This is an unconditional import — `opentelemetry-api` must be installed even i
 
 ### In-process execution trust boundary
 
-`CodeExecutor` runs LLM-generated code via `exec()` inside the same Python process. `__builtins__` is explicitly set (preventing accidental access to eval/exec from within executed code). A **restricted `__import__` allowlist** gates which modules can be imported: CPython lazy imports (e.g. `time`, `_strptime`) and common stdlib modules (`math`, `json`, `re`, `collections`, etc.) are permitted, while arbitrary imports are blocked. This is a defense-in-depth measure — deployments should still isolate the host process for production use.
+`CodeExecutor` runs LLM-generated code in-process via a restricted namespace: `__builtins__` omits dangerous callables such as `exec` and `eval`, but **`__import__` is the standard builtin** so notebook code can load any installed module, like a local REPL. Trust boundaries are **deployment-level** (who may run the agent, optional remote sandbox service, secrets and network policy), not an import whitelist.
 
 ### Guardrail default mismatch
 

@@ -27,6 +27,7 @@ from typing import Any, Protocol
 import pandas as pd
 
 from parsimony_agents.agent.agent import Agent, AgentResult
+from parsimony_agents.artifacts import Dataset
 from parsimony_agents.execution.outputs import FetchLogEntry
 
 try:
@@ -107,30 +108,44 @@ def _head_to_dataframe(head: dict[str, Any] | None) -> pd.DataFrame | None:
     return None
 
 
-def _get_variable(context: Any | None, name: str) -> Any | None:
-    """Look up a Variable by name from the agent context."""
-    if context is None:
+def _dataset_dataframe(artifact: Any) -> pd.DataFrame | None:
+    """Best-effort DataFrame for terminal preview from a returned :class:`Dataset`."""
+    if not isinstance(artifact, Dataset):
         return None
-    var_store = getattr(context, "data_context", None)
-    if var_store and hasattr(var_store, "variables"):
-        return var_store.variables.get(name)
-    return None
+    pl = artifact.payload
+    if pl is None:
+        return None
+    try:
+        df = pl.value
+    except Exception:
+        return None
+    return df if isinstance(df, pd.DataFrame) else None
 
 
 def _collect_fetch_entries(result: AgentResult) -> list[FetchLogEntry]:
-    """Extract deduplicated FetchLogEntry objects from notebooks in the result."""
+    """Extract deduplicated fetch-log entries from ``run_notebook`` tool results."""
     entries: list[FetchLogEntry] = []
     seen: set[tuple] = set()
-    ctx = result.context
-    if ctx is None:
-        return entries
-    for nb in getattr(ctx, "notebooks", {}).values():
-        for entry in getattr(nb, "data_objects", []):
-            # Deduplicate by (source, params hash)
-            key = (entry.source, str(sorted(entry.params.items())))
-            if key not in seen:
-                seen.add(key)
-                entries.append(entry)
+    for event in result.events:
+        if getattr(event, "type", None) != "tool_event":
+            continue
+        r = getattr(event, "result", None)
+        if not isinstance(r, dict):
+            continue
+        nb = r.get("notebook")
+        if nb is None:
+            continue
+        for entry in getattr(nb, "data_objects", []) or []:
+            if not isinstance(entry, FetchLogEntry):
+                try:
+                    entry = FetchLogEntry.model_validate(entry)
+                except Exception:
+                    continue
+            key = (entry.source, str(sorted((entry.params or {}).items())))
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(entry)
     return entries
 
 
@@ -283,31 +298,26 @@ class _RichDisplay:
     def show_datasets(self, datasets: dict[str, Any], max_rows: int = 5, context: Any | None = None) -> None:
         if not datasets:
             return
+        _ = context
         self._console.print()
         self._console.print(Rule("Datasets", style="bright_blue"))
         self._console.print()
-        for name, artifact in datasets.items():
-            # Resolve DataFrame from context
-            var = _get_variable(context, name)
-            df = getattr(getattr(var, "output", None), "value", None) if var else None
+        for aid, artifact in datasets.items():
+            df = _dataset_dataframe(artifact)
             if not isinstance(df, pd.DataFrame):
                 continue
-
-            # Header: artifact title or variable name
-            title = getattr(artifact, "title", "") or name
+            prov = artifact.provenance if isinstance(artifact, Dataset) else None
+            title = (prov.title if prov and prov.title else "") or aid
             self._console.print(f"  [bold bright_blue]# {title}[/]")
 
-            # Description
-            desc = getattr(artifact, "description", "")
+            desc = prov.description if prov and prov.description else ""
             if desc:
                 self._console.print(f"  [dim]{desc}[/]")
 
-            # Tags
-            tags = getattr(artifact, "tags", [])
+            tags = list(prov.tags) if prov and prov.tags else []
             if tags:
                 self._console.print(f"  [dim]{' · '.join(tags)}[/]")
 
-            # Notes
             for note in getattr(artifact, "notes", []):
                 self._console.print(f"  [dim]  - {note}[/]")
 
@@ -555,6 +565,7 @@ class _PlainDisplay:
     def show_datasets(self, datasets: dict[str, Any], max_rows: int = 5, context: Any | None = None) -> None:
         if not datasets:
             return
+        _ = context
         print()
         print("--- Datasets " + "-" * 47)
         print()
@@ -562,19 +573,19 @@ class _PlainDisplay:
             from tabulate import tabulate
         except ImportError:
             tabulate = None
-        for name, artifact in datasets.items():
-            var = _get_variable(context, name)
-            df = getattr(getattr(var, "output", None), "value", None) if var else None
+        for aid, artifact in datasets.items():
+            df = _dataset_dataframe(artifact)
             if not isinstance(df, pd.DataFrame):
                 continue
             rows, cols = df.shape
             display_cols = _pick_display_columns(df)
-            title = getattr(artifact, "title", "") or name
+            prov = artifact.provenance if isinstance(artifact, Dataset) else None
+            title = (prov.title if prov and prov.title else "") or aid
             print(f"  # {title}")
-            desc = getattr(artifact, "description", "")
+            desc = prov.description if prov and prov.description else ""
             if desc:
                 print(f"  {desc}")
-            tags = getattr(artifact, "tags", [])
+            tags = list(prov.tags) if prov and prov.tags else []
             if tags:
                 print(f"  {' · '.join(tags)}")
             for note in getattr(artifact, "notes", []):

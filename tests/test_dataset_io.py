@@ -19,11 +19,14 @@ the streaming dispatcher actually hands to the codec.
 
 from __future__ import annotations
 
+import io
+import json
 from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
+from parsimony.result import Provenance, Result
 
 from parsimony_agents import Dataset, deserialize_dataset, serialize_dataset
 from parsimony_agents.dataset_io import CURATION_META_KEY, write_dataset_bytes
@@ -46,9 +49,11 @@ def _payload(df: pd.DataFrame, tmp_path: Path) -> DataFrameObject:
 
 def test_write_dataset_bytes_roundtrips(sample_df: pd.DataFrame, tmp_path: Path) -> None:
     dataset = Dataset(
-        title="Demo",
-        description="Curation round-trip",
-        tags=["demo", "test"],
+        provenance=Provenance(
+            title="Demo",
+            description="Curation round-trip",
+            tags=["demo", "test"],
+        ),
         notebook_refs=["notebooks/main.py"],
         artifact_id="abc123",
         version=2,
@@ -60,9 +65,9 @@ def test_write_dataset_bytes_roundtrips(sample_df: pd.DataFrame, tmp_path: Path)
 
     result, recovered = deserialize_dataset(blob)
     pd.testing.assert_frame_equal(result.df, sample_df)
-    assert recovered.title == "Demo"
-    assert recovered.description == "Curation round-trip"
-    assert recovered.tags == ["demo", "test"]
+    assert recovered.provenance.title == "Demo"
+    assert recovered.provenance.description == "Curation round-trip"
+    assert recovered.provenance.tags == ["demo", "test"]
     assert recovered.notebook_refs == ["notebooks/main.py"]
     assert recovered.artifact_id == "abc123"
     assert recovered.version == 2
@@ -73,12 +78,12 @@ def test_serialize_dataset_alias_matches_write_dataset_bytes(
 ) -> None:
     """``serialize_dataset`` is the dispatcher-friendly alias and must behave identically."""
 
-    dataset = Dataset(title="Streaming", tags=["streaming"])
+    dataset = Dataset(provenance=Provenance(title="Streaming", tags=["streaming"]))
     blob = serialize_dataset(dataset, _payload(sample_df, tmp_path))
 
     _, recovered = deserialize_dataset(blob)
-    assert recovered.title == "Streaming"
-    assert recovered.tags == ["streaming"]
+    assert recovered.provenance.title == "Streaming"
+    assert recovered.provenance.tags == ["streaming"]
 
 
 def test_deserialize_handles_vanilla_parquet(sample_df: pd.DataFrame, tmp_path: Path) -> None:
@@ -90,34 +95,34 @@ def test_deserialize_handles_vanilla_parquet(sample_df: pd.DataFrame, tmp_path: 
     result, dataset = deserialize_dataset(target.read_bytes())
 
     pd.testing.assert_frame_equal(result.df, sample_df)
-    assert dataset.title == ""
-    assert dataset.description == ""
-    assert dataset.tags == []
+    assert dataset.provenance.title is None
+    assert dataset.provenance.description is None
+    assert dataset.provenance.tags == []
     assert dataset.artifact_id != ""
 
 
 def test_dataset_save_via_typed_api(sample_df: pd.DataFrame, tmp_path: Path) -> None:
     """``Dataset.save`` is the typed entry point: build the model, attach a payload, save."""
 
-    dataset = Dataset(title="Typed", tags=["typed"]).with_payload(_payload(sample_df, tmp_path))
+    dataset = Dataset(provenance=Provenance(title="Typed", tags=["typed"])).with_payload(_payload(sample_df, tmp_path))
 
     target = tmp_path / "typed.parquet"
     dataset.save(target)
 
     _, recovered = deserialize_dataset(target.read_bytes())
-    assert recovered.title == "Typed"
-    assert recovered.tags == ["typed"]
+    assert recovered.provenance.title == "Typed"
+    assert recovered.provenance.tags == ["typed"]
     assert recovered.artifact_id == dataset.artifact_id
 
 
 def test_dataset_save_rejects_unattached_payload(tmp_path: Path) -> None:
-    dataset = Dataset(title="No payload")
+    dataset = Dataset(provenance=Provenance(title="No payload"))
     with pytest.raises(ValueError, match="no payload attached"):
         dataset.save(tmp_path / "x.parquet")
 
 
 def test_dataset_save_rejects_non_parquet_path(sample_df: pd.DataFrame, tmp_path: Path) -> None:
-    dataset = Dataset(title="Bad ext").with_payload(_payload(sample_df, tmp_path))
+    dataset = Dataset(provenance=Provenance(title="Bad ext")).with_payload(_payload(sample_df, tmp_path))
     with pytest.raises(ValueError, match="must end in .parquet"):
         dataset.save(tmp_path / "demo.csv")
 
@@ -125,19 +130,19 @@ def test_dataset_save_rejects_non_parquet_path(sample_df: pd.DataFrame, tmp_path
 def test_dataset_with_payload_rejects_raw_dataframe(sample_df: pd.DataFrame) -> None:
     """The payload contract is single-typed: only DataFrameObject is accepted."""
 
-    dataset = Dataset(title="Bad payload")
+    dataset = Dataset(provenance=Provenance(title="Bad payload"))
     with pytest.raises(TypeError, match="DataFrameObject"):
         dataset.with_payload(sample_df)  # type: ignore[arg-type]
 
 
 def test_write_dataset_bytes_rejects_raw_dataframe(sample_df: pd.DataFrame) -> None:
-    dataset = Dataset(title="Bad")
+    dataset = Dataset(provenance=Provenance(title="Bad"))
     with pytest.raises(TypeError, match="DataFrameObject"):
         write_dataset_bytes(dataset, sample_df)  # type: ignore[arg-type]
 
 
 def test_metadata_key_is_present_on_disk(sample_df: pd.DataFrame, tmp_path: Path) -> None:
-    dataset = Dataset(title="Inspect").with_payload(_payload(sample_df, tmp_path))
+    dataset = Dataset(provenance=Provenance(title="Inspect")).with_payload(_payload(sample_df, tmp_path))
     target = tmp_path / "demo.parquet"
     dataset.save(target)
 
@@ -145,3 +150,32 @@ def test_metadata_key_is_present_on_disk(sample_df: pd.DataFrame, tmp_path: Path
     metadata = table.schema.metadata or {}
     assert CURATION_META_KEY in metadata
     assert b"parsimony.result" in metadata
+
+
+def test_deserialize_migrates_legacy_flat_curation_fields(sample_df: pd.DataFrame) -> None:
+    result = Result.from_dataframe(sample_df, provenance=Provenance(source="legacy"))
+    table = result.to_arrow()
+    metadata = dict(table.schema.metadata or {})
+    metadata[CURATION_META_KEY] = json.dumps(
+        {
+            "type": "dataset",
+            "artifact_id": "legacy-ds",
+            "version": 3,
+            "title": "Legacy title",
+            "description": "Legacy description",
+            "tags": ["legacy", "dataset"],
+            "notes": ["note"],
+            "notebook_refs": ["notebooks/legacy.py"],
+            "schema_version": 1,
+        }
+    ).encode("utf-8")
+    migrated_table = table.replace_schema_metadata(metadata)
+    buffer = io.BytesIO()
+    pq.write_table(migrated_table, buffer)
+
+    _, dataset = deserialize_dataset(buffer.getvalue())
+    assert dataset.provenance.title == "Legacy title"
+    assert dataset.provenance.description == "Legacy description"
+    assert dataset.provenance.tags == ["legacy", "dataset"]
+    assert dataset.notes == ["note"]
+    assert dataset.notebook_refs == ["notebooks/legacy.py"]

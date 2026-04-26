@@ -6,6 +6,7 @@ from collections.abc import Callable
 from copy import deepcopy
 from typing import Any, Literal
 
+from parsimony.transport import redact_sensitive_text
 from pydantic import BaseModel, computed_field
 
 
@@ -20,7 +21,7 @@ class ToolResult(BaseModel):
 
     @classmethod
     def from_exception(cls, exception: Exception) -> ToolResult:
-        return cls(exception_message=str(exception), data=None)
+        return cls(exception_message=redact_sensitive_text(str(exception)), data=None)
 
     @classmethod
     def from_data(cls, data: Any) -> ToolResult:
@@ -80,15 +81,21 @@ class Tool:
             case _:
                 tool_prefix_str = ""
 
-        # Inject optional _ui_message so the LLM can provide contextual
-        # descriptions (e.g. "Fetching FRED/UNRATE") for richer display.
-        if "_ui_message" not in parameters_schema.get("properties", {}):
+        # Optional _ui_message: plain-language line for the human reader in the terminal
+        # (utility output, return artifacts, ``code_set``). Omitted where the UI fixes the label
+        # (``run_notebook``, ``code_edit``) or where the tool declares its own ``_ui_message`` (e.g. dry_execute_code).
+        if (
+            self.name not in ("run_notebook", "code_edit")
+            and "_ui_message" not in parameters_schema.get("properties", {})
+            and self.tool_type in ("code", "return", "utility")
+        ):
             parameters_schema.setdefault("properties", {})["_ui_message"] = {
                 "type": "string",
                 "description": (
-                    "REQUIRED. Past-tense summary shown after this tool completes. "
-                    "Examples: 'Fetched FRED/UNRATE', 'Built unemployment chart'. "
-                    "MUST use past tense. 10-50 chars."
+                    "Optional. Short, non-technical, past-tense line explaining what this step did for the user. "
+                    "Utility tools: e.g. 'Checked CPI growth rates'. "
+                    "code_set: shown after '>' in the file-ref line. "
+                    "Return tools: can refine the one-line summary after '>' for datasets/charts."
                 ),
             }
 

@@ -18,15 +18,15 @@ from parsimony_agents.agent.outputs import SystemToolMessage, SystemToolOutput, 
 from parsimony_agents.artifacts import Chart, Dataset
 from parsimony_agents.execution import KernelOutput
 from parsimony_agents.messages import Message, MessageContent, Reasoning, Text
-from parsimony_agents.notebook import DEFAULT_NOTEBOOK_PATH, Script
-from parsimony_agents.variable import Variable, VariableStore
+from parsimony_agents.notebook import Script
+
+from parsimony_agents.agent.session_state import SessionState
 
 
 class ReturnedDatasetState(BaseModel):
     """Session-only bookkeeping for a dataset the agent has returned.
 
-    Holds the executor variable name (so refresh / re-run tools can find
-    the live frame again) and a snapshot of the curation envelope. Does
+    Holds the executor variable name and a snapshot of the curation envelope. Does
     not own a workspace path: snapshots are framework-managed under
     ``.ockham/cards/`` keyed by ``artifact_id`` + ``version``.
     """
@@ -53,9 +53,10 @@ class ReturnedChartState(BaseModel):
     """Session-only bookkeeping for a chart the agent has returned.
 
     Holds the executor variable names (chart + source dataset) and a
-    snapshot of the curation envelope. The source dataset is referenced by
-    its workspace-relative snapshot path (``source_dataset_path``); see
-    :func:`parsimony_agents.artifacts.snapshot_path`. Path is identity.
+    snapshot of the curation envelope. When a matching dataset was returned
+    in the same session, ``source_dataset_path`` is the workspace-relative
+    dataset snapshot (see :func:`parsimony_agents.artifacts.snapshot_path`);
+    for chart-only deliverables it may be empty.
     """
 
     artifact_id: str = ""
@@ -77,21 +78,75 @@ class ReturnedChartState(BaseModel):
         return self
 
 
-def _default_notebooks() -> dict[str, Script]:
-    return {DEFAULT_NOTEBOOK_PATH: Script(path=DEFAULT_NOTEBOOK_PATH)}
+def _build_workspace_tree(files: list[tuple[str, int]]) -> str:
+    """Render a sorted (path, size_bytes) list as an indented directory tree.
+
+    Example output::
+
+        notebooks/
+        ├── gdp_retrieval.py   4.2 KB
+        └── inflation.py       2.1 KB
+        data/
+        └── raw.csv           12.0 KB
+    """
+    from collections import defaultdict
+
+    def _fmt_size(n: int) -> str:
+        if n >= 1024 * 1024:
+            return f"{n / (1024 * 1024):.1f} MB"
+        if n >= 1024:
+            return f"{n / 1024:.1f} KB"
+        return f"{n} B"
+
+    # Build a nested dict tree: {dir: {subdir: {...}, filename: size_bytes}}
+    tree: dict = {}
+    for path, size in sorted(files):
+        parts = path.replace("\\", "/").split("/")
+        node = tree
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = size
+
+    lines: list[str] = []
+
+    def _render(node: dict, prefix: str) -> None:
+        entries = sorted(node.items())
+        for idx, (name, value) in enumerate(entries):
+            is_last = idx == len(entries) - 1
+            connector = "└── " if is_last else "├── "
+            if isinstance(value, dict):
+                lines.append(f"{prefix}{connector}{name}/")
+                extension = "    " if is_last else "│   "
+                _render(value, prefix + extension)
+            else:
+                size_str = _fmt_size(value)
+                lines.append(f"{prefix}{connector}{name}   {size_str}")
+
+    # Top-level entries: dirs get their name + "/" on their own line, then recurse
+    top_entries = sorted(tree.items())
+    for idx, (name, value) in enumerate(top_entries):
+        if isinstance(value, dict):
+            lines.append(f"{name}/")
+            _render(value, "")
+        else:
+            size_str = _fmt_size(value)
+            lines.append(f"{name}   {size_str}")
+
+    return "\n".join(lines)
 
 
 class AgentContextSnapshot(MessageContent):
     type: Literal["agent_context_snapshot"] = "agent_context_snapshot"
-    data_context: VariableStore
-    notebooks: dict[str, Script] = Field(default_factory=_default_notebooks)
-    files_list: list[str]
-    active_notebook_path: str = DEFAULT_NOTEBOOK_PATH
+    #: Workspace files as (relative_path, size_bytes) pairs, sorted alphabetically.
+    #: Populated from the materialized workspace directory before each turn.
+    files_list: list[tuple[str, int]] = Field(default_factory=list)
     #: Pre-rendered catalog of connectors bound into the executor this turn,
     #: as produced by :func:`parsimony_agents.agent.helpers.render_connector_catalog`.
     #: Empty string means no connectors are bound and the corresponding XML
     #: block is omitted from :meth:`to_llm`.
     connectors_catalog: str = ""
+    #: Optional kernel + workspace artifact hints (filled by the host in workspace mode).
+    session_state: SessionState | None = None
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
         chunks: list[dict[str, Any]] = []
@@ -112,27 +167,14 @@ class AgentContextSnapshot(MessageContent):
             ]
         )
 
-        chunks.extend(
-            [
-                {"type": "text", "text": "<data_context>\n"},
-                *self.data_context.to_llm(mode=mode),
-                {"type": "text", "text": "\n</data_context>\n"},
-            ]
-        )
-
-        _parts = [
-            "<session_files>",
-            "Files available in this session (access directly by filename in code):",
-        ]
-        for f in self.files_list:
-            _parts.append(f" - {f}")
-        _parts.append("</session_files>")
-        chunks.append(
-            {
-                "type": "text",
-                "text": "\n".join(_parts),
-            }
-        )
+        if self.files_list:
+            tree_str = _build_workspace_tree(self.files_list)
+            chunks.append(
+                {
+                    "type": "text",
+                    "text": f"<workspace>\n{tree_str}\n</workspace>\n",
+                }
+            )
 
         _parts = [
             "\n"
@@ -169,45 +211,13 @@ class AgentContextSnapshot(MessageContent):
                 }
             )
 
-        """
-
-        if self.working_memory:
-            _parts.extend([
-                "<working_memory>",
-                f"{self.working_memory}",
-                "</working_memory>",
-            ])
-
-
-        if current_stage:
-            _parts.extend([
-                "<current_stage>",
-                f"{current_stage['stage']} with plan: {current_stage['plan']}",
-                "</current_stage>",
-            ])
-
-        """
-
-        if len(self.notebooks) == 1 and DEFAULT_NOTEBOOK_PATH in self.notebooks:
-            chunks.extend(
-                [
-                    {"type": "text", "text": "<notebook>\n"},
-                    *self.notebooks[DEFAULT_NOTEBOOK_PATH].to_llm(mode=mode),
-                    {"type": "text", "text": "\n</notebook>\n"},
-                ]
+        if self.session_state is not None and mode != "minimal":
+            chunks.append(
+                {
+                    "type": "text",
+                    "text": self.session_state.to_llm_text(),
+                }
             )
-        else:
-            chunks.append({"type": "text", "text": "<notebooks>\n"})
-            for notebook_path, notebook in self.notebooks.items():
-                chunks.append(
-                    {
-                        "type": "text",
-                        "text": f'<notebook path="{notebook_path}" active="{str(notebook_path == self.active_notebook_path).lower()}">\n',
-                    }
-                )
-                chunks.extend(notebook.to_llm(mode=mode))
-                chunks.append({"type": "text", "text": "\n</notebook>\n"})
-            chunks.append({"type": "text", "text": "</notebooks>\n"})
 
         chunks.append(
             {
@@ -220,7 +230,7 @@ class AgentContextSnapshot(MessageContent):
 
 
 AgentMessageContent = Annotated[
-    Chart | Dataset | VariableStore | Script | AgentContextSnapshot | UtilityToolOutput | SystemToolOutput | SystemToolMessage | KernelOutput | Reasoning | Variable | Text | str | list[dict[str, Any]],
+    Chart | Dataset | Script | AgentContextSnapshot | UtilityToolOutput | SystemToolOutput | SystemToolMessage | KernelOutput | Reasoning | Text | str | list[dict[str, Any]],
     Field(union_mode="smart"),
 ]
 
@@ -231,10 +241,7 @@ class AgentMessage(Message):
 
 class AgentContext(MessageContent):
     session_id: str
-    data_context: VariableStore = Field(default_factory=VariableStore)
     messages: list[AgentMessage] = Field(default_factory=list)
-    notebooks: dict[str, Script] = Field(default_factory=_default_notebooks)
-    active_notebook_path: str = Field(default=DEFAULT_NOTEBOOK_PATH)
     returned_datasets: dict[str, ReturnedDatasetState] = Field(default_factory=dict)
     returned_charts: dict[str, ReturnedChartState] = Field(default_factory=dict)
     active_returned_dataset_id: str | None = Field(default=None)
@@ -247,31 +254,10 @@ class AgentContext(MessageContent):
     vector_store: Any | None = Field(default=None, exclude=True)
     keyword_store: Any | None = Field(default=None, exclude=True)
 
-    files_list: list[str] = Field(default_factory=list)
-
-    #: Monotonic counter; executor warm-skip compares this to the sandbox-recorded version.
-    state_version: int = Field(default=1, ge=1)
-
-    def bump_state_version(self) -> None:
-        """Invalidate warm-executor assumptions after context or notebooks change."""
-        self.state_version += 1
-
-    def get_or_create_notebook(
-        self,
-        path: str,
-    ) -> Script:
-        """Look up a notebook by its workspace path (creating it if missing).
-
-        ``path`` is a relative workspace path like
-        ``notebooks/inflation.py``. Path safety is enforced by the
-        storage boundary on persistence; here we only require non-empty.
-        """
-        normalized = path.strip()
-        if not normalized:
-            raise ValueError("notebook path must be a non-empty string.")
-        if normalized not in self.notebooks:
-            self.notebooks[normalized] = Script(path=normalized)
-        return self.notebooks[normalized]
+    #: Workspace files as (relative_path, size_bytes) pairs, injected by router before each turn.
+    files_list: list[tuple[str, int]] = Field(default_factory=list)
+    #: Filled by the host before :meth:`to_snapshot` in workspace mode.
+    session_state: SessionState | None = None
 
     def get_returned_dataset(self, artifact_id: str | None = None) -> ReturnedDatasetState | None:
         target_id = artifact_id or self.active_returned_dataset_id
@@ -312,39 +298,23 @@ class AgentContext(MessageContent):
             self.returned_chart = self.returned_charts[self.active_returned_chart_id]
         return self
 
-    @property
-    def notebook(self) -> Script:
-        return self.get_or_create_notebook(DEFAULT_NOTEBOOK_PATH)
-
-    @notebook.setter
-    def notebook(self, value: Script) -> None:
-        self.notebooks[value.path] = value
-        if value.path == DEFAULT_NOTEBOOK_PATH:
-            self.active_notebook_path = DEFAULT_NOTEBOOK_PATH
-
-    async def execute_notebooks(
-        self,
-        *,
-        code_executor: Any,
-        update_outputs: bool = True,
-    ) -> dict[str, KernelOutput]:
-        outputs: dict[str, KernelOutput] = {}
-        for notebook_path, notebook in self.notebooks.items():
-            outputs[notebook_path] = await notebook.execute(
-                code_executor=code_executor, update_outputs=update_outputs
-            )
-        return outputs
-
     async def to_snapshot(self, *, connectors: Any = None) -> AgentContextSnapshot:
         from parsimony_agents.agent.helpers import render_connector_catalog
 
-        files_list = await self.files.list_files() if self.files is not None else []
+        # Prefer the injected file list (workspace mode); fall back to FileStore for
+        # session-mode agents that still use file_store.
+        if self.files_list:
+            files_list: list[tuple[str, int]] = list(self.files_list)
+        elif self.files is not None:
+            raw: list[str] = await self.files.list_files()
+            files_list = [(p, 0) for p in raw]
+        else:
+            files_list = []
+
         return AgentContextSnapshot(
-            data_context=self.data_context.model_copy(deep=True),
-            notebooks={path: notebook.model_copy(deep=True) for path, notebook in self.notebooks.items()},
             files_list=files_list,
-            active_notebook_path=self.active_notebook_path,
             connectors_catalog=render_connector_catalog(connectors),
+            session_state=self.session_state,
         )
 
     def _get_ref_name(self, key: str = str(uuid4())[:8], subdir: str = "artifacts") -> str:
@@ -358,4 +328,5 @@ __all__ = [
     "AgentMessageContent",
     "ReturnedChartState",
     "ReturnedDatasetState",
+    "SessionState",
 ]

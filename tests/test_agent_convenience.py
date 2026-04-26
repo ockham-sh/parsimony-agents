@@ -41,18 +41,12 @@ class TestAgentResult:
         assert r.ok is False
         assert r.text == "partial"
 
-    def test_collect_state_snapshot_extracts_code(self):
+    def test_collect_state_snapshot_stores_context(self) -> None:
         r = AgentResult()
-        # Create a mock context with notebooks
-        mock_nb = MagicMock()
-        mock_nb.code = "import pandas as pd\ndf = pd.DataFrame()"
         mock_ctx = MagicMock()
-        mock_ctx.notebooks = {"main": mock_nb}
-        mock_ctx.data_context = MagicMock()
-
         r._collect(StateSnapshot(context=mock_ctx))
         assert r.context is mock_ctx
-        assert r.code == {"main": mock_nb}
+        assert r.code == {}
 
 
 # ---------------------------------------------------------------------------

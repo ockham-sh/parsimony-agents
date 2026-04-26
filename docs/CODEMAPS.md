@@ -85,22 +85,22 @@ async for event in agent.run("Query"):
 **Sandboxed Python execution engine** for agent-generated code.
 
 ```python
+from parsimony_agents.execution.factory import OutputFactory
+
 executor = CodeExecutor(
     cwd="/tmp/work",
-    sandbox=True,
-    allowed_imports=["pandas", "numpy"],
+    output_factory=OutputFactory(local_dir="/tmp/work"),
 )
 
-result = executor.execute(code, variables)
+result = await executor.execute(code)
 ```
 
 **Key attributes:**
 - `cwd` — Working directory
-- `timeout_s` — Execution timeout
-- `allowed_imports` — Import whitelist
+- `locals` — Kernel namespace (persists across `execute` calls)
 
 **Methods:**
-- `execute(code: str, variables: dict)` → `ExecutionResult`
+- `execute(code: str, ...)` → `KernelOutput` (async)
 
 ### OutputFactory (`execution/factory.py`)
 
@@ -245,11 +245,11 @@ Safety limits on execution:
 
 ```python
 AgentGuardrails(
-    max_iterations=30,        # Max LLM turns
-    max_execution_time_s=120.0,  # Max execution time
-    max_output_size_mb=100,   # Max output file size
-    max_code_lines=500,       # Max code lines per turn
-    allowed_imports=[...]     # Import whitelist
+    max_iterations=30,         # Max LLM turns
+    max_execution_time_s=120.0,  # Max agent run wall time
+    tool_timeout_s=600.0,
+    llm_timeout_s=60.0,
+    llm_max_retries=3,
 )
 ```
 

@@ -76,6 +76,7 @@ export LITELLM_PROXY_URL="http://localhost:4000"
 from parsimony_agents import Agent
 from parsimony_agents.agent.config import AgentGuardrails
 from parsimony_agents.execution.executor import CodeExecutor
+from parsimony_agents.execution.factory import OutputFactory
 from parsimony import discover
 
 # Autodiscover installed connectors and bind credentials from env vars
@@ -87,18 +88,17 @@ agent = Agent(
     connectors=connectors,
 )
 
-# Advanced config with guardrails
+# Advanced config with guardrails and explicit executor
+_work_dir = "/tmp/work"
+_output_factory = OutputFactory(local_dir=_work_dir)
 agent = Agent(
     model="claude-sonnet-4-6",
     instructions="You are an economic analyst...",
     connectors=connectors,
-    code_executor=CodeExecutor(cwd="/tmp/work", timeout_s=120),
+    code_executor=CodeExecutor(cwd=_work_dir, output_factory=_output_factory),
     guardrails=AgentGuardrails(
-        max_iterations=30,          # Max LLM turns
-        max_execution_time_s=120.0, # Timeout
-        max_output_size_mb=100,     # Output limit
-        max_code_lines=500,         # Code size limit
-        allowed_imports=["pandas", "numpy", "scipy"],
+        max_iterations=30,
+        max_execution_time_s=120.0,
     ),
 )
 ```
@@ -343,11 +343,7 @@ agent = Agent(
 **Solution:**
 
 ```bash
-pip install scipy statsmodels  # Install required packages
-# Or configure CodeExecutor whitelist
-from parsimony_agents.execution.executor import CodeExecutor
-
-executor = CodeExecutor(allowed_imports=["scipy", "statsmodels", ...])
+pip install scipy statsmodels  # Install required packages in the environment that runs CodeExecutor
 ```
 
 ### Issue: Execution Timeout

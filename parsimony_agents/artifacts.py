@@ -22,9 +22,10 @@ not five hops deep in the streaming dispatcher.
 Where the payload is written on disk is not the artifact's concern. The
 agent calls :meth:`Dataset.save` / :meth:`Chart.save` when it wants to
 publish to a user-visible workspace path (``data/foo.parquet``); the
-terminal writes a framework-managed snapshot under ``.ockham/cards/`` to
-back the chat card. Both paths embed the same curation metadata via the
-open-format codecs.
+terminal writes a framework-managed snapshot under
+``.ockham/cards/<artifact_id>/v<n>/<title_slug>.<ext>`` to back the chat
+card. Both paths embed the same curation metadata via the open-format
+codecs.
 
 Why no ``Artifact[T]`` generic
 ------------------------------
@@ -39,12 +40,15 @@ would buy nothing beyond a writer registry of two single-entry maps.
 
 from __future__ import annotations
 
+import re
 import uuid
 from pathlib import Path
 from typing import Any, Final, Literal
 
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
+from parsimony.result import Provenance
 
+from parsimony_agents._naming import slug_from_title
 from parsimony_agents.execution.outputs import DataFrameObject, FigureObject
 from parsimony_agents.messages import MessageContent
 
@@ -57,8 +61,11 @@ from parsimony_agents.messages import MessageContent
 CARDS_NAMESPACE: Final[str] = ".ockham/cards"
 
 
-def snapshot_path(*, artifact_id: str, version: int, kind: str) -> str:
+def snapshot_path(*, artifact_id: str, version: int, kind: str, title: str) -> str:
     """Workspace-relative snapshot path for a published artifact version.
+
+    Layout: ``.ockham/cards/<artifact_id>/v<n>/<title_slug>.<ext>`` so the
+    basename is a human-readable snake_case slug derived from curation title.
 
     Lives under ``.ockham/cards/`` so it stays out of the user's editable
     workspace tree but still travels with the workspace blob (and so is
@@ -76,7 +83,23 @@ def snapshot_path(*, artifact_id: str, version: int, kind: str) -> str:
             ext = "vl.json"
         case _:
             raise ValueError(f"snapshot_path: unsupported artifact kind {kind!r}")
-    return f"{CARDS_NAMESPACE}/{artifact_id}/v{version}.{ext}"
+    slug = slug_from_title(title)
+    return f"{CARDS_NAMESPACE}/{artifact_id}/v{version}/{slug}.{ext}"
+
+
+_DATASET_SNAPSHOT_PATH: re.Pattern[str] = re.compile(
+    r"^\.ockham/cards/([^/]+)/v\d+/[^/]+\.parquet$",
+)
+
+
+def artifact_id_from_dataset_snapshot_path(path: str) -> str | None:
+    """Return the ``artifact_id`` segment from a dataset snapshot path, or ``None``."""
+
+    p = (path or "").replace("\\", "/").strip()
+    if not p:
+        return None
+    m = _DATASET_SNAPSHOT_PATH.match(p)
+    return m.group(1) if m else None
 
 
 # ============================================================================
@@ -89,18 +112,44 @@ class _ArtifactBase(MessageContent):
 
     Subclass-specific payload typing is enforced by each subclass's
     :meth:`with_payload` (``isinstance`` + ``TypeError``) — never
-    ``ValueError``. Pydantic models are deliberately *permissive* about
-    ``title`` so that reading a vanilla file (no embedded curation)
-    produces an empty placeholder envelope rather than failing
-    validation. Non-emptiness is enforced at the agent tool boundary.
+    ``ValueError``. ``provenance`` is permissive by design so reading
+    vanilla files (no embedded curation) yields an empty placeholder
+    envelope instead of failing validation. Non-emptiness of title/
+    description is enforced at the agent tool boundary.
     """
 
     schema_version: int = 1
     artifact_id: str = ""
     version: int = 1
-    title: str = ""
-    description: str = ""
+    provenance: Provenance = Field(default_factory=Provenance)
     notes: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _migrate_legacy_curation(cls, values: Any) -> Any:
+        if not isinstance(values, dict):
+            return values
+        migrated = dict(values)
+        provenance_raw = migrated.get("provenance")
+        if provenance_raw is None:
+            provenance_payload: dict[str, Any] = {}
+        elif isinstance(provenance_raw, dict):
+            provenance_payload = dict(provenance_raw)
+        else:
+            return migrated
+
+        legacy_title = migrated.pop("title", None)
+        legacy_description = migrated.pop("description", None)
+        legacy_tags = migrated.pop("tags", None)
+        if legacy_title is not None and not provenance_payload.get("title"):
+            provenance_payload["title"] = legacy_title
+        if legacy_description is not None and not provenance_payload.get("description"):
+            provenance_payload["description"] = legacy_description
+        if legacy_tags is not None and not provenance_payload.get("tags"):
+            provenance_payload["tags"] = legacy_tags
+        if provenance_payload:
+            migrated["provenance"] = provenance_payload
+        return migrated
 
     @model_validator(mode="after")
     def populate_identity(self) -> _ArtifactBase:
@@ -132,7 +181,6 @@ class Dataset(_ArtifactBase):
     model_config = ConfigDict(extra="ignore")
 
     type: Literal["dataset"] = "dataset"
-    tags: list[str] = Field(default_factory=list)
     notebook_refs: list[str] = Field(
         default_factory=list,
         description="Notebook paths used to produce this dataset.",
@@ -161,12 +209,12 @@ class Dataset(_ArtifactBase):
         return self._payload
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
-        title = self.title or "(untitled)"
+        title = self.provenance.title or "(untitled)"
         blocks: list[dict[str, Any]] = [
             {"type": "text", "text": f'<dataset title="{title}">\n'},
         ]
-        if self.description:
-            blocks.append({"type": "text", "text": f"<description>{self.description}</description>\n"})
+        if self.provenance.description:
+            blocks.append({"type": "text", "text": f"<description>{self.provenance.description}</description>\n"})
         if self.notes:
             blocks.append({"type": "text", "text": "<notes>\n"})
             blocks.extend({"type": "text", "text": f"- {note}\n"} for note in self.notes)
@@ -180,10 +228,10 @@ class Dataset(_ArtifactBase):
             "schema_version": self.schema_version,
             "artifact_id": self.artifact_id,
             "version": self.version,
-            "title": self.title,
-            "description": self.description,
+            "title": self.provenance.title or "",
+            "description": self.provenance.description or "",
             "notes": list(self.notes),
-            "tags": list(self.tags),
+            "tags": list(self.provenance.tags),
             "notebook_refs": list(self.notebook_refs),
         }
 
@@ -256,12 +304,12 @@ class Chart(_ArtifactBase):
         return self._payload
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
-        title = self.title or "(untitled)"
+        title = self.provenance.title or "(untitled)"
         blocks: list[dict[str, Any]] = [
             {"type": "text", "text": f'<chart title="{title}" notebook="{self.chart_notebook_ref}">\n'},
         ]
-        if self.description:
-            blocks.append({"type": "text", "text": f"<description>{self.description}</description>\n"})
+        if self.provenance.description:
+            blocks.append({"type": "text", "text": f"<description>{self.provenance.description}</description>\n"})
         if self.notes:
             blocks.append({"type": "text", "text": "<notes>\n"})
             blocks.extend({"type": "text", "text": f"- {note}\n"} for note in self.notes)
@@ -275,8 +323,8 @@ class Chart(_ArtifactBase):
             "schema_version": self.schema_version,
             "artifact_id": self.artifact_id,
             "version": self.version,
-            "title": self.title,
-            "description": self.description,
+            "title": self.provenance.title or "",
+            "description": self.provenance.description or "",
             "notes": list(self.notes),
             "source_dataset_path": self.source_dataset_path,
             "chart_notebook_ref": self.chart_notebook_ref,

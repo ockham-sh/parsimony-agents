@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping
 
 from parsimony.connector import Connectors
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from parsimony_agents.agent.outputs import SystemToolOutput
 from parsimony_agents.execution.helpers import normalize_connector_bundles
@@ -35,7 +35,6 @@ class TurnState(BaseModel):
 
     stopped: bool = False
     final_response_started: bool = False
-    edited_notebook_paths: set[str] = Field(default_factory=set)
 
 
 def render_connector_catalog(

@@ -124,8 +124,8 @@ Agents organize code into notebooks (editable, re-executable cells) and produce 
 
 | Tool | Description |
 |------|-------------|
-| `code_set` | Write a new code notebook |
-| `code_edit` | Modify an existing notebook |
+| `code_set` | Write a new code notebook (`execute` optional: run in same call) |
+| `code_edit` | Modify an existing notebook (`execute` optional: run in same call) |
 | `dry_execute_code` | Preview code output without committing |
 | `return_dataset` | Finalize a dataset as a deliverable |
 | `return_chart` | Finalize a chart as a deliverable |
@@ -142,7 +142,7 @@ parsimony-agents (this package)
      |
      +-- Agent                  — LLM loop, tool orchestration
      +-- CodeExecutor           — in-process Python execution
-     +-- Variable / VariableStore — execution state tracking
+     +-- CodeExecutor — ephemeral kernel; workspace files are the notebook source of truth
      +-- Notebooks              — editable, re-executable code cells
      +-- Artifacts              — typed deliverables (datasets, charts)
      +-- OutputFactory          — value -> typed output dispatch
