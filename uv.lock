@@ -1366,9 +1366,12 @@ requires-dist = [
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.59.0,<2" },
     { name = "mkdocs-material", marker = "extra == 'docs'" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10" },
+    { name = "onnxruntime", marker = "extra == 'standard-onnx'", specifier = ">=1.18.0" },
+    { name = "optimum", extras = ["onnxruntime"], marker = "extra == 'standard-onnx'", specifier = ">=1.22.0" },
     { name = "pandas", specifier = ">=2.3.0,<3" },
+    { name = "parsimony-core", extras = ["standard"], marker = "extra == 'standard-onnx'" },
     { name = "parsimony-core", extras = ["standard", "litellm"], marker = "extra == 'dev'" },
-    { name = "parsimony-core", extras = ["standard", "litellm", "s3"], marker = "extra == 'all'" },
+    { name = "parsimony-core", extras = ["standard", "standard-onnx", "litellm", "s3"], marker = "extra == 'all'" },
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.7" },
     { name = "platformdirs", specifier = ">=4.0.0,<5" },
     { name = "pyarrow", specifier = ">=23.0.1" },
@@ -1384,7 +1387,7 @@ requires-dist = [
     { name = "toon-format", specifier = ">=0.9.0b1,<0.10" },
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.31" },
 ]
-provides-extras = ["standard", "litellm", "s3", "all", "dev", "docs"]
+provides-extras = ["standard", "standard-onnx", "litellm", "s3", "all", "dev", "docs"]
 
 [[package]]
 name = "parsimony-fmp"
