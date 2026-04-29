@@ -11,6 +11,7 @@ from typing import Annotated, Any, Literal
 
 import altair as alt
 import pandas as pd
+from parsimony.errors import ConnectorError
 from parsimony.result import Provenance
 from parsimony.transport import redact_sensitive_text
 from pydantic import BaseModel, Field, TypeAdapter, computed_field, field_serializer, field_validator
@@ -44,6 +45,17 @@ class ExceptionObject(BaseOutputObject):
     @field_validator("value", mode="before")
     @classmethod
     def validate_value(cls, v: Any) -> str:
+        # Typed parsimony errors carry kernel-built, agent-safe messages
+        # that already include the class semantics and the appropriate
+        # agent-loop directive (DO NOT retry / pick a different connector
+        # / etc.).  Surface ``str(exc)`` directly — no traceback frames,
+        # no extra redaction needed (the message text is kernel-controlled
+        # for typed subclasses; bare ``ConnectorError`` is contractually
+        # author-controlled-but-redaction-clean).  Skipping the traceback
+        # also keeps the agent's context budget tight on common failure
+        # paths like rate limits and missing credentials.
+        if isinstance(v, ConnectorError):
+            return str(v)
         if isinstance(v, Exception):
             tb_text = "".join(traceback.format_exception(type(v), v, v.__traceback__))
             return redact_sensitive_text(f"{type(v).__name__}: {v}\nTraceback:\n{tb_text}")
