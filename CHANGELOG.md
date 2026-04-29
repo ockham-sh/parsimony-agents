@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [0.1.0] - Unreleased
 
+### Changed
+
+- `ExceptionObject.validate_value` short-circuits to `str(exc)` for any
+  `parsimony.errors.ConnectorError` — no traceback, no extra redaction.
+  Typed connector errors carry kernel-built, agent-safe messages that
+  already include class semantics and the appropriate agent-loop directive
+  (DO NOT retry / pick a different connector / etc.). Non-`ConnectorError`
+  exceptions retain the redacted-traceback path. Matches the rendering
+  contract used by `parsimony-mcp.bridge.translate_error`, so the same
+  connector failure looks the same to the LLM whether it surfaces via the
+  MCP transport or the in-sandbox kernel-output path.
+
 ### Added
 
 - `Agent` / `DataAgent` with convenience and power APIs
