@@ -12,6 +12,9 @@ import altair as alt
 logger = logging.getLogger(__name__)
 
 PARSIMONY_FONT = "Ubuntu Mono, monospace"
+# Stamped onto every chart spec by `finalize_spec`. Defines the canonical export
+# size and the source-of-truth aspect ratio; in-app viewers may render at a
+# different width but lock to this ratio.
 PARSIMONY_FIGURE_WIDTH = 640
 PARSIMONY_FIGURE_HEIGHT = 400
 
