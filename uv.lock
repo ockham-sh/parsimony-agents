@@ -1390,7 +1390,7 @@ provides-extras = ["standard", "standard-onnx", "litellm", "s3", "all", "dev", "
 
 [[package]]
 name = "parsimony-fmp"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "../parsimony-connectors/packages/fmp" }
 dependencies = [
     { name = "pandas" },
@@ -1414,7 +1414,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "parsimony-fred"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "../parsimony-connectors/packages/fred" }
 dependencies = [
     { name = "pandas" },
@@ -1438,7 +1438,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "parsimony-sdmx"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "../parsimony-connectors/packages/sdmx" }
 dependencies = [
     { name = "beautifulsoup4" },
