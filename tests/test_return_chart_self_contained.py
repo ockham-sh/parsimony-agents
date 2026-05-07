@@ -102,6 +102,7 @@ async def test_return_chart_succeeds_without_return_dataset(tmp_factory: OutputF
         source_dataset_variable_name="clean_df",
         chart_variable_name="c",
         chart_notebook_ref="notebooks/viz.py",
+        sources_from_variables=[],
         description="d",
         notes=["n"],
     )
@@ -128,6 +129,7 @@ async def test_return_chart_includes_dataset_snapshot_path_when_returned_first(
     ds = await agent.return_dataset(
         context=ctx,
         dataset_variable_name="clean_df",
+        sources_from_variables=[],
         title="D",
         description="D",
         notes=["n"],
@@ -146,6 +148,7 @@ async def test_return_chart_includes_dataset_snapshot_path_when_returned_first(
         source_dataset_variable_name="clean_df",
         chart_variable_name="c",
         chart_notebook_ref="notebooks/viz.py",
+        sources_from_variables=[],
         description="d",
         notes=["n"],
     )
@@ -172,6 +175,7 @@ async def test_return_chart_rejects_missing_source_dataframe(tmp_factory: Output
         source_dataset_variable_name="clean_df",
         chart_variable_name="c",
         chart_notebook_ref="notebooks/viz.py",
+        sources_from_variables=[],
         description="d",
         notes=["n"],
     )
@@ -202,6 +206,7 @@ async def test_return_chart_rejects_non_dataframe_source(tmp_factory: OutputFact
         source_dataset_variable_name="clean_df",
         chart_variable_name="c",
         chart_notebook_ref="notebooks/viz.py",
+        sources_from_variables=[],
         description="d",
         notes=["n"],
     )
@@ -228,6 +233,7 @@ async def test_return_chart_rejects_non_figure_chart_variable(tmp_factory: Outpu
         source_dataset_variable_name="clean_df",
         chart_variable_name="c",
         chart_notebook_ref="notebooks/viz.py",
+        sources_from_variables=[],
         description="d",
         notes=["n"],
     )
@@ -254,6 +260,7 @@ async def test_return_chart_rejects_missing_chart_variable(tmp_factory: OutputFa
         source_dataset_variable_name="clean_df",
         chart_variable_name="c",
         chart_notebook_ref="notebooks/viz.py",
+        sources_from_variables=[],
         description="d",
         notes=["n"],
     )

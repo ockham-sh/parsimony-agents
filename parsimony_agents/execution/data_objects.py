@@ -31,10 +31,11 @@ shows.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -48,24 +49,21 @@ DATA_OBJECTS_NAMESPACE = ".ockham/data_objects"
 
 def make_data_object_persister(
     workspace_root: Path,
-) -> Callable[[Any], str | None]:
-    """Build the connector-callback persister bound to ``workspace_root``.
+) -> Callable[[Any], Awaitable[str | None]]:
+    """Build an async connector callback that snapshots each ``Result`` to a content-addressed parquet.
 
-    Returns a sync callable that takes a ``parsimony.Result`` and writes
-    a content-addressed parquet under
-    ``<workspace_root>/.ockham/data_objects/<title_slug>_<short_sha>.parquet``. The callable
-    returns the workspace-relative path on success, or ``None`` on
-    failure — graceful so a misbehaving codec cannot kill the agent
-    turn (the fetch log still records the observation).
+    The Arrow conversion, hashing, and parquet write run in a worker
+    thread to keep the agent event loop responsive. Returns the
+    workspace-relative path on success or ``None`` on failure.
     """
 
     root = workspace_root.resolve()
 
-    def _persist(result: Any) -> str | None:
+    def _do_persist_sync(result: Any) -> str | None:
         try:
             table = result.to_arrow()
             sha = _content_hash(result.provenance, table)
-            title_src = result.provenance.title or result.provenance.source or "fetch"
+            title_src = result.provenance.source or "fetch"
             rel = (
                 f"{DATA_OBJECTS_NAMESPACE}/{slug_from_title(title_src)}_{short_sha(sha)}.parquet"
             )
@@ -86,6 +84,9 @@ def make_data_object_persister(
             return rel
         except Exception:
             return None
+
+    async def _persist(result: Any) -> str | None:
+        return await asyncio.to_thread(_do_persist_sync, result)
 
     return _persist
 

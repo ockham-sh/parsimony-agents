@@ -50,8 +50,8 @@ class _FakeStream:
 @pytest.mark.parametrize(
     ("tool_name", "artifact_factory"),
     [
-        ("return_dataset", lambda: Dataset(provenance=Provenance(title="t", description="d"))),
-        ("return_chart", lambda: Chart(provenance=Provenance(title="c", description="d"))),
+        ("return_dataset", lambda: Dataset(title="t", description="d")),
+        ("return_chart", lambda: Chart(title="c", description="d")),
     ],
 )
 async def test_successful_return_tools_stop_the_run(

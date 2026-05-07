@@ -22,38 +22,32 @@ metadata only.
 
 from __future__ import annotations
 
+import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 import pandas as pd
 
+PersistFn = Callable[[Any], Awaitable[str | None] | str | None]
+
 
 def make_fetch_logger(
-    persist_fn: Callable[[Any], str | None] | None = None,
-) -> tuple[list[dict[str, Any]], Callable[[Any], None]]:
-    """Create a fetch-log list and a callback that appends to it.
+    persist_fn: PersistFn | None = None,
+) -> tuple[list[dict[str, Any]], Callable[[Any], Awaitable[None]]]:
+    """Create a fetch-log list and an async callback that appends to it.
 
-    Returns ``(fetch_log, log_fetch_callback)``. Attach the callback via
-    :meth:`~parsimony.connector.Connectors.with_callback`; the executor
-    drains *fetch_log* after each code execution to produce
-    :class:`~parsimony_agents.execution.outputs.FetchLogEntry` records.
-
-    When *persist_fn* is supplied, it is invoked with the live ``Result``
-    and is expected to return the workspace-relative path of a
-    content-addressed parquet snapshot (or ``None`` to skip stamping).
-    The path is recorded on the entry as ``workspace_path``.
+    When *persist_fn* is supplied, it is invoked with each ``Result`` and
+    its return value (sync or async) is recorded on the entry as
+    ``workspace_path`` and stamped onto ``provenance.data_object_path``.
     """
 
     fetch_log: list[dict[str, Any]] = []
 
-    def _log_fetch(result: Any) -> None:
+    async def _log_fetch(result: Any) -> None:
         entry: dict[str, Any] = {
-            "source": result.provenance.source,
-            "source_description": result.provenance.source_description,
-            "params": result.provenance.params,
-            "columns": [c.model_dump(mode="json") for c in result.columns],
             "provenance": result.provenance,
+            "columns": [c.model_dump(mode="json") for c in result.columns],
         }
         if isinstance(result.data, pd.DataFrame):
             df = result.data
@@ -69,7 +63,14 @@ def make_fetch_logger(
             entry["head"] = {"data": str(result.data)[:500]}
             entry["tail"] = None
         if persist_fn is not None:
-            entry["workspace_path"] = persist_fn(result)
+            ret = persist_fn(result)
+            workspace_path = await ret if inspect.isawaitable(ret) else ret
+            entry["workspace_path"] = workspace_path
+            if workspace_path is not None:
+                try:
+                    result.provenance.data_object_path = workspace_path
+                except Exception:
+                    pass
         fetch_log.append(entry)
 
     return fetch_log, _log_fetch

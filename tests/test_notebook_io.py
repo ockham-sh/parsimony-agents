@@ -20,6 +20,7 @@ from parsimony_agents import (
     save_notebook_state,
     serialize_notebook,
 )
+from parsimony.result import Provenance
 from parsimony_agents.execution.outputs import FetchLogEntry, KernelOutput, PrimitiveObject
 from parsimony_agents.notebook_io import notebook_state_cache_path
 
@@ -108,6 +109,7 @@ def test_state_cache_round_trip_fetch_log_only(sample_script: Script, tmp_path: 
         row_count=1,
         column_names=["a"],
         columns=[{"name": "a", "dtype": "int", "role": "data"}],
+        provenance=Provenance(source="stub", source_description="stub fixture"),
     )
     sample_script.output = KernelOutput(outputs=[], fetch_log=[entry])
     save_notebook_state(sample_script, tmp_path)

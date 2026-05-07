@@ -304,29 +304,31 @@ _kernel_output_type_adapter = TypeAdapter(KernelOutputType)
 
 
 class FetchLogEntry(BaseModel):
-    """One recorded data operation from sandbox code (via the product ``fetch()`` wrapper → ``_fetch_log``).
+    """One recorded data operation from sandbox code.
 
-    The in-memory shape is the agent's: it carries ``head``/``tail``/
-    ``columns``/``provenance`` for the LLM context window. The wire shape
-    served by ``_notebook_payload`` is independent and intentionally
-    smaller — the renderer reaches the rich content by following
-    ``workspace_path``.
-
-    ``workspace_path`` is the framework-managed content-addressed path
-    (``.ockham/data_objects/<sha>.parquet``) when the executor was wired
-    with a data-object persister; ``None`` otherwise. Path is identity.
+    ``provenance`` is the upstream identity; the remaining fields describe
+    the entry's shape (row count, columns, head/tail samples, snapshot path).
     """
 
-    source: str
-    source_description: str = ""
-    params: dict[str, Any]
+    provenance: Provenance
     row_count: int
     column_names: list[str]
     columns: list[dict[str, Any]]
-    provenance: Provenance = Field(default_factory=Provenance)
     head: dict[str, Any] | None = None
     tail: dict[str, Any] | None = None
     workspace_path: str | None = None
+
+    @property
+    def source(self) -> str:
+        return self.provenance.source
+
+    @property
+    def source_description(self) -> str:
+        return self.provenance.source_description
+
+    @property
+    def params(self) -> dict[str, Any]:
+        return self.provenance.params
 
 
 class KernelOutput(MessageContent):
@@ -368,5 +370,12 @@ class KernelOutput(MessageContent):
             "type": self.type,
             "outputs": [output.to_frontend_dict() for output in self.outputs],
             "metadata": self.metadata,
-            "fetch_log": [e.model_dump(mode="json") for e in self.fetch_log],
+            "fetch_log": [_fetch_entry_safe_dump(e) for e in self.fetch_log],
         }
+
+
+def _fetch_entry_safe_dump(entry: FetchLogEntry) -> dict[str, Any]:
+    """Wire-safe projection: replace ``provenance`` with its ``safe_dump``."""
+    raw = entry.model_dump(mode="json")
+    raw["provenance"] = entry.provenance.safe_dump()
+    return raw

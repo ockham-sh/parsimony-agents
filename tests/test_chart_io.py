@@ -55,10 +55,8 @@ def sample_alt_chart() -> alt.Chart:
 
 def test_chart_save_from_dict_roundtrips(sample_spec: dict, tmp_path: Path) -> None:
     chart = Chart(
-        provenance=Provenance(
-            title="Demo",
-            description="Bar chart",
-        ),
+        title="Demo",
+        description="Bar chart",
         notes=["interesting"],
         source_dataset_path=".ockham/cards/ds-123/v2/demo.parquet",
         chart_notebook_ref="notebooks/main.py",
@@ -68,8 +66,8 @@ def test_chart_save_from_dict_roundtrips(sample_spec: dict, tmp_path: Path) -> N
     chart.save(target)
 
     recovered, spec = read_chart(target)
-    assert recovered.provenance.title == "Demo"
-    assert recovered.provenance.description == "Bar chart"
+    assert recovered.title == "Demo"
+    assert recovered.description == "Bar chart"
     assert recovered.notes == ["interesting"]
     assert recovered.source_dataset_path == ".ockham/cards/ds-123/v2/demo.parquet"
     assert recovered.chart_notebook_ref == "notebooks/main.py"
@@ -77,13 +75,13 @@ def test_chart_save_from_dict_roundtrips(sample_spec: dict, tmp_path: Path) -> N
 
 
 def test_chart_save_from_altair(sample_alt_chart: alt.Chart, tmp_path: Path) -> None:
-    chart = Chart(provenance=Provenance(title="Lines")).with_payload(FigureObject(value=sample_alt_chart))
+    chart = Chart(title="Lines").with_payload(FigureObject(value=sample_alt_chart))
 
     target = tmp_path / "alt.vl.json"
     chart.save(target)
 
     recovered, spec = read_chart(target)
-    assert recovered.provenance.title == "Lines"
+    assert recovered.title == "Lines"
     mark = spec["mark"]
     assert (mark == "line") or (isinstance(mark, dict) and mark.get("type") == "line")
 
@@ -91,10 +89,8 @@ def test_chart_save_from_altair(sample_alt_chart: alt.Chart, tmp_path: Path) -> 
 def test_serialize_chart_uses_vega_lite_format(sample_spec: dict) -> None:
     fig = FigureObject(value=sample_spec)
     chart = Chart(
-        provenance=Provenance(
-            title="Stream",
-            description="Streaming",
-        ),
+        title="Stream",
+        description="Streaming",
         source_dataset_path=".ockham/cards/ds-stream/v1/stream.parquet",
         chart_notebook_ref="notebooks/main.py",
     )
@@ -105,7 +101,7 @@ def test_serialize_chart_uses_vega_lite_format(sample_spec: dict) -> None:
     assert spec["mark"] == "bar"
     assert "$schema" in spec
     curation_meta = spec["usermeta"][CURATION_META_KEY]
-    assert curation_meta["provenance"]["title"] == "Stream"
+    assert curation_meta["title"] == "Stream"
     assert curation_meta["chart_notebook_ref"] == "notebooks/main.py"
     assert curation_meta["schema_version"] >= 1
 
@@ -117,19 +113,19 @@ def test_deserialize_handles_vanilla_vegalite(sample_spec: dict, tmp_path: Path)
     target.write_text(json.dumps(sample_spec))
 
     chart, spec = deserialize_chart(target.read_bytes())
-    assert chart.provenance.title is None
+    assert chart.title == ""
     assert chart.artifact_id != ""  # populated by validator
     assert spec["mark"] == "bar"
 
 
 def test_chart_save_rejects_non_vl_json_path(sample_spec: dict, tmp_path: Path) -> None:
-    chart = Chart(provenance=Provenance(title="Bad ext")).with_payload(FigureObject(value=sample_spec))
+    chart = Chart(title="Bad ext").with_payload(FigureObject(value=sample_spec))
     with pytest.raises(ValueError, match="must end in .vl.json"):
         chart.save(tmp_path / "demo.json")
 
 
 def test_chart_save_rejects_unattached_payload(tmp_path: Path) -> None:
-    chart = Chart(provenance=Provenance(title="No payload"))
+    chart = Chart(title="No payload")
     with pytest.raises(ValueError, match="no payload attached"):
         chart.save(tmp_path / "x.vl.json")
 
@@ -138,63 +134,56 @@ def test_chart_save_preserves_pre_existing_usermeta(sample_spec: dict, tmp_path:
     """Other usermeta keys must be preserved alongside the parsimony_agents namespace."""
 
     spec = {**sample_spec, "usermeta": {"editor": "vega-editor"}}
-    chart = Chart(provenance=Provenance(title="Co-existence")).with_payload(FigureObject(value=spec))
+    chart = Chart(title="Co-existence").with_payload(FigureObject(value=spec))
     target = tmp_path / "demo.vl.json"
     chart.save(target)
 
     raw = json.loads(target.read_text())
     assert raw["usermeta"]["editor"] == "vega-editor"
-    assert raw["usermeta"][CURATION_META_KEY]["provenance"]["title"] == "Co-existence"
+    assert raw["usermeta"][CURATION_META_KEY]["title"] == "Co-existence"
 
 
 def test_chart_with_payload_rejects_raw_dict(sample_spec: dict) -> None:
     """The payload contract is single-typed: only FigureObject is accepted."""
 
-    chart = Chart(provenance=Provenance(title="Bad payload"))
+    chart = Chart(title="Bad payload")
     with pytest.raises(TypeError, match="FigureObject"):
         chart.with_payload(sample_spec)  # type: ignore[arg-type]
 
 
 def test_write_chart_bytes_rejects_raw_dict(sample_spec: dict) -> None:
-    chart = Chart(provenance=Provenance(title="Bad"))
+    chart = Chart(title="Bad")
     with pytest.raises(TypeError, match="FigureObject"):
         write_chart_bytes(chart, sample_spec)  # type: ignore[arg-type]
 
 
-def test_deserialize_chart_ignores_legacy_source_dataset_fields(
+def test_deserialize_chart_ignores_unknown_fields(
     sample_spec: dict, tmp_path: Path
 ) -> None:
-    """Snapshots written before ``source_dataset_path`` was introduced.
+    """``Chart`` uses ``extra='ignore'`` so unknown fields in usermeta
+    deserialize without error. This is the escape hatch when adding new
+    chart fields without breaking older snapshots."""
 
-    Pre-"path is identity" snapshots embedded
-    ``source_dataset_artifact_id`` + ``source_dataset_version`` in
-    usermeta. ``Chart`` declares ``model_config = ConfigDict(extra="ignore")``
-    so those fields deserialize without error and the new path-based
-    field stays empty (the host re-derives it on next refresh).
-    """
-
-    spec_with_legacy_meta = {
+    spec_with_unknown_field = {
         **sample_spec,
         "usermeta": {
             CURATION_META_KEY: {
                 "type": "chart",
-                "artifact_id": "chart-legacy",
+                "artifact_id": "chart-x",
                 "version": 1,
-                "title": "Legacy",
+                "title": "X",
                 "description": "",
                 "notes": [],
-                "source_dataset_artifact_id": "ds-legacy",
-                "source_dataset_version": 3,
-                "chart_notebook_ref": "notebooks/legacy.py",
+                "future_field_we_dont_know_yet": "ok",
+                "chart_notebook_ref": "notebooks/x.py",
                 "schema_version": 1,
             }
         },
     }
-    target = tmp_path / "legacy.vl.json"
-    target.write_text(json.dumps(spec_with_legacy_meta))
+    target = tmp_path / "x.vl.json"
+    target.write_text(json.dumps(spec_with_unknown_field))
 
     chart, spec = deserialize_chart(target.read_bytes())
-    assert chart.provenance.title == "Legacy"
-    assert chart.chart_notebook_ref == "notebooks/legacy.py"
-    assert chart.source_dataset_path == ""
+    assert chart.title == "X"
+    assert chart.chart_notebook_ref == "notebooks/x.py"
     assert spec["mark"] == "bar"

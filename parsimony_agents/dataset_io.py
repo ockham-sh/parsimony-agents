@@ -51,7 +51,7 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from parsimony.result import Provenance, Result
+from parsimony.result import Result
 
 from parsimony_agents.artifacts import Dataset
 from parsimony_agents.execution.outputs import DataFrameObject
@@ -73,10 +73,11 @@ def _build_curated_table(result: Result, dataset: Dataset) -> pa.Table:
     return table.replace_schema_metadata(meta)
 
 
-def _dataset_from_table(table: pa.Table, *, fallback_provenance: Provenance) -> Dataset:
+def _dataset_from_table(table: pa.Table) -> Dataset:
+    """Build a :class:`Dataset` from the curation metadata, or an empty one if absent."""
     raw = (table.schema.metadata or {}).get(CURATION_META_KEY)
     if not raw:
-        return Dataset(provenance=fallback_provenance)
+        return Dataset()
     payload: dict[str, Any] = json.loads(raw.decode("utf-8"))
     return Dataset.model_validate(payload)
 
@@ -117,20 +118,14 @@ serialize_dataset = write_dataset_bytes
 def deserialize_dataset(data: bytes) -> tuple[Result, Dataset]:
     """Inverse of :func:`write_dataset_bytes`.
 
-    Vanilla Parquet (no parsimony / parsimony-agents metadata) round-trips
-    cleanly: the returned ``Result`` carries a default ``Provenance`` and
-    the ``Dataset`` envelope is empty (with a fresh artifact_id).
+    Vanilla Parquet without the curation metadata block returns an empty
+    :class:`Dataset`; the :class:`Result` reflects whatever provenance
+    the parquet's ``parsimony.result`` metadata held.
     """
 
     table = pq.read_table(io.BytesIO(data))
     result = Result.from_arrow(table)
-    if result.provenance is None:
-        result = Result(
-            data=result.data,
-            provenance=Provenance(),
-            output_schema=result.output_schema,
-        )
-    dataset = _dataset_from_table(table, fallback_provenance=result.provenance)
+    dataset = _dataset_from_table(table)
     return result, dataset
 
 

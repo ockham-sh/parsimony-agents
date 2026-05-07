@@ -45,8 +45,8 @@ import uuid
 from pathlib import Path
 from typing import Any, Final, Literal
 
-from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 from parsimony.result import Provenance
+from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from parsimony_agents._naming import slug_from_title
 from parsimony_agents.execution.outputs import DataFrameObject, FigureObject
@@ -108,48 +108,16 @@ def artifact_id_from_dataset_snapshot_path(path: str) -> str | None:
 
 
 class _ArtifactBase(MessageContent):
-    """Identity machinery shared by :class:`Dataset` / :class:`Chart`.
-
-    Subclass-specific payload typing is enforced by each subclass's
-    :meth:`with_payload` (``isinstance`` + ``TypeError``) — never
-    ``ValueError``. ``provenance`` is permissive by design so reading
-    vanilla files (no embedded curation) yields an empty placeholder
-    envelope instead of failing validation. Non-emptiness of title/
-    description is enforced at the agent tool boundary.
-    """
+    """Identity, curation, and lineage shared by :class:`Dataset` / :class:`Chart`."""
 
     schema_version: int = 1
     artifact_id: str = ""
     version: int = 1
-    provenance: Provenance = Field(default_factory=Provenance)
+    title: str = ""
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_legacy_curation(cls, values: Any) -> Any:
-        if not isinstance(values, dict):
-            return values
-        migrated = dict(values)
-        provenance_raw = migrated.get("provenance")
-        if provenance_raw is None:
-            provenance_payload: dict[str, Any] = {}
-        elif isinstance(provenance_raw, dict):
-            provenance_payload = dict(provenance_raw)
-        else:
-            return migrated
-
-        legacy_title = migrated.pop("title", None)
-        legacy_description = migrated.pop("description", None)
-        legacy_tags = migrated.pop("tags", None)
-        if legacy_title is not None and not provenance_payload.get("title"):
-            provenance_payload["title"] = legacy_title
-        if legacy_description is not None and not provenance_payload.get("description"):
-            provenance_payload["description"] = legacy_description
-        if legacy_tags is not None and not provenance_payload.get("tags"):
-            provenance_payload["tags"] = legacy_tags
-        if provenance_payload:
-            migrated["provenance"] = provenance_payload
-        return migrated
+    sources: list[Provenance] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def populate_identity(self) -> _ArtifactBase:
@@ -209,16 +177,17 @@ class Dataset(_ArtifactBase):
         return self._payload
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
-        title = self.provenance.title or "(untitled)"
+        title = self.title or "(untitled)"
         blocks: list[dict[str, Any]] = [
             {"type": "text", "text": f'<dataset title="{title}">\n'},
         ]
-        if self.provenance.description:
-            blocks.append({"type": "text", "text": f"<description>{self.provenance.description}</description>\n"})
+        if self.description:
+            blocks.append({"type": "text", "text": f"<description>{self.description}</description>\n"})
         if self.notes:
             blocks.append({"type": "text", "text": "<notes>\n"})
             blocks.extend({"type": "text", "text": f"- {note}\n"} for note in self.notes)
             blocks.append({"type": "text", "text": "</notes>\n"})
+        blocks.extend(_sources_blocks(self.sources))
         blocks.append({"type": "text", "text": "</dataset>\n"})
         return blocks
 
@@ -228,10 +197,10 @@ class Dataset(_ArtifactBase):
             "schema_version": self.schema_version,
             "artifact_id": self.artifact_id,
             "version": self.version,
-            "title": self.provenance.title or "",
-            "description": self.provenance.description or "",
+            "title": self.title,
+            "description": self.description,
             "notes": list(self.notes),
-            "tags": list(self.provenance.tags),
+            "tags": list(self.tags),
             "notebook_refs": list(self.notebook_refs),
         }
 
@@ -304,16 +273,17 @@ class Chart(_ArtifactBase):
         return self._payload
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
-        title = self.provenance.title or "(untitled)"
+        title = self.title or "(untitled)"
         blocks: list[dict[str, Any]] = [
             {"type": "text", "text": f'<chart title="{title}" notebook="{self.chart_notebook_ref}">\n'},
         ]
-        if self.provenance.description:
-            blocks.append({"type": "text", "text": f"<description>{self.provenance.description}</description>\n"})
+        if self.description:
+            blocks.append({"type": "text", "text": f"<description>{self.description}</description>\n"})
         if self.notes:
             blocks.append({"type": "text", "text": "<notes>\n"})
             blocks.extend({"type": "text", "text": f"- {note}\n"} for note in self.notes)
             blocks.append({"type": "text", "text": "</notes>\n"})
+        blocks.extend(_sources_blocks(self.sources))
         blocks.append({"type": "text", "text": "</chart>\n"})
         return blocks
 
@@ -323,8 +293,9 @@ class Chart(_ArtifactBase):
             "schema_version": self.schema_version,
             "artifact_id": self.artifact_id,
             "version": self.version,
-            "title": self.provenance.title or "",
-            "description": self.provenance.description or "",
+            "title": self.title,
+            "description": self.description,
+            "tags": list(self.tags),
             "notes": list(self.notes),
             "source_dataset_path": self.source_dataset_path,
             "chart_notebook_ref": self.chart_notebook_ref,
@@ -353,3 +324,25 @@ class Chart(_ArtifactBase):
             raise ValueError(f"Chart.save: path must end in .vl.json, got {path!r}")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(write_chart_bytes(self, self._payload))
+
+
+def _sources_blocks(sources: list[Provenance]) -> list[dict[str, Any]]:
+    """Render upstream sources as ``<sources>``/``<source />`` text blocks for ``to_llm``."""
+    if not sources:
+        return []
+    out: list[dict[str, Any]] = [
+        {"type": "text", "text": f'<sources count="{len(sources)}">\n'},
+    ]
+    for src in sources:
+        safe = src.safe_dump()
+        fetched = safe.get("fetched_at") or ""
+        params = safe.get("params") or {}
+        params_str = ", ".join(f"{k}={v}" for k, v in sorted(params.items())) if isinstance(params, dict) else ""
+        attrs = f'name="{safe.get("source", "")}"'
+        if fetched:
+            attrs += f' fetched_at="{fetched}"'
+        if params_str:
+            attrs += f' params="{params_str}"'
+        out.append({"type": "text", "text": f"  <source {attrs} />\n"})
+    out.append({"type": "text", "text": "</sources>\n"})
+    return out
