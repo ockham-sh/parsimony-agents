@@ -131,6 +131,54 @@ def _serialize_and_hash_object(obj: Any) -> int:
     return hash(json.dumps(obj, sort_keys=True))
 
 
+async def _resolve_sources_from_variables(
+    code_executor: Any, var_names: list[str]
+) -> list[Provenance]:
+    """Read each named kernel variable's ``.provenance`` and return the list."""
+    if not var_names:
+        return []
+
+    names_literal = repr(list(var_names))
+    expr = (
+        "__import__('json').dumps(["
+        "(lambda _v, _n: {"
+        "'name': _n, "
+        "'provenance': (_v.provenance.model_dump(mode='json') "
+        "if hasattr(_v, 'provenance') and _v is not None else None)"
+        "})(globals().get(_n), _n) "
+        f"for _n in {names_literal}"
+        "])"
+    )
+    ko = await code_executor.eval(expr)
+    if not ko.outputs:
+        raise RuntimeError("eval returned no output while resolving sources_from_variables.")
+    payload_obj = ko.outputs[0]
+    if getattr(payload_obj, "type", None) == "exception":
+        raise RuntimeError(
+            f"eval failed while resolving sources_from_variables: {payload_obj.value!r}"
+        )
+    raw_value = getattr(payload_obj, "value", None)
+    if not isinstance(raw_value, str):
+        raise RuntimeError(
+            f"eval returned unexpected output type for sources_from_variables: {type(payload_obj).__name__}"
+        )
+    entries = json.loads(raw_value)
+
+    provenances: list[Provenance] = []
+    for entry in entries:
+        name = entry["name"]
+        prov_dict = entry.get("provenance")
+        if prov_dict is None:
+            raise ValueError(
+                f"sources_from_variables: '{name}' is not in the kernel or "
+                "does not hold a connector Result. Pass variable names that "
+                "received the return value of a connector fetch (e.g. "
+                "``raw = await connectors[\"fred_fetch\"](...)``)."
+            )
+        provenances.append(Provenance.model_validate(prov_dict))
+    return provenances
+
+
 @dataclass
 class AgentResult:
     """Structured result from :meth:`Agent.ask`.
@@ -2071,10 +2119,14 @@ class Agent:
         name="return_dataset",
         description=(
             "Return exactly one validated dataset when the user should receive the table. "
-            "``dataset_variable_name`` must be a "
-            "plain notebook variable name. Provide notebook refs for the stages used in "
-            "the pipeline. The framework picks the persistence location and embeds curation "
-            "metadata in the on-disk file. Charts can be delivered with return_chart alone."
+            "``dataset_variable_name`` must be a plain notebook variable name. "
+            "``sources_from_variables`` is the list of variable names that hold the "
+            "connector ``Result`` return values that fed this dataset (e.g. "
+            "``raw = await connectors[\"fred_fetch\"](...)``); pass an empty list only "
+            "when no upstream connector fetches contributed (purely-computed datasets). "
+            "Provide notebook refs for the stages used in the pipeline. The framework "
+            "picks the persistence location and embeds curation metadata in the on-disk file. "
+            "Charts can be delivered with return_chart alone."
         ),
         parameters_schema={
             "type": "object",
@@ -2083,6 +2135,22 @@ class Agent:
                     "type": "string",
                     "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
                     "description": "Plain notebook variable name for the final pandas DataFrame or Series to return. Do not pass expressions, slices, or indexing such as df.head(20) or df[0:20].",
+                },
+                "sources_from_variables": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                    },
+                    "description": (
+                        "Variable names that hold the connector Result return values "
+                        "fed into this dataset (the variables on the LHS of "
+                        "``await connectors[...](...)`` calls). The framework resolves "
+                        "each to its provenance — source, params, fetched_at, "
+                        "data_object_path — and stamps the list as Dataset.sources. "
+                        "Pass [] only for purely-computed datasets with no upstream "
+                        "connector fetches."
+                    ),
                 },
                 "title": {
                     "type": "string",
@@ -2110,6 +2178,7 @@ class Agent:
             },
             "required": [
                 "dataset_variable_name",
+                "sources_from_variables",
                 "title",
                 "description",
                 "notes",
@@ -2124,6 +2193,7 @@ class Agent:
             *,
             context: AgentContext,
             dataset_variable_name: str,
+            sources_from_variables: list[str],
             title: str,
             description: str,
             notes: list[str],
@@ -2139,6 +2209,13 @@ class Agent:
             raise ValueError("title must be a non-empty string.")
         notes = TypeAdapter(list[str]).validate_python(notes)
         clean_refs = [(r or "").strip() for r in (notebook_refs or []) if (r or "").strip()]
+        clean_source_vars = [
+            self._require_plain_variable_name(
+                value=name,
+                parameter_name="sources_from_variables",
+            )
+            for name in TypeAdapter(list[str]).validate_python(sources_from_variables)
+        ]
         await self._validate_return_dataset_refs(
             context=context,
             dataset_variable_name=dataset_variable_name,
@@ -2184,17 +2261,18 @@ class Agent:
         )
         context.set_returned_dataset(returned_state)
 
-        curated_provenance = Provenance(
-            title=title,
-            description=description or None,
-            tags=final_tags,
+        sources = await _resolve_sources_from_variables(
+            self.code_executor, clean_source_vars
         )
         dataset = Dataset(
             artifact_id=returned_state.artifact_id,
             version=returned_state.version,
-            provenance=curated_provenance,
+            title=title,
+            description=description,
+            tags=final_tags,
             notes=notes,
             notebook_refs=clean_refs,
+            sources=sources,
         )
         return dataset.with_payload(out_obj)
 
@@ -2203,6 +2281,9 @@ class Agent:
         description=(
             "Return one optional chart primitive built from a clean dataframe in the kernel. "
             "The source dataframe does not need to have been returned with return_dataset. "
+            "``sources_from_variables`` is the list of variable names that hold the "
+            "connector ``Result`` return values that fed the chart's source data; "
+            "pass an empty list only when no upstream connector fetches contributed. "
             "The framework picks the persistence location and embeds curation "
             "metadata in the on-disk Vega-Lite file."
         ),
@@ -2228,6 +2309,19 @@ class Agent:
                     "type": "string",
                     "description": "Notebook path for the visualization stage (e.g. 'notebooks/viz.py').",
                 },
+                "sources_from_variables": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                    },
+                    "description": (
+                        "Variable names that hold the connector Result return values "
+                        "fed into the chart's source data (the variables on the LHS of "
+                        "``await connectors[...](...)`` calls). Pass [] only for charts "
+                        "with no upstream connector fetches."
+                    ),
+                },
                 "description": {
                     "type": "string",
                     "description": "One concise sentence describing what the chart helps the user see.",
@@ -2243,6 +2337,7 @@ class Agent:
                 "source_dataset_variable_name",
                 "chart_variable_name",
                 "chart_notebook_ref",
+                "sources_from_variables",
                 "description",
                 "notes",
             ],
@@ -2259,6 +2354,7 @@ class Agent:
         source_dataset_variable_name: str,
         chart_variable_name: str,
         chart_notebook_ref: str,
+        sources_from_variables: list[str],
         description: str,
         notes: list[str],
     ) -> Chart:
@@ -2347,16 +2443,25 @@ class Agent:
         )
         context.set_returned_chart(returned_chart)
 
+        clean_chart_source_vars = [
+            self._require_plain_variable_name(
+                value=name,
+                parameter_name="sources_from_variables",
+            )
+            for name in TypeAdapter(list[str]).validate_python(sources_from_variables)
+        ]
+        chart_sources = await _resolve_sources_from_variables(
+            self.code_executor, clean_chart_source_vars
+        )
         chart = Chart(
             artifact_id=returned_chart.artifact_id,
             version=returned_chart.version,
-            provenance=Provenance(
-                title=title,
-                description=description or None,
-            ),
+            title=title,
+            description=description,
             source_dataset_path=source_dataset_path_value,
             chart_notebook_ref=chart_ref,
             notes=notes,
+            sources=chart_sources,
         )
         # Hand the live FigureObject to the streaming dispatcher; it writes
         # the Vega-Lite snapshot and computes the card preview.

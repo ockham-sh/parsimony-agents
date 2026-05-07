@@ -56,9 +56,9 @@ _SAFE_BUILTINS: dict[str, object] = {
         "float", "frozenset", "int", "list", "object", "range", "set",
         "slice", "str", "tuple", "type",
         # introspection
-        "callable", "chr", "dir", "getattr", "hasattr", "hash", "hex",
-        "id", "isinstance", "issubclass", "iter", "len", "next", "oct",
-        "ord", "repr", "round", "setattr", "sorted", "vars",
+        "callable", "chr", "dir", "getattr", "globals", "hasattr", "hash",
+        "hex", "id", "isinstance", "issubclass", "iter", "len", "next",
+        "oct", "ord", "repr", "round", "setattr", "sorted", "vars",
         # itertools / functional
         "abs", "all", "any", "divmod", "filter", "map", "max", "min",
         "pow", "reversed", "sum", "zip",

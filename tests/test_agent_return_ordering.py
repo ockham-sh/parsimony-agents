@@ -77,6 +77,7 @@ class _DualToolLitellmMessage:
         a, b = "notebooks/derive_dataset.py", "notebooks/validate_dataset.py"
         self._ds = {
             "dataset_variable_name": "result_df",
+            "sources_from_variables": [],
             "title": "Result dataset",
             "description": "Result dataset.",
             "notes": ["Validated dataset."],
@@ -87,6 +88,7 @@ class _DualToolLitellmMessage:
             "source_dataset_variable_name": "result_df",
             "chart_variable_name": "result_chart",
             "chart_notebook_ref": "notebooks/viz_dataset.py",
+            "sources_from_variables": [],
             "description": "Line chart preview.",
             "notes": ["No smoothing applied."],
         }

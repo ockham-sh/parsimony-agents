@@ -52,9 +52,9 @@ def test_fetch_log_entry_roundtrip() -> None:
         ],
         "provenance": {
             "source": "fred",
+            "source_description": "St. Louis Fed FRED",
             "params": {"series_id": "GDPC1"},
-            "description": "US macro series",
-            "tags": ["macro", "monthly"],
+            "properties": {"series_url": "https://example.com/GDPC1"},
         },
         "head": {"schema": {}, "data": []},
         "tail": None,
@@ -65,8 +65,8 @@ def test_fetch_log_entry_roundtrip() -> None:
     dumped = e.model_dump(mode="json")
     e2 = FetchLogEntry.model_validate(dumped)
     assert e2.source == e.source
-    assert e2.provenance.description == "US macro series"
-    assert e2.provenance.tags == ["macro", "monthly"]
+    assert e2.provenance.source_description == "St. Louis Fed FRED"
+    assert e2.provenance.properties == {"series_url": "https://example.com/GDPC1"}
 
 
 @pytest.mark.asyncio
@@ -114,6 +114,5 @@ async def test_code_executor_await_cell_runs() -> None:
 
 def test_result_from_dataframe_roundtrip() -> None:
     df = pd.DataFrame({"a": [1]})
-    prov = Provenance(source="t", params={})
-    r = Result.from_dataframe(df, prov)
+    r = Result.from_dataframe(df)
     assert isinstance(r, Result)
