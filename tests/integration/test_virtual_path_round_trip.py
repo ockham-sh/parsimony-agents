@@ -87,7 +87,7 @@ def _seed_artifact(
         ("notebooks", "notebook", ".py", b'"""demo."""\nx = 1\n'),
         ("data", "dataset", ".parquet", b"PAR1-fake-bytes"),
         ("charts", "chart", ".vl.json", b'{"$schema": "v5", "mark": "line"}'),
-        ("reports", "report", ".report.md", b"# Title\n\nbody.\n"),
+        ("reports", "report", ".qmd", b"---\ntitle: T\nockham:\n  formats:\n  - html\n  - pdf\n---\n\n# Title\n\nbody.\n"),
     ],
 )
 def test_resolver_round_trip_each_kind(

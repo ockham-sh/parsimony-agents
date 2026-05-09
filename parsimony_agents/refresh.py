@@ -52,6 +52,7 @@ from parsimony_agents.identity import (
     notebook_content_sha,
 )
 from parsimony_agents.notebook_io import deserialize_notebook, read_latest_notebook
+from parsimony_agents.report_io import read_report_bytes, write_report_bytes
 
 
 _REFRESHABLE_KINDS: frozenset[SnapshotKind] = frozenset({"dataset", "chart", "report"})
@@ -237,12 +238,12 @@ async def _refresh_chart(ref: ArtifactRef, *, executor: _Executor) -> ArtifactRe
 
 async def _refresh_report(ref: ArtifactRef, *, executor: _Executor) -> ArtifactRef:
     blob = await _read_snapshot(executor, ref)
-    markdown = blob.decode("utf-8")
-    embedded = embedded_refs_from_markdown(markdown)
+    prior_yaml, body = read_report_bytes(blob)
+    embedded = embedded_refs_from_markdown(body)
     curation = await _load_report_curation(executor, ref)
 
     new_embedded: list[ArtifactRef] = []
-    new_markdown = markdown
+    new_body = body
     for emb in embedded:
         if emb.kind not in _REFRESHABLE_KINDS:
             # data_objects can't be refreshed standalone; notebooks
@@ -252,21 +253,36 @@ async def _refresh_report(ref: ArtifactRef, *, executor: _Executor) -> ArtifactR
         refreshed = await _refresh(emb, executor=executor)
         new_embedded.append(refreshed)
         if refreshed.content_sha != emb.content_sha:
-            new_markdown = new_markdown.replace(
+            new_body = new_body.replace(
                 emb.workspace_file_path, refreshed.workspace_file_path
             )
 
-    new_report = Report(
-        logical_id=ref.logical_id,
-        title=curation.get("title", "") or "",
-        description=curation.get("description", "") or "",
-        tags=list(curation.get("tags") or []),
-        notes=list(curation.get("notes") or []),
-        live_name=curation.get("live_name"),
-        markdown=new_markdown,
-        embedded_refs=new_embedded,
+    # Preserve formats from the prior snapshot's YAML — refresh is a
+    # data-axis update, not a format-selection surface. Falls back to the
+    # Report model's default if the prior YAML lacks the field.
+    prior_ockham = prior_yaml.get("ockham") if isinstance(prior_yaml, dict) else None
+    prior_formats_raw = prior_ockham.get("formats") if isinstance(prior_ockham, dict) else None
+    valid = ("html", "pdf", "pptx", "dashboard")
+    prior_formats = (
+        [f for f in prior_formats_raw if f in valid]
+        if isinstance(prior_formats_raw, list)
+        else None
     )
-    new_blob = new_markdown.encode("utf-8")
+
+    report_kwargs: dict[str, Any] = {
+        "logical_id": ref.logical_id,
+        "title": curation.get("title", "") or "",
+        "description": curation.get("description", "") or "",
+        "tags": list(curation.get("tags") or []),
+        "notes": list(curation.get("notes") or []),
+        "live_name": curation.get("live_name"),
+        "markdown": new_body,
+        "embedded_refs": new_embedded,
+    }
+    if prior_formats:
+        report_kwargs["formats"] = prior_formats
+    new_report = Report(**report_kwargs)
+    new_blob = write_report_bytes(new_report)
     return await _persist_layer(
         executor=executor,
         kind="report",

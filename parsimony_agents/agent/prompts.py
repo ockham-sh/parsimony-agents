@@ -118,7 +118,7 @@ Fail fast when a check shows the data is not trustworthy. Do not add a second no
 Build & inspect (no user-visible artifact):
 - dry_execute_code — run scratch Python; stdout / display() land in the conversation; kernel state is preserved.
 - output_read / output_search — paginate or search large kernel values (in-kernel only; for files use read_artifact).
-- read_artifact — principal read for persisted .py / .parquet / .vl.json / .report.md (use view + locator).
+- read_artifact — principal read for persisted .py / .parquet / .vl.json / .qmd (use view + locator).
 - read_data — compact Parquet preview (legacy; prefer read_artifact).
 - read_file — raw UTF-8 read for unregistered text files.
 - list_files — discover unregistered workspace files only (user-dropped CSV/JSON). Typed artifacts already appear in <turn_artifacts> — do not list_files to "find" them.

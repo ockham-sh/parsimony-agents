@@ -10,7 +10,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 import litellm
@@ -68,6 +68,7 @@ from parsimony_agents.agent.tracing import trace_tool_execution
 from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.identity import (
     ArtifactRef,
+    ExportFormat,
     chart_logical_id,
     dataset_logical_id,
     notebook_content_sha,
@@ -75,6 +76,7 @@ from parsimony_agents.identity import (
     report_logical_id,
 )
 from parsimony_agents.refresh import embedded_refs_from_markdown, refresh_artifact
+from parsimony_agents.report_io import read_report_bytes
 from parsimony_agents.agent.xml_render import escape_attr, escape_text
 from parsimony_agents.execution import (
     DataFrameObject,
@@ -1801,7 +1803,7 @@ class Agent:
     @toolmethod(
         name="read_artifact",
         description=(
-            "Principal read for typed workspace files (.py / .parquet / .vl.json / .report.md / images). "
+            "Principal read for typed workspace files (.py / .parquet / .vl.json / .qmd / images). "
             "view=summary (default) | outline | page | full. page requires locator (e.g. {kind: rows, "
             "offset, limit} for Parquet, {kind: section, section_index} for .py). full renders charts as images."
         ),
@@ -2397,10 +2399,15 @@ class Agent:
     @toolmethod(
         name="return_report",
         description=(
-            "Publish a markdown report. markdown is the full body — leading '# Title', prose, and "
+            "Publish a Quarto report. markdown is the body only — leading '# Title', prose, and "
             "embedded refs as ![](file://./.ockham/<kind>s/<logical_id>/<content_sha>.<ext>). "
+            "The framework wraps it with a minimal YAML preamble (title + ockham.formats); the "
+            "server builds the full Quarto config at render time. "
             "Each embedded path is the workspace_file_path of an existing snapshot (see prompt rule 5). "
-            "Pass every embedded artifact's triplet in embedded_refs for lineage."
+            "Pass every embedded artifact's triplet in embedded_refs for lineage. "
+            "formats picks the export targets (default ['html','pdf']); include 'pptx' for "
+            "download-as-deck and 'dashboard' to enable Quarto dashboard fenced divs "
+            "(:::{.card}, :::{.value-box}, ::: {.row})."
         ),
         parameters_schema={
             "type": "object",
@@ -2427,6 +2434,15 @@ class Agent:
                     "type": "string",
                     "description": "File-tree name (no extension); '' hides from live tree.",
                 },
+                "formats": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["html", "pdf", "pptx", "dashboard"]},
+                    "description": (
+                        "Quarto output formats to enable. Default ['html','pdf']. "
+                        "Add 'pptx' for a downloadable deck; add 'dashboard' to render the "
+                        "body as a Quarto dashboard (cards, value-boxes, rows)."
+                    ),
+                },
             },
             "required": ["title", "markdown", "embedded_refs", "description", "notes"],
             "additionalProperties": False,
@@ -2445,6 +2461,7 @@ class Agent:
         notes: list[str],
         tags: list[str] | None = None,
         live_name: str | None = None,
+        formats: list[Literal["html", "pdf", "pptx", "dashboard"]] | None = None,
     ) -> Report:
         title = title.strip()
         if not title:
@@ -2464,6 +2481,7 @@ class Agent:
             ln = None if live_name == "" else None
         else:
             ln = live_name
+        report_formats: list[ExportFormat] = list(formats) if formats else ["html", "pdf"]
         return Report(
             logical_id=report_logical_id(embedded_refs=emb, title=title),
             title=title,
@@ -2473,6 +2491,7 @@ class Agent:
             markdown=markdown,
             embedded_refs=emb,
             live_name=ln,
+            formats=report_formats,
         )
 
     @toolmethod(
@@ -2538,17 +2557,17 @@ class Agent:
                 f"edit_report: report {target.logical_id!r} log.jsonl has no usable entries."
             )
 
-        snapshot_path = f".ockham/reports/{target.logical_id}/{last_csha}.report.md"
+        snapshot_path = f".ockham/reports/{target.logical_id}/{last_csha}.qmd"
         raw = await self.code_executor.read_workspace_file(snapshot_path)
-        markdown = raw.decode("utf-8")
-        n = markdown.count(old_str)
+        prior_yaml, prior_body = read_report_bytes(raw)
+        n = prior_body.count(old_str)
         if n == 0:
             raise ValueError("edit_report: old_str not found in report markdown.")
         if n > 1:
             raise ValueError(
                 "edit_report: old_str occurs multiple times; provide a more specific target."
             )
-        new_markdown = markdown.replace(old_str, new_str, 1)
+        new_markdown = prior_body.replace(old_str, new_str, 1)
 
         # Re-extract embedded refs so any newly-introduced
         # ``.ockham/...`` paths participate in this snapshot's lineage.
@@ -2566,6 +2585,14 @@ class Agent:
         except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
             curation = {}
 
+        # Carry formats forward from the prior snapshot's YAML — edit_report
+        # is a body-only edit, not a format-selection surface. Default to the
+        # Report model's default if the prior YAML is missing/malformed.
+        prior_formats_raw = (prior_yaml.get("ockham") or {}).get("formats") if isinstance(prior_yaml.get("ockham"), dict) else None
+        prior_formats: list[ExportFormat] | None = None
+        if isinstance(prior_formats_raw, list):
+            prior_formats = [f for f in prior_formats_raw if f in ("html", "pdf", "pptx", "dashboard")]
+
         return Report(
             logical_id=target.logical_id,  # preserve identity — this is a revision
             title=str(curation.get("title", "") or ""),
@@ -2575,6 +2602,7 @@ class Agent:
             markdown=new_markdown,
             embedded_refs=new_embedded,
             live_name=curation.get("live_name") if isinstance(curation.get("live_name"), str) else None,
+            **({"formats": prior_formats} if prior_formats else {}),
         )
 
     @toolmethod(

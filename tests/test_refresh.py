@@ -25,6 +25,7 @@ import pytest
 from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.chart_io import write_chart_bytes
 from parsimony_agents.dataset_io import write_dataset_bytes
+from parsimony_agents.report_io import write_report_bytes
 from parsimony_agents.execution.outputs import (
     DataFrameObject,
     FetchLogEntry,
@@ -226,8 +227,12 @@ def _persist_report(
     markdown: str,
 ) -> tuple[ArtifactRef, Report]:
     lid = report_logical_id(embedded_refs=embedded_refs, title=title)
-    blob = markdown.encode("utf-8")
+    report = Report(
+        logical_id=lid, title=title, markdown=markdown, embedded_refs=embedded_refs,
+    )
+    blob = write_report_bytes(report)
     csha = content_sha(blob)
+    report.content_sha = csha
     ref = ArtifactRef(kind="report", logical_id=lid, content_sha=csha)
     p = Path(executor.cwd) / ref.workspace_file_path
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -236,10 +241,6 @@ def _persist_report(
         "embedded": [r.content_sha for r in embedded_refs],
     })
     _write_curation(executor, "report", lid, title=title)
-    report = Report(
-        logical_id=lid, title=title, markdown=markdown, embedded_refs=embedded_refs,
-        content_sha=csha,
-    )
     return ref, report
 
 

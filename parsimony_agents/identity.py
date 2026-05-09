@@ -37,6 +37,8 @@ from __future__ import annotations
 
 __all__ = [
     "ArtifactRef",
+    "EXPORT_FORMATS",
+    "ExportFormat",
     "SNAPSHOT_KINDS",
     "SnapshotKind",
     "chart_logical_id",
@@ -60,12 +62,19 @@ SnapshotKind = Literal["notebook", "data_object", "dataset", "chart", "report"]
 
 SNAPSHOT_KINDS: Final[tuple[SnapshotKind, ...]] = get_args(SnapshotKind)
 
+# Quarto output formats a report can be rendered to. Persisted in the
+# report snapshot's YAML preamble (`ockham.formats`) and read by the
+# server's renderer to build the per-format Quarto YAML at render time.
+ExportFormat = Literal["html", "pdf", "pptx", "dashboard"]
+
+EXPORT_FORMATS: Final[tuple[ExportFormat, ...]] = get_args(ExportFormat)
+
 _EXT_BY_KIND: Final[dict[SnapshotKind, str]] = {
     "notebook": ".py",
     "data_object": ".parquet",
     "dataset": ".parquet",
     "chart": ".vl.json",
-    "report": ".report.md",
+    "report": ".qmd",
 }
 
 

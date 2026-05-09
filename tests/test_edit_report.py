@@ -19,6 +19,7 @@ from parsimony_agents.agent.models import AgentContext
 from parsimony_agents.artifacts import Report
 from parsimony_agents.execution.outputs import KernelOutput
 from parsimony_agents.identity import ArtifactRef, content_sha
+from parsimony_agents.report_io import read_report_bytes, write_report_bytes
 
 
 class _ReportExecutor:
@@ -82,11 +83,23 @@ def _seed_report(
     description: str = "",
     tags: list[str] | None = None,
     notes: list[str] | None = None,
+    formats: list[str] | None = None,
 ) -> ArtifactRef:
     """Write a published report's snapshot + log + curation into the stub FS."""
-    blob = markdown.encode("utf-8")
+    seed = Report(
+        logical_id=logical_id,
+        title=title,
+        description=description,
+        tags=list(tags or []),
+        notes=list(notes or []),
+        markdown=markdown,
+        embedded_refs=[],
+        live_name="my-report",
+        **({"formats": formats} if formats else {}),
+    )
+    blob = write_report_bytes(seed)
     csha = content_sha(blob)
-    snap_path = f".ockham/reports/{logical_id}/{csha}.report.md"
+    snap_path = f".ockham/reports/{logical_id}/{csha}.qmd"
     log_path = f".ockham/reports/{logical_id}/log.jsonl"
     cur_path = f".ockham/reports/{logical_id}/curation.json"
     executor.files[snap_path] = blob
@@ -230,15 +243,17 @@ async def test_edit_report_resolves_to_latest_snapshot() -> None:
     """When ``ref.content_sha`` is stale, the edit applies to the latest revision."""
     ex = _ReportExecutor()
     # Initial revision.
-    md1 = "# Hi\n\noriginal text\n"
-    csha1 = content_sha(md1.encode("utf-8"))
-    snap_path1 = f".ockham/reports/rep4/{csha1}.report.md"
-    ex.files[snap_path1] = md1.encode("utf-8")
+    blob1 = write_report_bytes(
+        Report(logical_id="rep4", title="T", markdown="# Hi\n\noriginal text\n", embedded_refs=[])
+    )
+    csha1 = content_sha(blob1)
+    ex.files[f".ockham/reports/rep4/{csha1}.qmd"] = blob1
     # Newer revision (refresh, etc.). Both entries in log.jsonl; latest wins.
-    md2 = "# Hi\n\nupdated text\n"
-    csha2 = content_sha(md2.encode("utf-8"))
-    snap_path2 = f".ockham/reports/rep4/{csha2}.report.md"
-    ex.files[snap_path2] = md2.encode("utf-8")
+    blob2 = write_report_bytes(
+        Report(logical_id="rep4", title="T", markdown="# Hi\n\nupdated text\n", embedded_refs=[])
+    )
+    csha2 = content_sha(blob2)
+    ex.files[f".ockham/reports/rep4/{csha2}.qmd"] = blob2
     ex.files[".ockham/reports/rep4/log.jsonl"] = (
         json.dumps({"ts": "t1", "content_sha": csha1, "inputs": {}}) + "\n"
         + json.dumps({"ts": "t2", "content_sha": csha2, "inputs": {}}) + "\n"
@@ -262,3 +277,51 @@ async def test_edit_report_resolves_to_latest_snapshot() -> None:
     # Original csha1 said "original text"; the stale ref didn't pin the
     # base — edit_report worked against csha2 (latest).
     assert "original text" not in tr.data.markdown
+
+
+@pytest.mark.asyncio
+async def test_edit_report_preserves_formats_from_prior_yaml() -> None:
+    """edit_report carries the prior snapshot's formats forward — body-only edit."""
+    ex = _ReportExecutor()
+    ref = _seed_report(
+        ex,
+        logical_id="rep_fmts",
+        markdown="# Hi\n\noriginal text\n",
+        formats=["html", "pptx", "dashboard"],
+    )
+    agent = _make_agent(ex)
+    ctx = AgentContext(session_id="s")
+
+    tr = await agent.edit_report(
+        context=ctx,
+        ref={"kind": "report", "logical_id": ref.logical_id, "content_sha": ref.content_sha},
+        old_str="original text",
+        new_str="updated text",
+    )
+    assert tr.success
+    assert tr.data.formats == ["html", "pptx", "dashboard"]
+
+
+@pytest.mark.asyncio
+async def test_edit_report_writes_qmd_compatible_body() -> None:
+    """The Report returned by edit_report carries body-only markdown (no YAML preamble)."""
+    ex = _ReportExecutor()
+    ref = _seed_report(ex, logical_id="rep_body", markdown="# Hi\n\nfind me\n")
+    agent = _make_agent(ex)
+    ctx = AgentContext(session_id="s")
+
+    tr = await agent.edit_report(
+        context=ctx,
+        ref={"kind": "report", "logical_id": ref.logical_id, "content_sha": ref.content_sha},
+        old_str="find me",
+        new_str="found",
+    )
+    assert tr.success
+    # Body must NOT include the YAML preamble.
+    assert "ockham:" not in tr.data.markdown
+    assert tr.data.markdown.startswith("# Hi")
+    # Re-emitting via write_report_bytes should round-trip.
+    blob = write_report_bytes(tr.data)
+    yaml_dict, body = read_report_bytes(blob)
+    assert "found" in body
+    assert yaml_dict["title"] == "My Report"  # carried from curation

@@ -53,7 +53,7 @@ from pydantic import ConfigDict, Field, PrivateAttr
 from parsimony_agents._naming import slug_from_title
 from parsimony_agents.agent.xml_render import escape_attr, escape_text
 from parsimony_agents.execution.outputs import DataFrameObject, FigureObject
-from parsimony_agents.identity import ArtifactRef
+from parsimony_agents.identity import ArtifactRef, ExportFormat
 from parsimony_agents.messages import MessageContent
 
 
@@ -295,15 +295,17 @@ class Chart(_ArtifactBase):
 
 
 class Report(_ArtifactBase):
-    """Curation + lineage for a published markdown report.
+    """Curation + lineage for a published Quarto report.
 
-    Reports are user-readable deliverables: their content is a markdown
-    string, not an in-kernel object. They live at
-    ``.ockham/reports/<logical_id>/<content_sha>.report.md`` with
-    sibling curation/log files. ``embedded_refs`` are frozen by default
-    (§2.7) — a re-author against newer data produces a new report
-    snapshot whose embedded refs may be newer; old snapshots stay
-    byte-stable and reproducible.
+    Reports are user-readable deliverables. The agent authors a markdown
+    body; the framework persists it as a single ``.qmd`` file with a
+    minimal YAML preamble (``title`` + ``ockham.formats``) — the server
+    builds the full Quarto YAML at render time. Snapshots live at
+    ``.ockham/reports/<logical_id>/<content_sha>.qmd`` with sibling
+    curation/log files. ``embedded_refs`` are frozen by default (§2.7) —
+    a re-author against newer data produces a new report snapshot whose
+    embedded refs may be newer; old snapshots stay byte-stable and
+    reproducible.
     """
 
     type: Literal["report"] = "report"
@@ -312,6 +314,14 @@ class Report(_ArtifactBase):
     embedded_refs: list[ArtifactRef] = Field(
         default_factory=list,
         description="Frozen refs to artifacts embedded in the markdown source.",
+    )
+    formats: list[ExportFormat] = Field(
+        default_factory=lambda: ["html", "pdf"],
+        description=(
+            "Quarto output formats this report should render to. "
+            "Persisted in the .qmd YAML preamble; the server reads it to "
+            "build per-format render config."
+        ),
     )
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
@@ -343,16 +353,8 @@ class Report(_ArtifactBase):
             "notes": list(self.notes),
             "live_name": self.live_name,
             "embedded_refs": [r.to_dict() for r in self.embedded_refs],
+            "formats": list(self.formats),
         }
-
-    def save(self, path: str | Path) -> None:
-        if not self.markdown.strip():
-            raise ValueError("Report.save: markdown is empty")
-        target = Path(path)
-        if "".join(target.suffixes[-2:]) != ".report.md":
-            raise ValueError(f"Report.save: path must end in .report.md, got {path!r}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(self.markdown.encode("utf-8"))
 
 
 # ============================================================================
