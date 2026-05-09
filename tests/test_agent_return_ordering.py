@@ -74,21 +74,27 @@ class _FakeCodeExecutor:
 
 class _DualToolLitellmMessage:
     def __init__(self) -> None:
-        a, b = "notebooks/derive_dataset.py", "notebooks/validate_dataset.py"
+        # The fake executor's read_workspace_file resolves any path it
+        # doesn't know to placeholder bytes — by extension, any ref the
+        # validator checks resolves successfully. We pass content_shas
+        # that match the placeholder bytes for cleanliness.
+        nb_a = {"kind": "notebook", "logical_id": "nb-a", "content_sha": "nb-a"}
+        nb_b = {"kind": "notebook", "logical_id": "nb-b", "content_sha": "nb-b"}
+        nb_viz = {"kind": "notebook", "logical_id": "nb-viz", "content_sha": "nb-viz"}
         self._ds = {
             "dataset_variable_name": "result_df",
-            "sources_from_variables": [],
+            "notebook_refs": [nb_a, nb_b],
+            "source_refs": [],
             "title": "Result dataset",
             "description": "Result dataset.",
             "notes": ["Validated dataset."],
-            "notebook_refs": [a, b],
         }
         self._ch = {
             "title": "Result chart",
-            "source_dataset_variable_name": "result_df",
             "chart_variable_name": "result_chart",
-            "chart_notebook_ref": "notebooks/viz_dataset.py",
-            "sources_from_variables": [],
+            "notebook_ref": nb_viz,
+            "source_dataset_refs": [],
+            "source_refs": [],
             "description": "Line chart preview.",
             "notes": ["No smoothing applied."],
         }
@@ -119,14 +125,26 @@ class _DualToolLitellmMessage:
 
 
 class _FakeStream:
+    """Stateful stream: yields the dual tool-call delta on the first iteration,
+    then a content-only delta on subsequent iterations to signal natural
+    termination (the LLM has nothing more to call). Required because return_*
+    no longer terminates the run on its own (Task 13)."""
+
+    _state = {"used": False}
+
     def __aiter__(self):
-        delta = SimpleNamespace(
-            content=None,
-            reasoning_content=None,
-            tool_calls=[
-                SimpleNamespace(id="call-ds", function=SimpleNamespace(name="return_dataset")),
-            ],
-        )
+        if not _FakeStream._state["used"]:
+            _FakeStream._state["used"] = True
+            delta = SimpleNamespace(
+                content=None,
+                reasoning_content=None,
+                tool_calls=[
+                    SimpleNamespace(id="call-ds", function=SimpleNamespace(name="return_dataset")),
+                ],
+            )
+        else:
+            # No tool_calls on later iterations → natural termination at agent.py:892.
+            delta = SimpleNamespace(content="done", reasoning_content=None, tool_calls=None)
         chunk = SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
 
         async def _gen():
@@ -170,9 +188,21 @@ async def test_return_dataset_then_return_chart_same_response_succeeds(
         calls["n"] += 1
         return _FakeStream()
 
+    builder_state = {"used": False}
+
     def _fake_stream_chunk_builder(chunks, messages):  # noqa: ANN001
         del chunks, messages
-        return SimpleNamespace(choices=[SimpleNamespace(message=_DualToolLitellmMessage())])
+        if not builder_state["used"]:
+            builder_state["used"] = True
+            return SimpleNamespace(choices=[SimpleNamespace(message=_DualToolLitellmMessage())])
+        # Subsequent iterations: empty tool_calls → loop terminates naturally.
+        empty = SimpleNamespace()
+        empty.model_dump = lambda mode="json": {  # noqa: ARG005
+            "role": "assistant",
+            "content": "done",
+            "tool_calls": None,
+        }
+        return SimpleNamespace(choices=[SimpleNamespace(message=empty)])
 
     import parsimony_agents.agent.agent as agent_module
 
@@ -189,4 +219,7 @@ async def test_return_dataset_then_return_chart_same_response_succeeds(
     assert len(return_events) == 2, f"expected two successful return tool events, got {return_events!r}"
     names = [e.tool_name for e in return_events]
     assert names == ["return_dataset", "return_chart"]
-    assert calls["n"] == 1
+    # Two iterations: first emits the dual return; second emits text-only and
+    # naturally terminates. (Pre-Task-13 this was 1 iteration because the first
+    # successful return_* hard-stopped the loop.)
+    assert calls["n"] == 2

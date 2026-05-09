@@ -82,10 +82,10 @@ class Tool:
                 tool_prefix_str = ""
 
         # Optional _ui_message: plain-language line for the human reader in the terminal
-        # (utility output, return artifacts, ``code_set``). Omitted where the UI fixes the label
-        # (``run_notebook``, ``code_edit``) or where the tool declares its own ``_ui_message`` (e.g. dry_execute_code).
+        # (utility output, return artifacts, ``return_notebook``). Omitted where the UI fixes the label
+        # (``edit_notebook``) or where the tool declares its own ``_ui_message`` (e.g. dry_execute_code).
         if (
-            self.name not in ("run_notebook", "code_edit")
+            self.name != "edit_notebook"
             and "_ui_message" not in parameters_schema.get("properties", {})
             and self.tool_type in ("code", "return", "utility")
         ):
@@ -94,7 +94,7 @@ class Tool:
                 "description": (
                     "Optional. Short, non-technical, past-tense line explaining what this step did for the user. "
                     "Utility tools: e.g. 'Checked CPI growth rates'. "
-                    "code_set: shown after '>' in the file-ref line. "
+                    "return_notebook: shown after '>' in the file-ref line. "
                     "Return tools: can refine the one-line summary after '>' for datasets/charts."
                 ),
             }
