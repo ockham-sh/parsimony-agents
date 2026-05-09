@@ -68,6 +68,7 @@ from parsimony_agents.agent.tracing import trace_tool_execution
 from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.identity import (
     ArtifactRef,
+    EXPORT_FORMATS,
     ExportFormat,
     chart_logical_id,
     dataset_logical_id,
@@ -2401,13 +2402,28 @@ class Agent:
         description=(
             "Publish a Quarto report. markdown is the body only — leading '# Title', prose, and "
             "embedded refs as ![](file://./.ockham/<kind>s/<logical_id>/<content_sha>.<ext>). "
-            "The framework wraps it with a minimal YAML preamble (title + ockham.formats); the "
-            "server builds the full Quarto config at render time. "
+            "The framework wraps it with a YAML preamble (title, subtitle=description, "
+            "abstract=notes, keywords=tags, ockham.formats); the server builds the full Quarto "
+            "config at render time and renders a real cover page. "
             "Each embedded path is the workspace_file_path of an existing snapshot (see prompt rule 5). "
             "Pass every embedded artifact's triplet in embedded_refs for lineage. "
-            "formats picks the export targets (default ['html','pdf']); include 'pptx' for "
-            "download-as-deck and 'dashboard' to enable Quarto dashboard fenced divs "
-            "(:::{.card}, :::{.value-box}, ::: {.row})."
+            "\n\n"
+            "formats picks the export targets (default ['html','pdf']):\n"
+            "  - 'html'      — scrolling article with TOC, lightbox, numbered sections.\n"
+            "  - 'pdf'       — typst-rendered, branded cover page, real typography.\n"
+            "  - 'pptx'      — editable PowerPoint deck (corporate distribution). Use '## ' for "
+            "slide titles; ':::: {.columns} ::: {.column width=\"50%\"}' for two-up.\n"
+            "  - 'revealjs'  — animated HTML slide deck (presenter-ready). Same slide grammar "
+            "as pptx; supports '::: {.notes}' speaker notes and '{.fragment}' attributes.\n"
+            "  - 'dashboard' — bslib grid; enables :::{.card}, :::{.value-box icon='bar-chart' "
+            "color='primary'}, :::{.row}, :::{.panel-tabset}.\n\n"
+            "Body authoring extras you can use:\n"
+            "  - Mermaid / Graphviz: ```mermaid``` and ```{dot}``` blocks render natively.\n"
+            "  - Callouts: ::: {.callout-note|tip|warning|caution|important}.\n"
+            "  - Layout: ::: {.column-screen} for full-bleed, ::: {.column-page} for slightly "
+            "wider, ::: {.column-margin} for Tufte-style margin notes, ::: {.aside} for asides.\n"
+            "  - Cross-refs: ![Caption](file://...){#fig-name} then write '@fig-name' to auto-link "
+            "to 'Figure N'."
         ),
         parameters_schema={
             "type": "object",
@@ -2436,11 +2452,15 @@ class Agent:
                 },
                 "formats": {
                     "type": "array",
-                    "items": {"type": "string", "enum": ["html", "pdf", "pptx", "dashboard"]},
+                    "items": {
+                        "type": "string",
+                        "enum": ["html", "pdf", "pptx", "revealjs", "dashboard"],
+                    },
                     "description": (
                         "Quarto output formats to enable. Default ['html','pdf']. "
-                        "Add 'pptx' for a downloadable deck; add 'dashboard' to render the "
-                        "body as a Quarto dashboard (cards, value-boxes, rows)."
+                        "Add 'pptx' for a downloadable PowerPoint deck; 'revealjs' for an "
+                        "animated HTML slide deck; 'dashboard' to render the body as a "
+                        "Quarto dashboard (cards, value-boxes, rows)."
                     ),
                 },
             },
@@ -2591,7 +2611,7 @@ class Agent:
         prior_formats_raw = (prior_yaml.get("ockham") or {}).get("formats") if isinstance(prior_yaml.get("ockham"), dict) else None
         prior_formats: list[ExportFormat] | None = None
         if isinstance(prior_formats_raw, list):
-            prior_formats = [f for f in prior_formats_raw if f in ("html", "pdf", "pptx", "dashboard")]
+            prior_formats = [f for f in prior_formats_raw if f in EXPORT_FORMATS]
 
         return Report(
             logical_id=target.logical_id,  # preserve identity — this is a revision

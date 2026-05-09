@@ -46,6 +46,7 @@ from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.chart_io import deserialize_chart, write_chart_bytes
 from parsimony_agents.dataset_io import deserialize_dataset, write_dataset_bytes
 from parsimony_agents.identity import (
+    EXPORT_FORMATS,
     ArtifactRef,
     SnapshotKind,
     content_sha,
@@ -262,9 +263,8 @@ async def _refresh_report(ref: ArtifactRef, *, executor: _Executor) -> ArtifactR
     # Report model's default if the prior YAML lacks the field.
     prior_ockham = prior_yaml.get("ockham") if isinstance(prior_yaml, dict) else None
     prior_formats_raw = prior_ockham.get("formats") if isinstance(prior_ockham, dict) else None
-    valid = ("html", "pdf", "pptx", "dashboard")
     prior_formats = (
-        [f for f in prior_formats_raw if f in valid]
+        [f for f in prior_formats_raw if f in EXPORT_FORMATS]
         if isinstance(prior_formats_raw, list)
         else None
     )

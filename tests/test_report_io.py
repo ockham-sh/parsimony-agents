@@ -38,9 +38,42 @@ def test_write_emits_yaml_preamble_and_body() -> None:
     yaml_chunk, _, body = out.partition("\n---\n")
     yaml_chunk = yaml_chunk[len("---\n") :]
     parsed = yaml.safe_load(yaml_chunk)
+    # No description / notes / tags on this Report → those keys are absent
+    # so the YAML preamble stays minimal for prose-only reports.
     assert parsed == {"title": "Hello", "ockham": {"formats": ["html", "pdf"]}}
     # Body separated from the closing fence by the canonical blank line.
     assert body.startswith("\n# H\n\nbody.")
+
+
+def test_write_includes_title_page_slots_when_present() -> None:
+    """When the Report has description / notes / tags, the YAML preamble
+    surfaces them as Quarto's standard title-page slots (subtitle / abstract
+    / keywords) so every format renders a real cover page."""
+    r = _make(
+        title="Q3 review",
+        description="Revenue trajectory and cost baseline",
+        notes=["Margins compressed by COGS volatility.", "Rev mix shift remains favorable."],
+        tags=["finance", "quarterly"],
+        formats=["pdf", "revealjs"],
+    )
+    yaml_dict, _ = read_report_bytes(write_report_bytes(r))
+    assert yaml_dict["title"] == "Q3 review"
+    assert yaml_dict["subtitle"] == "Revenue trajectory and cost baseline"
+    assert yaml_dict["abstract"] == (
+        "Margins compressed by COGS volatility.\n\nRev mix shift remains favorable."
+    )
+    assert yaml_dict["keywords"] == ["finance", "quarterly"]
+    assert yaml_dict["ockham"]["formats"] == ["pdf", "revealjs"]
+
+
+def test_write_omits_empty_title_page_slots() -> None:
+    """Empty description / notes / tags → no subtitle / abstract / keywords
+    keys (don't pollute the YAML with empty strings)."""
+    r = _make(title="x", description="", notes=[], tags=[])
+    yaml_dict, _ = read_report_bytes(write_report_bytes(r))
+    assert "subtitle" not in yaml_dict
+    assert "abstract" not in yaml_dict
+    assert "keywords" not in yaml_dict
 
 
 def test_write_default_formats_html_pdf() -> None:
@@ -97,9 +130,16 @@ def test_write_preserves_unicode_in_title_and_body() -> None:
 
 def test_default_formats_constant_matches_export_formats_subset() -> None:
     """DEFAULT_FORMATS items must each be a valid ExportFormat literal."""
-    valid = {"html", "pdf", "pptx", "dashboard"}
+    valid = {"html", "pdf", "pptx", "revealjs", "dashboard"}
     for fmt in DEFAULT_FORMATS:
         assert fmt in valid
+
+
+def test_revealjs_format_round_trips() -> None:
+    """The new revealjs format persists through write → read."""
+    r = _make(formats=["html", "revealjs"])
+    yaml_dict, _ = read_report_bytes(write_report_bytes(r))
+    assert "revealjs" in yaml_dict["ockham"]["formats"]
 
 
 def test_write_idempotent_no_date_field() -> None:

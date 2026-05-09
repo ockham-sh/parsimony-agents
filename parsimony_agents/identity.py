@@ -65,7 +65,13 @@ SNAPSHOT_KINDS: Final[tuple[SnapshotKind, ...]] = get_args(SnapshotKind)
 # Quarto output formats a report can be rendered to. Persisted in the
 # report snapshot's YAML preamble (`ockham.formats`) and read by the
 # server's renderer to build the per-format Quarto YAML at render time.
-ExportFormat = Literal["html", "pdf", "pptx", "dashboard"]
+#
+# - html: scrolling article with TOC + lightbox + numbering.
+# - pdf: typst-rendered, branded cover page, real typography.
+# - pptx: editable PowerPoint deck (corporate distribution).
+# - revealjs: HTML slide deck (modern, animated, presenter-ready).
+# - dashboard: bslib grid (cards / value-boxes / tabsets) for at-a-glance.
+ExportFormat = Literal["html", "pdf", "pptx", "revealjs", "dashboard"]
 
 EXPORT_FORMATS: Final[tuple[ExportFormat, ...]] = get_args(ExportFormat)
 

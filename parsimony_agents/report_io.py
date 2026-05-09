@@ -51,17 +51,33 @@ _BODY_DELIM: Final[str] = "\n---\n"
 def write_report_bytes(report: Report) -> bytes:
     """Serialize ``report`` to single-file ``.qmd`` bytes.
 
-    YAML carries ``title`` (defaulted to ``"(untitled)"`` when blank) and
-    ``ockham.formats`` (defaulted to :data:`DEFAULT_FORMATS` when empty).
-    No ``date:`` field — that would make the same body produce a
-    different ``content_sha`` across day boundaries; the server adds the
-    current date in ``_FORMAT_BLOCKS`` at render time.
+    YAML carries the title-page slots Quarto can populate uniformly
+    across html/pdf/pptx/revealjs/dashboard:
+
+    - ``title`` — one-line headline (defaulted to ``"(untitled)"``).
+    - ``subtitle`` — from ``report.description`` when present.
+    - ``abstract`` — newline-joined ``report.notes`` when present.
+    - ``keywords`` — ``report.tags`` (skipped when empty).
+    - ``ockham.formats`` — the export targets (defaulted to
+      :data:`DEFAULT_FORMATS`).
+
+    Notably absent: ``date:`` and ``author:``. ``date:`` is intentionally
+    render-time so the same body produces a stable ``content_sha`` across
+    day boundaries (the server adds it in ``_build_render_yaml``).
+    ``author:`` is also injected at render time from workspace identity,
+    not the agent payload, since author depends on who's rendering.
     """
     formats = list(report.formats) if report.formats else list(DEFAULT_FORMATS)
     payload: dict[str, object] = {
         "title": report.title or "(untitled)",
-        "ockham": {"formats": formats},
     }
+    if report.description:
+        payload["subtitle"] = report.description
+    if report.notes:
+        payload["abstract"] = "\n\n".join(report.notes)
+    if report.tags:
+        payload["keywords"] = list(report.tags)
+    payload["ockham"] = {"formats": formats}
     yaml_text = yaml.safe_dump(
         payload,
         sort_keys=False,
