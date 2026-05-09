@@ -57,8 +57,6 @@ from parsimony_agents.agent.helpers import (
 from parsimony_agents.agent.models import (
     AgentContext,
     AgentMessage,
-    ReturnedChartState,
-    ReturnedDatasetState,
 )
 from parsimony_agents.agent.outputs import (
     ArtifactLlmResult,
@@ -67,11 +65,17 @@ from parsimony_agents.agent.outputs import (
     UtilityToolOutput,
 )
 from parsimony_agents.agent.tracing import trace_tool_execution
-from parsimony_agents.artifacts import (
-    Chart,
-    Dataset,
-    snapshot_path,
+from parsimony_agents.artifacts import Chart, Dataset, Report
+from parsimony_agents.identity import (
+    ArtifactRef,
+    chart_logical_id,
+    dataset_logical_id,
+    notebook_content_sha,
+    notebook_logical_id,
+    report_logical_id,
 )
+from parsimony_agents.refresh import embedded_refs_from_markdown, refresh_artifact
+from parsimony_agents.agent.xml_render import escape_attr, escape_text
 from parsimony_agents.execution import (
     DataFrameObject,
     ExceptionObject,
@@ -88,7 +92,12 @@ from parsimony_agents.messages import Message, Text, blocks_to_text
 # Tool message for cooperative cancellation; keeps one tool output per tool call id.
 CANCELLED_TOOL_TEXT = "Cancelled by user before the tool completed."
 from parsimony_agents.notebook import Script, ScriptPreview, stamp_fetch_log_to_script
-from parsimony_agents.notebook_io import deserialize_notebook, serialize_notebook
+from parsimony_agents.notebook_io import (
+    deserialize_notebook,
+    last_content_sha_from_log,
+    read_latest_notebook,
+    serialize_notebook,
+)
 from parsimony_agents.rag.keyword_store import get_or_create_session_keyword_store
 from parsimony_agents.rag.vector_store import get_or_create_session_vector_store
 from parsimony_agents.tools import ToolMethod, Tools, toolmethod
@@ -104,13 +113,31 @@ litellm.REPEATED_STREAMING_CHUNK_LIMIT = 100  # TODO: Monitor how many repeated 
 # kernel or workspace races (see ``_tool_batch_allows_concurrent``).
 _TOOL_NAMES_SAFE_CONCURRENT: frozenset[str] = frozenset(
     {
-        "get_context",
         "list_files",
         "read_artifact",
         "read_data",
         "read_file",
     }
 )
+
+
+# JSON schema for an :class:`ArtifactRef` parameter on agent tool calls.
+# Refs are the single currency for lineage; the agent copies these
+# objects verbatim from ``session_state.workspace_artifacts`` and
+# ``KernelOutput.fetch_log[*].data_object_ref`` (see §5.7).
+_ARTIFACT_REF_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "kind": {
+            "type": "string",
+            "enum": ["notebook", "data_object", "dataset", "chart", "report"],
+        },
+        "logical_id": {"type": "string", "minLength": 1},
+        "content_sha": {"type": "string", "minLength": 1},
+    },
+    "required": ["kind", "logical_id", "content_sha"],
+    "additionalProperties": False,
+}
 
 
 def _tool_batch_allows_concurrent(
@@ -131,52 +158,30 @@ def _serialize_and_hash_object(obj: Any) -> int:
     return hash(json.dumps(obj, sort_keys=True))
 
 
-async def _resolve_sources_from_variables(
-    code_executor: Any, var_names: list[str]
-) -> list[Provenance]:
-    """Read each named kernel variable's ``.provenance`` and return the list."""
-    if not var_names:
+def _parse_artifact_refs(raw: list[Any] | None, *, parameter_name: str) -> list[ArtifactRef]:
+    """Validate a list of dict-encoded ArtifactRefs from a tool call.
+
+    Tool inputs arrive as JSON-decoded dicts; this turns each into a
+    typed :class:`ArtifactRef`, raising a clear error for malformed
+    entries (missing fields, unknown kinds, notebook refs whose
+    logical_id != content_sha).
+    """
+    if raw is None:
         return []
-
-    names_literal = repr(list(var_names))
-    expr = (
-        "__import__('json').dumps(["
-        "(lambda _v, _n: {"
-        "'name': _n, "
-        "'provenance': (_v.provenance.model_dump(mode='json') "
-        "if hasattr(_v, 'provenance') and _v is not None else None)"
-        "})(globals().get(_n), _n) "
-        f"for _n in {names_literal}"
-        "])"
-    )
-    ko = await code_executor.eval(expr)
-    if not ko.outputs:
-        raise RuntimeError("eval returned no output while resolving sources_from_variables.")
-    payload_obj = ko.outputs[0]
-    if getattr(payload_obj, "type", None) == "exception":
-        raise RuntimeError(
-            f"eval failed while resolving sources_from_variables: {payload_obj.value!r}"
-        )
-    raw_value = getattr(payload_obj, "value", None)
-    if not isinstance(raw_value, str):
-        raise RuntimeError(
-            f"eval returned unexpected output type for sources_from_variables: {type(payload_obj).__name__}"
-        )
-    entries = json.loads(raw_value)
-
-    provenances: list[Provenance] = []
-    for entry in entries:
-        name = entry["name"]
-        prov_dict = entry.get("provenance")
-        if prov_dict is None:
+    if not isinstance(raw, list):
+        raise ValueError(f"{parameter_name} must be a list of refs, got {type(raw).__name__}.")
+    out: list[ArtifactRef] = []
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
             raise ValueError(
-                f"sources_from_variables: '{name}' is not in the kernel or "
-                "does not hold a connector Result. Pass variable names that "
-                "received the return value of a connector fetch (e.g. "
-                "``raw = await connectors[\"fred_fetch\"](...)``)."
+                f"{parameter_name}[{i}] must be an object with kind/logical_id/content_sha, "
+                f"got {type(entry).__name__}."
             )
-        provenances.append(Provenance.model_validate(prov_dict))
-    return provenances
+        try:
+            out.append(ArtifactRef.from_dict(entry))
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"{parameter_name}[{i}]: {exc}") from exc
+    return out
 
 
 @dataclass
@@ -192,10 +197,10 @@ class AgentResult:
     """Concatenated assistant text (all ``TextDelta`` content)."""
 
     datasets: dict[str, Dataset] = field(default_factory=dict)
-    """Returned :class:`Dataset` objects keyed by ``artifact_id``."""
+    """Returned :class:`Dataset` objects keyed by ``logical_id``."""
 
     charts: dict[str, Chart] = field(default_factory=dict)
-    """Returned :class:`Chart` objects keyed by ``artifact_id``."""
+    """Returned :class:`Chart` objects keyed by ``logical_id``."""
 
     code: dict[str, Script] = field(default_factory=dict)
     """Returned :class:`Script` objects keyed by notebook path (execution order preserved)."""
@@ -223,10 +228,10 @@ class AgentResult:
             result = getattr(event, "result", None)
             if result is None:
                 return
-            if isinstance(result, Dataset) and result.artifact_id:
-                self.datasets[result.artifact_id] = result
-            elif isinstance(result, Chart) and result.artifact_id:
-                self.charts[result.artifact_id] = result
+            if isinstance(result, Dataset) and result.logical_id:
+                self.datasets[result.logical_id] = result
+            elif isinstance(result, Chart) and result.logical_id:
+                self.charts[result.logical_id] = result
 
 
 class Agent:
@@ -249,8 +254,8 @@ class Agent:
     ``output_factory`` for complete control over the agent configuration.
     """
 
-    RETURN_TOOLS = ("return_dataset", "return_chart")
-    CODE_TOOL_NAMES = {"code_set", "code_edit", "dry_execute_code", "execute"}
+    RETURN_TOOLS = ("return_dataset", "return_chart", "return_report")
+    CODE_TOOL_NAMES = {"return_notebook", "edit_notebook", "dry_execute_code"}
 
     def __init__(
         self,
@@ -317,12 +322,11 @@ class Agent:
         self._read_artifact_fn = read_artifact_fn
 
         _system_tool_methods: list[ToolMethod] = [
-            self.code_set,
-            self.code_edit,
+            self.return_notebook,
+            self.edit_notebook,
             self.dry_execute_code,
             self.write_file,
             self.edit_file,
-            self.execute_workspace_tool,
             self.read_file,
             self.read_data,
         ]
@@ -331,13 +335,14 @@ class Agent:
         _system_tool_methods.extend(
             [
                 self.list_files,
-                self.run_notebook,
                 self.restart_kernel,
                 self.return_dataset,
                 self.return_chart,
+                self.return_report,
+                self.edit_report,
+                self.refresh,
                 self.output_read,
                 self.output_search,
-                self.get_context,
             ]
         )
         self.system_tools = Tools(_system_tool_methods)
@@ -346,7 +351,7 @@ class Agent:
 
         self.guardrails = guardrails
 
-        self._CODE_EDIT_TOOL_NAMES = {"code_set", "code_edit"}
+        self._CODE_EDIT_TOOL_NAMES = {"return_notebook", "edit_notebook"}
 
     def _record_agent_metrics(self, agent_span: Any, total_time: float, iteration_count: int) -> None:
         if agent_span and agent_span.is_recording():
@@ -642,13 +647,17 @@ class Agent:
         accumulated_reasoning = ""
         accumulated_duration = 0.0
 
+        # The context snapshot is rebuilt at the START of every iteration (see
+        # the loop body) so the rendered ``<turn_artifacts>`` block always
+        # reflects this turn's freshly-minted refs. We seed an initial snapshot
+        # here so the message list has one before iteration begins.
         context_snapshot = await ctx.to_snapshot(connectors=self._connectors)
 
         # filter previous context snapshots
         ctx.messages = [m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False]
 
         ctx.messages.append(Message(role="user", content=context_snapshot, metadata={"context_snapshot": True}))
-        
+
         while not turn_state.stopped:
 
             iteration += 1
@@ -683,6 +692,27 @@ class Agent:
                 break
 
             tools = self.system_tools.copy()
+
+            # Rebuild the context snapshot every iteration so the rendered
+            # <turn_artifacts> block reflects this turn's latest minted refs.
+            # Cheap: to_snapshot just lists files and renders the connector
+            # catalog. Replacing the previous snapshot keeps message history
+            # bounded; the LLM only ever sees the current state, never a
+            # mid-turn-stale view.
+            iter_snapshot = await ctx.to_snapshot(
+                connectors=self._connectors,
+                minted_refs=turn_state.minted_refs,
+            )
+            ctx.messages = [
+                m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False
+            ]
+            ctx.messages.append(
+                Message(
+                    role="user",
+                    content=iter_snapshot,
+                    metadata={"context_snapshot": True},
+                )
+            )
 
 
             # Most recent tool result uses "default" mode, older ones use "minimal" #TODO: REVISE THIS LOGIC
@@ -974,7 +1004,7 @@ class Agent:
                             ctx.messages.append(
                                 AgentMessage(
                                     role="tool",
-                                    content="code_set and code_edit require a non-empty 'path'. Provide a workspace path like 'notebooks/inflation_analysis.py'.",
+                                    content="return_notebook and edit_notebook require a non-empty 'path'. The path is the notebook's identity address (e.g. 'notebooks/inflation_analysis.py' → slug 'inflation_analysis'); reuse to add a revision, or pick a fresh path under 'notebooks/' to create one.",
                                     name=tool_name,
                                     tool_call_id=tool_call.id,
                                 )
@@ -983,11 +1013,11 @@ class Agent:
 
                     loading_label = tools[tool_name].ui_message
                     if tool_type == "code":
-                        if tool_name == "code_set" and tool_args.get("execute") is True:
+                        if tool_name == "return_notebook" and tool_args.get("execute") is True:
                             loading_label = "Writing and running notebook"
-                        elif tool_name == "code_edit" and tool_args.get("execute") is True:
+                        elif tool_name == "edit_notebook" and tool_args.get("execute") is True:
                             loading_label = "Editing and running notebook"
-                        if tool_name in ("code_set", "code_edit"):
+                        if tool_name in ("return_notebook", "edit_notebook"):
                             preview = ScriptPreview(
                                 path=notebook_path,
                                 code=tool_args.get("code", "") or "",
@@ -1169,10 +1199,16 @@ class Agent:
                             return_loading = tools[tool_name].ui_message
                             if tool_result.data:
                                 tool_call_output = tool_result.data
-                                return_types = (Dataset, Chart)
+                                return_types = (Dataset, Chart, Report)
                                 if isinstance(tool_call_output, return_types):
+                                    # Flip the streaming UI to delivery mode but DO NOT stop
+                                    # the loop: a single user request may need multiple
+                                    # deliverables (dataset + chart + report). The agent
+                                    # iterates freely until it emits no more tool calls
+                                    # (natural termination at the no-tool-calls branch above)
+                                    # or hits ``max_iterations``. Republish is idempotent under
+                                    # content-addressing, so this is safe.
                                     turn_state.final_response_started = True
-                                    turn_state.stopped = True
                                     yield ToolEvent(
                                         tool_name=tool_name,
                                         tool_call_id=tool_call.id,
@@ -1183,6 +1219,20 @@ class Agent:
                                         ui_message_completed=llm_ui_message,
                                         section="final_response",
                                     )
+                                    # After the yield, the streaming layer has persisted
+                                    # the artifact and mutated ``content_sha``. Append to
+                                    # the turn's ref ledger so the next iteration's
+                                    # <turn_artifacts> block carries the freshly-minted
+                                    # triplet — the agent never has to scan back through
+                                    # tool messages to find it (Task 15).
+                                    if tool_call_output.logical_id and tool_call_output.content_sha:
+                                        turn_state.minted_refs.append(
+                                            ArtifactRef(
+                                                kind=tool_call_output.type,
+                                                logical_id=tool_call_output.logical_id,
+                                                content_sha=tool_call_output.content_sha,
+                                            )
+                                        )
                             else:
                                 tool_call_output = tool_result.exception_message
 
@@ -1192,34 +1242,38 @@ class Agent:
                                 notebook_path = self._resolve_code_tool_path(tool_args)
                                 if notebook_path is None:
                                     raise ValueError("code tools require a non-empty 'path'.")
-                                ran_kernel = tool_name == "run_notebook" or (
-                                    tool_name in ("code_set", "code_edit") and tool_args.get("execute") is True
+                                ran_kernel = (
+                                    tool_name in ("return_notebook", "edit_notebook")
+                                    and tool_args.get("execute") is True
                                 )
-                                also_executed = tool_name in ("code_set", "code_edit") and tool_args.get(
-                                    "execute"
-                                ) is True
+                                # Derive the canonical post-turn notebook source without
+                                # touching a transient working copy (the new model has
+                                # none — bytes live solely under
+                                # ``.ockham/notebooks/<lid>/<csha>.py``). For
+                                # return_notebook, the new source IS ``tool_args.code``.
+                                # For edit_notebook, we re-apply the edit against the
+                                # latest snapshot (matches what the tool method itself
+                                # did).
+                                script = await self._notebook_script_after_tool(
+                                    tool_name=tool_name,
+                                    notebook_path=notebook_path,
+                                    tool_args=tool_args,
+                                    context=ctx,
+                                )
                                 if ran_kernel:
                                     ko = tool_result.data
                                     if not isinstance(ko, KernelOutput):
                                         raise TypeError(
                                             f"{tool_name} with kernel run did not return KernelOutput"
                                         )
-                                    raw = await self.code_executor.read_workspace_file(notebook_path)
-                                    script = deserialize_notebook(raw, path=notebook_path)
                                     script.output = ko
                                     script.data_objects = stamp_fetch_log_to_script(ko)
-                                    notebook = script
-                                    preview = script.to_preview()
-                                else:
-                                    # code_set or code_edit — re-read the written file (no execution)
-                                    raw = await self.code_executor.read_workspace_file(notebook_path)
-                                    script = deserialize_notebook(raw, path=notebook_path)
-                                    notebook = script
-                                    preview = script.to_preview()
-                                if tool_name == "code_set":
+                                notebook = script
+                                preview = script.to_preview()
+                                if tool_name == "return_notebook":
                                     preview.ui_message = (llm_ui_message or "").strip() or None
                                 else:
-                                    # run_notebook, code_edit: no optional detail in the file-ref line on the wire.
+                                    # edit_notebook: no optional detail in the file-ref line on the wire.
                                     preview.ui_message = None
 
                                 yield ToolEvent(
@@ -1229,9 +1283,18 @@ class Agent:
                                     completed=True,
                                     result={"notebook": notebook, "preview": preview},
                                     ui_message_completed=llm_ui_message,
-                                    also_executed=also_executed,
+                                    also_executed=ran_kernel,
                                     section="final_response" if turn_state.final_response_started else "analysis",
                                 )
+                                # Track the notebook ref in the turn ledger
+                                # (Task 15). The ref's content_sha is computed
+                                # synchronously from the script bytes; no
+                                # streaming-layer wait needed.
+                                if tool_name in ("return_notebook", "edit_notebook"):
+                                    nb_ref = await self._notebook_ref_for(
+                                        script.code, notebook_path, ctx
+                                    )
+                                    turn_state.minted_refs.append(nb_ref)
 
                         case "system":
                             tool_call_output = tool_result.data
@@ -1412,34 +1475,19 @@ class Agent:
         return []
 
     @toolmethod(
-        name="get_context",
-        description="Get the current context of the agent.",
-        parameters_schema={},
-        tool_type="system",
-        ui_message=None
-    )
-    async def get_context(self, *, context: AgentContext) -> AgentContext:
-        context_snapshot = await context.to_snapshot(connectors=self._connectors)
-        return context_snapshot
-
-
-    @toolmethod(
         name="output_read",
-        description="""[LIVE KERNEL ONLY] Read pages from a value already in the Python kernel namespace
-        (e.g. a large DataFrame or primitive) — not for workspace files. For persisted .parquet, charts,
-        notebooks, and .output.json on disk, use `read_artifact` with the appropriate `view` and `locator`.
-
-        Up to 5 pages per call. Combine with `output_search` to jump to search hits. For large DataFrames,
-        use variable_name="df[row,col]" for cell character pagination (0-indexed row and column name).
-        """,
+        description=(
+            "Read pages from an in-kernel value (DataFrame or primitive). For persisted "
+            "files use read_artifact. variable_name='df[row,col]' paginates a single cell."
+        ),
         parameters_schema={
             "type": "object",
-            "properties": { 
-                "variable_name": { "type": "string", "description": "The variable name (e.g. 'df') or cell ref (e.g. 'df[row,col]') to display pages from." },
-                "pages": { "type": "array", "description": "The pages to read. Maximum of 5 pages.", "items": { "type": "integer" }, "minItems": 1, "maxItems": 5}
+            "properties": {
+                "variable_name": {"type": "string", "description": "Kernel variable, or 'df[row,col]' cell ref."},
+                "pages": {"type": "array", "description": "Up to 5 pages.", "items": {"type": "integer"}, "minItems": 1, "maxItems": 5},
             },
             "required": ["variable_name", "pages"],
-            "additionalProperties": False
+            "additionalProperties": False,
         },
         tool_type="system",
         ui_message="Reading output...",
@@ -1470,29 +1518,19 @@ class Agent:
 
     @toolmethod(
         name="output_search",
-        description="""[LIVE KERNEL] Search within large in-kernel values (e.g. DataFrames) and utility output buffers.
-        Use `read_artifact` (not this tool) to inspect persisted workspace files. Results include page
-        numbers for `output_read`. For DataFrames, variable_name can be 'df[row,col]' for a single cell.
-        """,
+        description=(
+            "Search within an in-kernel value. Returns hits with page numbers for output_read. "
+            "Use read_artifact for persisted workspace files."
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Search query (natural language or specific terms)."
-                },
-                "variable_name": {
-                    "type": "string",
-                    "description": "Specific variable or filename to search."
-                },
-                "top_k": {
-                    "type": "integer",
-                    "description": "The number of results to return.",
-                    "default": 5
-                }
+                "query": {"type": "string", "description": "Search query."},
+                "variable_name": {"type": "string", "description": "Kernel variable or 'df[row,col]' cell ref."},
+                "top_k": {"type": "integer", "description": "Result count.", "default": 5},
             },
             "required": ["query", "variable_name"],
-            "additionalProperties": False
+            "additionalProperties": False,
         },
         tool_type="system",
         ui_message="Reading output...",
@@ -1621,32 +1659,22 @@ class Agent:
     @toolmethod(
         name="dry_execute_code",
         description=(
-            "Execute temporary Python code without modifying notebook code or session state. "
-            "Use for quick inspections, ad-hoc calculations, or exploratory checks. "
-            "Requires _ui_message: a short plain-language, past-tense line for the user describing what this run does."
+            "Run scratch Python; stdout/display() land in the conversation, kernel state is preserved, "
+            "no notebook is published. _ui_message is a short past-tense line shown to the user."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "Temporary Python code to execute. Results are shown but not persisted to any notebook."
-                },
-                "timeout_seconds": {
-                    "type": "number",
-                    "description": "Optional execution timeout in seconds. Defaults to 120; capped by the global tool timeout."
-                },
+                "code": {"type": "string", "description": "Python code to execute."},
+                "timeout_seconds": {"type": "number", "description": "Default 120s, capped by tool timeout."},
                 "_ui_message": {
                     "type": "string",
                     "minLength": 1,
-                    "description": (
-                        "Required. One line for the user (not the LLM): past tense, what this temporary run does or shows. "
-                        "E.g. 'Checked CPI year-over-year growth'."
-                    ),
+                    "description": "Past-tense user-facing line, e.g. 'Checked CPI year-over-year growth'.",
                 },
             },
             "required": ["code", "_ui_message"],
-            "additionalProperties": False
+            "additionalProperties": False,
         },
         tool_type="utility",
         ui_message="Running exploratory code",
@@ -1751,44 +1779,8 @@ class Agent:
         return f"Modified {path} ({nlines} lines)."
 
     @toolmethod(
-        name="execute",
-        description="Execute a Python script file in a fresh namespace (connectors available as client).",
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "path": {"type": "string", "description": "Relative path to the .py file to run."},
-            },
-            "required": ["path"],
-            "additionalProperties": False,
-        },
-        tool_type="utility",
-        ui_message="Executing script",
-    )
-    async def execute_workspace_tool(self, *, path: str, context: AgentContext) -> UtilityToolOutput:
-        raw = await self.code_executor.read_workspace_file(path)
-        code = raw.decode("utf-8")
-        effective_timeout = self.guardrails.tool_timeout_s
-        metadata = self._utility_tool_metadata(
-            tool_name="execute",
-            tool_description="Execute a workspace Python script.",
-            tool_args={"path": path, "effective_timeout_seconds": effective_timeout},
-        )
-        kernel_output = await self.code_executor.execute_workspace(
-            code,
-            dry_run=False,
-            timeout_seconds=effective_timeout,
-        )
-        kernel_output.metadata = metadata
-        return UtilityToolOutput(
-            metadata=metadata,
-            content=kernel_output,
-            ui_message=f"Executed {path}",
-        )
-
-    @toolmethod(
         name="read_file",
-        description="Read a text file as raw UTF-8. Prefer `read_artifact` for .parquet, .vl.json, and .py "
-        "notebooks. Optional legacy Parquet head: `read_data`.",
+        description="Raw UTF-8 read for unregistered text files. Prefer read_artifact for typed kinds.",
         parameters_schema={
             "type": "object",
             "properties": {"path": {"type": "string", "description": "Relative file path."}},
@@ -1806,9 +1798,7 @@ class Agent:
 
     @toolmethod(
         name="read_data",
-        description="Read schema, provenance, and a short head of a .parquet (compact XML). Prefer "
-        "`read_artifact` (view=outline|page) for registry projections and row paging; use this for a "
-        "one-shot legacy preview.",
+        description="Compact .parquet preview (schema + provenance + head). Prefer read_artifact for paging.",
         parameters_schema={
             "type": "object",
             "properties": {"path": {"type": "string", "description": "Path ending in .parquet"}},
@@ -1826,21 +1816,25 @@ class Agent:
         result = Result.from_parquet(full)
         df = result.df
         head = df.head(5)
-        schema_line = " | ".join(f"{c.name} ({c.role.value}, {c.dtype})" for c in result.columns)
+        # Connector-supplied: column names, dtypes, source, params. Escape every interpolation.
+        schema_line = " | ".join(
+            f"{escape_text(c.name)} ({escape_text(c.role.value)}, {escape_text(c.dtype)})"
+            for c in result.columns
+        )
         prov = result.provenance
         lines = [
-            f'<data_file path="{path}">',
+            f'<data_file path="{escape_attr(path)}">',
             "  <schema>",
             f"    {schema_line}",
             "  </schema>",
             "  <provenance>",
-            f"    source: {prov.source or ''}",
-            f"    params: {json.dumps(prov.params or {}, sort_keys=True)}",
-            f"    fetched_at: {prov.fetched_at.isoformat() if prov.fetched_at else ''}",
+            f"    source: {escape_text(prov.source or '')}",
+            f"    params: {escape_text(json.dumps(prov.params or {}, sort_keys=True))}",
+            f"    fetched_at: {escape_text(prov.fetched_at.isoformat() if prov.fetched_at else '')}",
             "  </provenance>",
             f"  <summary>{len(df)} rows x {len(result.columns)} columns</summary>",
             "  <head>",
-            head.to_string(),
+            escape_text(head.to_string()),
             "  </head>",
             "</data_file>",
         ]
@@ -1849,13 +1843,9 @@ class Agent:
     @toolmethod(
         name="read_artifact",
         description=(
-            "Read a workspace artifact via the kind registry. Use list_files to discover paths. "
-            "view=summary (default) is a compact one-screen read; outline exposes structure; "
-            "page requires a locator (e.g. rows offset/limit for Parquet, section_index for .py). "
-            "view=full is the most useful complete view: notebook code, dataset outline + row paging "
-            "guidance, chart as a rendered image (Vega-Lite JSON only with locator {kind: chart_spec}). "
-            "Prefer this over read_file for .parquet, .vl.json, .py notebooks, and .output.json. "
-            "mode=summary|full is a legacy alias when view is omitted (maps to view)."
+            "Principal read for typed workspace files (.py / .parquet / .vl.json / .report.md / images). "
+            "view=summary (default) | outline | page | full. page requires locator (e.g. {kind: rows, "
+            "offset, limit} for Parquet, {kind: section, section_index} for .py). full renders charts as images."
         ),
         parameters_schema={
             "type": "object",
@@ -1863,17 +1853,17 @@ class Agent:
                 "path": {"type": "string", "description": "Workspace-relative file path."},
                 "view": {
                     "type": "string",
-                    "description": "summary (default) | outline | page | full",
+                    "description": "summary | outline | page | full",
                     "enum": ["summary", "outline", "page", "full"],
                 },
                 "mode": {
                     "type": "string",
-                    "description": "Deprecated. Use view. summary (default) or full if view is omitted.",
+                    "description": "Deprecated alias for view (summary | full).",
                     "enum": ["summary", "full"],
                 },
                 "locator": {
                     "type": "object",
-                    "description": "Optional pagination locator, e.g. {kind: rows, offset, limit} or {kind: section, section_index: 0}.",
+                    "description": "Pagination locator, required for view=page.",
                 },
             },
             "required": ["path"],
@@ -1906,16 +1896,16 @@ class Agent:
 
     @toolmethod(
         name="list_files",
-        description="Lightweight directory discovery: list paths and sizes. Use read_artifact for .parquet, "
-        ".vl.json, and notebooks, not for bulk inspection here.",
+        description=(
+            "Discover unregistered workspace files (user-dropped CSV/JSON, raw text). "
+            "Do NOT use this to verify typed artifacts (notebook/dataset/chart/report) — "
+            "those are listed every iteration in <session_state>.<turn_artifacts>. "
+            "Use read_artifact to inspect contents."
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
-                "prefix": {
-                    "type": "string",
-                    "description": "Optional subdirectory prefix (e.g. data/).",
-                    "default": "",
-                }
+                "prefix": {"type": "string", "description": "Optional subdirectory prefix.", "default": ""},
             },
             "required": [],
             "additionalProperties": False,
@@ -1937,41 +1927,10 @@ class Agent:
         return SystemToolOutput(content=Text(content="\n".join(lines)))
 
     @toolmethod(
-        name="run_notebook",
-        description=(
-            "[CODE CELLS TOOL] Execute an existing workspace .py notebook in the current "
-            "kernel namespace (additive — like running a cell in Jupyter). Variables it "
-            "produces are immediately available for subsequent tool calls. Use this to "
-            "restore prior computation after a kernel restart, or to load a dependency "
-            "notebook before writing new code."
-        ),
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Workspace-relative path to the .py notebook file.",
-                }
-            },
-            "required": ["path"],
-            "additionalProperties": False,
-        },
-        tool_type="code",
-        ui_message="Running notebook",
-        ui_message_completed="Ran notebook",
-    )
-    async def run_notebook(self, *, path: str, context: AgentContext) -> KernelOutput:
-        raw = await self.code_executor.read_workspace_file(path)
-        script = deserialize_notebook(raw, path=path)
-        return await self.code_executor.execute(script.code)
-
-    @toolmethod(
         name="restart_kernel",
         description=(
-            "[SYSTEM TOOL] Clear the Python kernel namespace. All variables are lost; "
-            "workspace files and notebooks are preserved. Use before starting a new "
-            "independent analysis or when you want to verify a notebook runs cleanly "
-            "from scratch."
+            "Clear the kernel namespace. Variables are lost; workspace files persist. "
+            "Use before a new analysis or to verify a notebook runs cleanly from scratch."
         ),
         parameters_schema={"type": "object", "properties": {}, "required": [], "additionalProperties": False},
         tool_type="system",
@@ -1983,15 +1942,15 @@ class Agent:
         return SystemToolOutput(content=Text(content="Kernel restarted. Namespace cleared."))
 
     @toolmethod(
-        name="code_set",
+        name="return_notebook",
         description=(
-            "Replace the entire analysis notebook .py file on disk. "
-            "By default does not execute the kernel — use ``execute``: true to write and run in one step, "
-            "or call ``run_notebook`` after writing when you only need execution. "
-            "Always start ``code`` with a one-line module docstring (triple-quoted) written "
-            "for a non-technical reader. State what the notebook produces and briefly note any "
-            "methodological choice that materially affects interpretation. "
-            "Optional _ui_message: short plain-language line for the user after '>' in the file-ref row."
+            "Publish a notebook revision (full source). Reuse a path to add a revision under the same "
+            "logical_id; pick a fresh path under notebooks/ to create one. execute=true runs it after "
+            "publishing. Authoring style: start with a one-line triple-quoted docstring written for a "
+            "non-technical reader (what the notebook produces, methodological choices that materially "
+            "affect interpretation). Use '# # Heading' comments for sections and '# comment' blocks "
+            "before each code block to explain intent and any decision that affects coverage, "
+            "comparability, or interpretation. Do not narrate routine mechanics."
         ),
         parameters_schema={
             "type": "object",
@@ -1999,29 +1958,16 @@ class Agent:
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": (
-                        "Required. Workspace path, e.g. 'notebooks/inflation_analysis.py'. The path is "
-                        "the notebook's identity; reusing it overwrites; a new path creates a new notebook."
-                    ),
+                    "description": "Virtual notebook path, e.g. notebooks/<your_notebook>.py.",
                 },
                 "code": {
                     "type": "string",
-                    "description": (
-                        "Full Python source. Must begin with a triple-quoted module docstring that "
-                        "describes what this notebook produces for a non-technical reader and notes "
-                        "material methodological choices. Use ``# # Heading`` comments for major "
-                        "sections and ``# plain comment`` comment blocks before each code block to "
-                        "explain the step's intent and any choice that materially affects coverage, "
-                        "comparability, or interpretation. Do not narrate routine code mechanics."
-                    ),
+                    "description": "Full Python source. See description for required docstring + comment structure.",
                 },
                 "execute": {
                     "type": "boolean",
                     "default": False,
-                    "description": (
-                        "If true, run the notebook in the kernel immediately after writing (same as "
-                        "``run_notebook`` on the new file). If false, only persist the file."
-                    ),
+                    "description": "If true, run in the kernel after publishing.",
                 },
             },
             "required": ["path", "code"],
@@ -2030,28 +1976,31 @@ class Agent:
         tool_type="code",
         ui_message="Writing notebook",
     )
-    async def code_set(
+    async def return_notebook(
         self, *, path: str, code: str, context: AgentContext, execute: bool = False
     ) -> str | KernelOutput:
         normalized = path.strip()
         if not normalized:
             raise ValueError("path must be a non-empty string.")
-        script = Script(path=normalized, code=code)
-        raw = serialize_notebook(script)
-        await self.code_executor.write_workspace_file(normalized, raw)
+        # Canonicalize newlines via in-memory round-trip — same shape the
+        # snapshot store will write, so ``content_sha`` matches what the
+        # streaming layer's persist step computes from the ScriptPreview.
+        canonical = deserialize_notebook(
+            serialize_notebook(Script(path=normalized, code=code)), path=normalized
+        ).code
         if execute:
-            raw2 = await self.code_executor.read_workspace_file(normalized)
-            loaded = deserialize_notebook(raw2, path=normalized)
-            return await self.code_executor.execute(loaded.code)
-        return f"Wrote {normalized} (not executed; use run_notebook to execute)."
+            ko = await self.code_executor.execute(canonical)
+            return await self._stamp_notebook_ref(ko, canonical, normalized, context)
+        ref = await self._notebook_ref_for(canonical, normalized, context)
+        ref_tag = ref.to_self_closing_tag("notebook_ref")
+        return f"Published {normalized} (not executed; pass execute=true to run).\n{ref_tag}"
 
     @toolmethod(
-        name="code_edit",
+        name="edit_notebook",
         description=(
-            "Edit the notebook on disk: replace one occurrence of old_str with new_str. "
-            "Use sufficiently long and specific context to ensure uniqueness. "
-            "By default does not execute — set ``execute``: true to run the updated file in the kernel "
-            "in the same call, or call ``run_notebook`` afterward."
+            "Surgical edit of an existing notebook: replace one occurrence of old_str with new_str. "
+            "old_str='' replaces the whole file (equivalent to return_notebook). execute=true runs "
+            "the result. Authoring style: see return_notebook."
         ),
         parameters_schema={
             "type": "object",
@@ -2059,27 +2008,20 @@ class Agent:
                 "path": {
                     "type": "string",
                     "minLength": 1,
-                    "description": (
-                        "Required. Workspace path to edit, e.g. 'notebooks/inflation_analysis.py'."
-                    ),
+                    "description": "Existing notebook path (resolves to its logical_id).",
                 },
                 "old_str": {
                     "type": "string",
-                    "description": (
-                        "Substring to replace (must occur exactly once), or empty string to replace the whole file."
-                    ),
+                    "description": "Substring to replace (must occur exactly once); empty replaces whole file.",
                 },
                 "new_str": {
                     "type": "string",
-                    "description": "Replacement text, or the full new file when old_str is empty.",
+                    "description": "Replacement text.",
                 },
                 "execute": {
                     "type": "boolean",
                     "default": False,
-                    "description": (
-                        "If true, run the notebook in the kernel immediately after saving (same as "
-                        "``run_notebook`` on the updated file)."
-                    ),
+                    "description": "If true, run in the kernel after publishing.",
                 },
             },
             "required": ["path", "old_str", "new_str"],
@@ -2088,7 +2030,7 @@ class Agent:
         tool_type="code",
         ui_message="Editing notebook",
     )
-    async def code_edit(
+    async def edit_notebook(
         self,
         *,
         path: str,
@@ -2098,8 +2040,9 @@ class Agent:
         execute: bool = False,
     ) -> str | KernelOutput:
         if old_str == "":
-            return await self.code_set(path=path, code=new_str, context=context, execute=execute)
-        raw = await self.code_executor.read_workspace_file(path)
+            return await self.return_notebook(path=path, code=new_str, context=context, execute=execute)
+        logical_id = await self._resolve_notebook_logical_id(path, context)
+        raw, _csha = await read_latest_notebook(self.code_executor, logical_id=logical_id)
         script = deserialize_notebook(raw, path=path)
         n = script.code.count(old_str)
         if n == 0:
@@ -2107,26 +2050,127 @@ class Agent:
         if n > 1:
             raise ValueError("old_str occurs multiple times; provide a more specific target.")
         script.code = script.code.replace(old_str, new_str, 1)
-        out = serialize_notebook(script)
-        await self.code_executor.write_workspace_file(path, out)
         if execute:
-            raw2 = await self.code_executor.read_workspace_file(path)
-            loaded = deserialize_notebook(raw2, path=path)
-            return await self.code_executor.execute(loaded.code)
-        return f"Modified {path} (not executed; use run_notebook to execute)."
+            ko = await self.code_executor.execute(script.code)
+            return await self._stamp_notebook_ref(ko, script.code, path, context)
+        ref = await self._notebook_ref_for(script.code, path, context)
+        ref_tag = ref.to_self_closing_tag("notebook_ref")
+        return f"Modified {path} (not executed; pass execute=true to run).\n{ref_tag}"
+
+    async def _notebook_script_after_tool(
+        self,
+        *,
+        tool_name: str,
+        notebook_path: str,
+        tool_args: dict[str, Any],
+        context: AgentContext,
+    ) -> Script:
+        """Rebuild the canonical post-turn :class:`Script` for a code tool call.
+
+        Mirror of what the tool method produced, derived from inputs only —
+        no disk read of a transient working copy (notebooks live solely
+        under ``.ockham/notebooks/<lid>/<csha>.py``):
+
+        - ``return_notebook``: ``tool_args["code"]`` round-tripped through
+          the notebook serializer (canonical newlines).
+        - ``edit_notebook`` with empty ``old_str``: behaves as
+          ``return_notebook`` over ``new_str``; matches the fallback in
+          :meth:`edit_notebook`.
+        - ``edit_notebook`` with non-empty ``old_str``: re-read the latest
+          snapshot and re-apply the substring edit. Within a single turn
+          no other writes can have happened, so this reproduces what the
+          tool method itself executed.
+        """
+        if tool_name == "return_notebook":
+            raw_code = tool_args.get("code", "") or ""
+            return deserialize_notebook(
+                serialize_notebook(Script(path=notebook_path, code=raw_code)),
+                path=notebook_path,
+            )
+        if tool_name == "edit_notebook":
+            old_str = tool_args.get("old_str", "")
+            new_str = tool_args.get("new_str", "")
+            if old_str == "":
+                return deserialize_notebook(
+                    serialize_notebook(Script(path=notebook_path, code=new_str)),
+                    path=notebook_path,
+                )
+            logical_id = await self._resolve_notebook_logical_id(notebook_path, context)
+            raw, _csha = await read_latest_notebook(self.code_executor, logical_id=logical_id)
+            script = deserialize_notebook(raw, path=notebook_path)
+            script.code = script.code.replace(old_str, new_str, 1)
+            return script
+        raise ValueError(f"unsupported code tool: {tool_name!r}")
+
+    @staticmethod
+    async def _resolve_notebook_logical_id(
+        working_copy_path: str, context: AgentContext
+    ) -> str:
+        """Resolve a notebook user-visible path to its ``logical_id``.
+
+        1. If the workspace host bound ``context.notebook_logical_id_resolver``,
+           use it. The host scans existing curations so a notebook whose
+           ``live_name`` was renamed via curation keeps its original
+           logical_id when the agent next publishes via ``return_notebook``
+           under the new path.
+        2. Else, derive directly from the path
+           (``notebook_logical_id(working_copy_path)``) — the slug-based
+           default for fresh notebooks.
+
+        Raises :class:`ValueError` from :func:`notebook_logical_id` for
+        paths outside ``notebooks/`` (standalone tests, legacy flat
+        usage) — callers that want a content-sha fallback must catch
+        it themselves.
+        """
+        resolver = context.notebook_logical_id_resolver
+        if resolver is not None:
+            return await resolver(working_copy_path)
+        return notebook_logical_id(working_copy_path)
+
+    @staticmethod
+    async def _notebook_ref_for(
+        code: str, working_copy_path: str, context: AgentContext
+    ) -> ArtifactRef:
+        """Canonical notebook ref for *code* at *working_copy_path*.
+
+        ``content_sha = notebook_content_sha(code)`` is universal.
+        ``logical_id`` resolution defers to
+        :meth:`_resolve_notebook_logical_id`. Falls back to
+        ``logical_id == content_sha`` for malformed paths so standalone
+        tests / legacy flat usage keep working.
+        """
+        csha = notebook_content_sha(code)
+        try:
+            lid = await Agent._resolve_notebook_logical_id(working_copy_path, context)
+        except ValueError:
+            lid = csha
+        return ArtifactRef(kind="notebook", logical_id=lid, content_sha=csha)
+
+    @classmethod
+    async def _stamp_notebook_ref(
+        cls,
+        ko: KernelOutput,
+        code: str,
+        working_copy_path: str,
+        context: AgentContext,
+    ) -> KernelOutput:
+        """Stamp ``KernelOutput.metadata['notebook_ref']`` so to_llm surfaces it.
+
+        Run after every kernel run kicked off by a code tool
+        (``return_notebook`` or ``edit_notebook`` with ``execute=True``).
+        The ref matches what the streaming layer's ``FileRefChunk`` emits
+        — the LLM sees identical refs from both surfaces.
+        """
+        ref = await cls._notebook_ref_for(code, working_copy_path, context)
+        ko.metadata = {**(ko.metadata or {}), "notebook_ref": ref.to_dict()}
+        return ko
 
     @toolmethod(
         name="return_dataset",
         description=(
-            "Return exactly one validated dataset when the user should receive the table. "
-            "``dataset_variable_name`` must be a plain notebook variable name. "
-            "``sources_from_variables`` is the list of variable names that hold the "
-            "connector ``Result`` return values that fed this dataset (e.g. "
-            "``raw = await connectors[\"fred_fetch\"](...)``); pass an empty list only "
-            "when no upstream connector fetches contributed (purely-computed datasets). "
-            "Provide notebook refs for the stages used in the pipeline. The framework "
-            "picks the persistence location and embeds curation metadata in the on-disk file. "
-            "Charts can be delivered with return_chart alone."
+            "Publish a DataFrame deliverable. dataset_variable_name is the kernel variable. "
+            "notebook_refs and source_refs are lineage triplets — see prompt rule 5 (refs are atomic) "
+            "and the catalog for where to copy them from."
         ),
         parameters_schema={
             "type": "object",
@@ -2134,51 +2178,39 @@ class Agent:
                 "dataset_variable_name": {
                     "type": "string",
                     "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
-                    "description": "Plain notebook variable name for the final pandas DataFrame or Series to return. Do not pass expressions, slices, or indexing such as df.head(20) or df[0:20].",
-                },
-                "sources_from_variables": {
-                    "type": "array",
-                    "items": {
-                        "type": "string",
-                        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
-                    },
-                    "description": (
-                        "Variable names that hold the connector Result return values "
-                        "fed into this dataset (the variables on the LHS of "
-                        "``await connectors[...](...)`` calls). The framework resolves "
-                        "each to its provenance — source, params, fetched_at, "
-                        "data_object_path — and stamps the list as Dataset.sources. "
-                        "Pass [] only for purely-computed datasets with no upstream "
-                        "connector fetches."
-                    ),
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Short, informative display title for the dataset. Focus on what the data represents: domain, entities, time period. Avoid generic suffixes like 'Data' or 'Dataset'. Avoid process qualifiers like 'cleaned', 'processed', or 'merged' unless essential for disambiguation.",
+                    "description": "Plain variable name of the final DataFrame.",
                 },
                 "notebook_refs": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of notebook paths (e.g. 'notebooks/sp500_fetch.py') used to produce this dataset, in execution order.",
+                    "description": "ArtifactRefs (kind='notebook') for the producing notebooks, in execution order.",
+                    "items": _ARTIFACT_REF_SCHEMA,
                 },
-                "description": {
-                    "type": "string",
-                    "description": "One concise sentence describing what this dataset contains and what it is useful for.",
+                "source_refs": {
+                    "type": "array",
+                    "description": "ArtifactRefs for upstream data_objects or composing datasets. [] for purely-computed.",
+                    "items": _ARTIFACT_REF_SCHEMA,
                 },
+                "title": {"type": "string", "description": "Short display title."},
+                "description": {"type": "string", "description": "One sentence on contents."},
                 "notes": {
                     "type": "array",
-                    "description": "Important decisions, assumptions, caveats, and validation-relevant context required to interpret and trust the returned dataset.",
                     "items": {"type": "string"},
+                    "description": "Decisions, assumptions, caveats.",
                 },
                 "tags": {
                     "type": "array",
-                    "description": "Optional context tags you add beyond the data object's tags. Data object tags (from fetch summaries or source datasets) describe what the data is. Your tags describe context or intent—e.g. 'quarterly-review', 'peer-comparison', 'baseline-scenario'. Lowercase, short labels. They are merged with the data object tags.",
                     "items": {"type": "string"},
+                    "description": "Optional short tags.",
+                },
+                "live_name": {
+                    "type": "string",
+                    "description": "File-tree name (no extension); '' hides from live tree.",
                 },
             },
             "required": [
                 "dataset_variable_name",
-                "sources_from_variables",
+                "notebook_refs",
+                "source_refs",
                 "title",
                 "description",
                 "notes",
@@ -2189,51 +2221,43 @@ class Agent:
         ui_message="Returning dataset",
     )
     async def return_dataset(
-            self,
-            *,
-            context: AgentContext,
-            dataset_variable_name: str,
-            sources_from_variables: list[str],
-            title: str,
-            description: str,
-            notes: list[str],
-            tags: list[str] | None = None,
-            notebook_refs: list[str] | None = None,
-        ) -> Dataset:
+        self,
+        *,
+        context: AgentContext,  # noqa: ARG002 — kept for tool signature symmetry
+        dataset_variable_name: str,
+        notebook_refs: list[Any],
+        source_refs: list[Any],
+        title: str,
+        description: str,
+        notes: list[str],
+        tags: list[str] | None = None,
+        live_name: str | None = None,
+    ) -> Dataset:
         dataset_variable_name = self._require_plain_variable_name(
-            value=dataset_variable_name,
-            parameter_name="dataset_variable_name",
+            value=dataset_variable_name, parameter_name="dataset_variable_name"
         )
         title = title.strip()
         if not title:
             raise ValueError("title must be a non-empty string.")
         notes = TypeAdapter(list[str]).validate_python(notes)
-        clean_refs = [(r or "").strip() for r in (notebook_refs or []) if (r or "").strip()]
-        clean_source_vars = [
-            self._require_plain_variable_name(
-                value=name,
-                parameter_name="sources_from_variables",
-            )
-            for name in TypeAdapter(list[str]).validate_python(sources_from_variables)
-        ]
-        await self._validate_return_dataset_refs(
-            context=context,
-            dataset_variable_name=dataset_variable_name,
-            notebook_refs=clean_refs,
-        )
+        nb_refs = _parse_artifact_refs(notebook_refs, parameter_name="notebook_refs")
+        if not all(r.kind == "notebook" for r in nb_refs):
+            raise ValueError("notebook_refs must all have kind='notebook'.")
+        src_refs = _parse_artifact_refs(source_refs, parameter_name="source_refs")
+        await self._validate_refs_resolve(nb_refs + src_refs)
 
         out_obj = await self.code_executor.get(dataset_variable_name)
         if out_obj is None:
             raise ValueError(
                 f"Variable '{dataset_variable_name}' is not in the kernel. "
-                "Run the relevant notebook with run_notebook (or use dry_execute_code) first."
+                "Publish the producing notebook with return_notebook(execute=true) "
+                "(or refresh a downstream artifact) to repopulate state."
             )
         if not isinstance(out_obj, DataFrameObject):
             raise TypeError(
                 f"Dataset '{dataset_variable_name}' must resolve to a pandas DataFrame; "
                 f"got {type(out_obj).__name__}."
             )
-        source_dataset_variable_names = [dataset_variable_name]
 
         final_tags: list[str] = []
         for t in TypeAdapter(list[str]).validate_python(tags or []):
@@ -2241,103 +2265,89 @@ class Agent:
             if s and s not in final_tags:
                 final_tags.append(s)
 
-        existing = context.get_returned_dataset()
-        if existing and existing.dataset_variable_name != dataset_variable_name:
-            raise ValueError(
-                f"Session already has a returned dataset '{existing.dataset_variable_name}'. Reuse that dataset or update it in place."
-            )
-
-        artifact_id = existing.artifact_id if existing is not None else ""
-        version = existing.version if existing is not None else 1
-        returned_state = ReturnedDatasetState(
-            artifact_id=artifact_id,
-            version=version,
-            dataset_variable_name=dataset_variable_name,
-            title=title,
-            description=description,
-            notes=notes,
-            source_dataset_variable_names=source_dataset_variable_names,
-            notebook_refs=clean_refs,
+        lid = dataset_logical_id(
+            notebook_refs=nb_refs,
+            variable_name=dataset_variable_name,
+            source_refs=src_refs,
         )
-        context.set_returned_dataset(returned_state)
-
-        sources = await _resolve_sources_from_variables(
-            self.code_executor, clean_source_vars
-        )
+        # ``live_name`` semantics: None → auto-derive at persist time;
+        # explicit empty string → hidden from live tree.
+        ln: str | None
+        if live_name is None:
+            ln = None
+        elif live_name == "":
+            ln = None
+        else:
+            ln = live_name
         dataset = Dataset(
-            artifact_id=returned_state.artifact_id,
-            version=returned_state.version,
+            logical_id=lid,
             title=title,
             description=description,
             tags=final_tags,
             notes=notes,
-            notebook_refs=clean_refs,
-            sources=sources,
+            notebook_refs=nb_refs,
+            source_refs=src_refs,
+            variable_name=dataset_variable_name,
+            live_name=ln,
         )
         return dataset.with_payload(out_obj)
 
     @toolmethod(
         name="return_chart",
         description=(
-            "Return one optional chart primitive built from a clean dataframe in the kernel. "
-            "The source dataframe does not need to have been returned with return_dataset. "
-            "``sources_from_variables`` is the list of variable names that hold the "
-            "connector ``Result`` return values that fed the chart's source data; "
-            "pass an empty list only when no upstream connector fetches contributed. "
-            "The framework picks the persistence location and embeds curation "
-            "metadata in the on-disk Vega-Lite file."
+            "Publish an Altair chart deliverable. chart_variable_name is the kernel variable. "
+            "notebook_ref (singular) and source_dataset_refs are lineage triplets — see prompt "
+            "rule 5 (refs are atomic). Visual contract: no title/subtitle in the chart spec "
+            "(use the title parameter); legend orient='top|bottom|left|right'; size 640x400 "
+            "fixed; explicit altair encodings (:Q :N :O :T); aggregate to ≤5000 points; tooltips "
+            "yes, zoom/pan no; dark theme background #0d0d0d, primary text #f1f5f9, accent "
+            "#3b82f6; positive/negative pair #10b981/#f87171."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
-                "title": {
-                    "type": "string",
-                    "description": "Short human-readable title for the chart, shown in the UI.",
-                },
-                "source_dataset_variable_name": {
-                    "type": "string",
-                    "description": (
-                        "Name of the kernel variable holding the pandas DataFrame the chart is based on. "
-                        "It does not need to have been returned with return_dataset."
-                    ),
-                },
+                "title": {"type": "string", "description": "Short display title (≤50 chars; no styling)."},
                 "chart_variable_name": {
                     "type": "string",
-                    "description": "Variable name that resolves to an Altair chart built from the source dataset.",
+                    "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+                    "description": "Plain variable name resolving to an Altair chart.",
                 },
-                "chart_notebook_ref": {
-                    "type": "string",
-                    "description": "Notebook path for the visualization stage (e.g. 'notebooks/viz.py').",
+                "notebook_ref": {
+                    **_ARTIFACT_REF_SCHEMA,
+                    "description": "ArtifactRef (kind='notebook') for the rendering notebook (singular).",
                 },
-                "sources_from_variables": {
+                "source_dataset_refs": {
                     "type": "array",
-                    "items": {
-                        "type": "string",
-                        "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
-                    },
-                    "description": (
-                        "Variable names that hold the connector Result return values "
-                        "fed into the chart's source data (the variables on the LHS of "
-                        "``await connectors[...](...)`` calls). Pass [] only for charts "
-                        "with no upstream connector fetches."
-                    ),
+                    "items": _ARTIFACT_REF_SCHEMA,
+                    "description": "ArtifactRefs (kind='dataset') for source datasets.",
                 },
-                "description": {
-                    "type": "string",
-                    "description": "One concise sentence describing what the chart helps the user see.",
+                "source_refs": {
+                    "type": "array",
+                    "items": _ARTIFACT_REF_SCHEMA,
+                    "description": "Optional data_object refs when the chart bypasses return_dataset; usually [].",
                 },
+                "description": {"type": "string", "description": "One sentence on what the chart shows."},
                 "notes": {
                     "type": "array",
-                    "description": "Important caveats, encoding decisions, and interpretation notes for the chart.",
                     "items": {"type": "string"},
+                    "description": "Caveats, encoding decisions, interpretation notes.",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional short tags.",
+                },
+                "live_name": {
+                    "type": "string",
+                    "description": "File-tree name (no extension); '' hides from live tree.",
                 },
             },
             "required": [
                 "title",
-                "source_dataset_variable_name",
                 "chart_variable_name",
-                "chart_notebook_ref",
-                "sources_from_variables",
+                "notebook_ref",
+                "source_dataset_refs",
+                "source_refs",
                 "description",
                 "notes",
             ],
@@ -2349,55 +2359,43 @@ class Agent:
     async def return_chart(
         self,
         *,
-        context: AgentContext,
+        context: AgentContext,  # noqa: ARG002 — kept for tool signature symmetry
         title: str,
-        source_dataset_variable_name: str,
         chart_variable_name: str,
-        chart_notebook_ref: str,
-        sources_from_variables: list[str],
+        notebook_ref: dict[str, Any],
+        source_dataset_refs: list[Any],
+        source_refs: list[Any],
         description: str,
         notes: list[str],
+        tags: list[str] | None = None,
+        live_name: str | None = None,
     ) -> Chart:
         title = title.strip()
         if not title:
             raise ValueError("title must be a non-empty string.")
-        source_dataset_variable_name = self._require_plain_variable_name(
-            value=source_dataset_variable_name,
-            parameter_name="source_dataset_variable_name",
-        )
         chart_variable_name = self._require_plain_variable_name(
-            value=chart_variable_name,
-            parameter_name="chart_variable_name",
+            value=chart_variable_name, parameter_name="chart_variable_name"
         )
         notes = TypeAdapter(list[str]).validate_python(notes)
-        chart_ref = (chart_notebook_ref or "").strip()
-        if not chart_ref:
-            raise ValueError("chart_notebook_ref must be a non-empty string.")
-
-        source_obj = await self.code_executor.get(source_dataset_variable_name)
-        if source_obj is None:
+        nb_refs = _parse_artifact_refs([notebook_ref], parameter_name="notebook_ref")
+        if not nb_refs:
+            raise ValueError("notebook_ref must be present.")
+        nb_ref = nb_refs[0]
+        if nb_ref.kind != "notebook":
             raise ValueError(
-                f"Variable '{source_dataset_variable_name}' is not in the kernel. "
-                "If session_state lists it, use it directly; otherwise run the notebook that creates it."
+                f"notebook_ref must have kind='notebook', got {nb_ref.kind!r}."
             )
-        if not isinstance(source_obj, DataFrameObject):
-            raise TypeError(
-                f"source_dataset_variable_name '{source_dataset_variable_name}' must resolve to a "
-                f"pandas DataFrame; got {type(source_obj).__name__}."
-            )
-
-        await self._validate_return_chart_refs(
-            context=context,
-            source_dataset_variable_name=source_dataset_variable_name,
-            chart_variable_name=chart_variable_name,
-            chart_notebook_ref=chart_ref,
-        )
+        ds_refs = _parse_artifact_refs(source_dataset_refs, parameter_name="source_dataset_refs")
+        if not all(r.kind == "dataset" for r in ds_refs):
+            raise ValueError("source_dataset_refs must all have kind='dataset'.")
+        src_refs = _parse_artifact_refs(source_refs, parameter_name="source_refs")
+        await self._validate_refs_resolve([nb_ref, *ds_refs, *src_refs])
 
         fig_obj = await self.code_executor.get(chart_variable_name)
         if fig_obj is None:
             raise ValueError(
                 f"Variable '{chart_variable_name}' is not in the kernel. "
-                "If session_state lists it, use it directly; otherwise run the notebook that creates it."
+                "Run the notebook that creates it first."
             )
         if not isinstance(fig_obj, FigureObject):
             raise TypeError(
@@ -2407,65 +2405,322 @@ class Agent:
         if fig_obj.name is None:
             fig_obj.name = chart_variable_name
 
-        returned_dataset = context.get_returned_dataset()
-        if (
-            returned_dataset is not None
-            and returned_dataset.dataset_variable_name == source_dataset_variable_name
-        ):
-            source_dataset_path_value = snapshot_path(
-                artifact_id=returned_dataset.artifact_id,
-                version=returned_dataset.version,
-                kind="dataset",
-                title=returned_dataset.title or "",
-            )
-        else:
-            source_dataset_path_value = ""
-        existing_chart = context.get_returned_chart()
-        artifact_id = (
-            existing_chart.artifact_id
-            if existing_chart is not None
-            and existing_chart.source_dataset_path == source_dataset_path_value
-            and existing_chart.chart_variable_name == chart_variable_name
-            and existing_chart.chart_notebook_ref == chart_ref
-            else ""
-        )
-        version = existing_chart.version if artifact_id else 1
-        returned_chart = ReturnedChartState(
-            artifact_id=artifact_id,
-            version=version,
-            title=title,
-            source_dataset_path=source_dataset_path_value,
-            source_dataset_variable_name=source_dataset_variable_name,
-            chart_variable_name=chart_variable_name,
-            chart_notebook_ref=chart_ref,
-            description=description,
-            notes=notes,
-        )
-        context.set_returned_chart(returned_chart)
+        final_tags: list[str] = []
+        for t in TypeAdapter(list[str]).validate_python(tags or []):
+            s = str(t).strip()
+            if s and s not in final_tags:
+                final_tags.append(s)
 
-        clean_chart_source_vars = [
-            self._require_plain_variable_name(
-                value=name,
-                parameter_name="sources_from_variables",
-            )
-            for name in TypeAdapter(list[str]).validate_python(sources_from_variables)
-        ]
-        chart_sources = await _resolve_sources_from_variables(
-            self.code_executor, clean_chart_source_vars
+        lid = chart_logical_id(
+            notebook_ref=nb_ref,
+            chart_variable_name=chart_variable_name,
+            source_dataset_refs=ds_refs,
+            source_refs=src_refs,
         )
+        ln: str | None
+        if live_name is None or live_name == "":
+            ln = None if live_name == "" else None
+        else:
+            ln = live_name
         chart = Chart(
-            artifact_id=returned_chart.artifact_id,
-            version=returned_chart.version,
+            logical_id=lid,
             title=title,
             description=description,
-            source_dataset_path=source_dataset_path_value,
-            chart_notebook_ref=chart_ref,
+            tags=final_tags,
             notes=notes,
-            sources=chart_sources,
+            notebook_ref=nb_ref,
+            source_dataset_refs=ds_refs,
+            source_refs=src_refs,
+            variable_name=chart_variable_name,
+            live_name=ln,
         )
-        # Hand the live FigureObject to the streaming dispatcher; it writes
-        # the Vega-Lite snapshot and computes the card preview.
         return chart.with_payload(fig_obj)
+
+    @toolmethod(
+        name="return_report",
+        description=(
+            "Publish a markdown report. markdown is the full body — leading '# Title', prose, and "
+            "embedded refs as ![](file://./.ockham/<kind>s/<logical_id>/<content_sha>.<ext>). "
+            "Each embedded path is the workspace_file_path of an existing snapshot (see prompt rule 5). "
+            "Pass every embedded artifact's triplet in embedded_refs for lineage."
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Display title (matches leading '# Title')."},
+                "markdown": {"type": "string", "description": "Full markdown body with embedded refs."},
+                "embedded_refs": {
+                    "type": "array",
+                    "items": _ARTIFACT_REF_SCHEMA,
+                    "description": "ArtifactRefs for every artifact embedded in markdown.",
+                },
+                "description": {"type": "string", "description": "One sentence on what the report covers."},
+                "notes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Assumptions, caveats, context.",
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional short tags.",
+                },
+                "live_name": {
+                    "type": "string",
+                    "description": "File-tree name (no extension); '' hides from live tree.",
+                },
+            },
+            "required": ["title", "markdown", "embedded_refs", "description", "notes"],
+            "additionalProperties": False,
+        },
+        tool_type="return",
+        ui_message="Publishing report",
+    )
+    async def return_report(
+        self,
+        *,
+        context: AgentContext,  # noqa: ARG002 — kept for tool signature symmetry
+        title: str,
+        markdown: str,
+        embedded_refs: list[Any],
+        description: str,
+        notes: list[str],
+        tags: list[str] | None = None,
+        live_name: str | None = None,
+    ) -> Report:
+        title = title.strip()
+        if not title:
+            raise ValueError("title must be a non-empty string.")
+        if not markdown.strip():
+            raise ValueError("markdown must be a non-empty string.")
+        notes = TypeAdapter(list[str]).validate_python(notes)
+        emb = _parse_artifact_refs(embedded_refs, parameter_name="embedded_refs")
+        await self._validate_refs_resolve(emb)
+        final_tags: list[str] = []
+        for t in TypeAdapter(list[str]).validate_python(tags or []):
+            s = str(t).strip()
+            if s and s not in final_tags:
+                final_tags.append(s)
+        ln: str | None
+        if live_name is None or live_name == "":
+            ln = None if live_name == "" else None
+        else:
+            ln = live_name
+        return Report(
+            logical_id=report_logical_id(embedded_refs=emb, title=title),
+            title=title,
+            description=description,
+            notes=notes,
+            tags=final_tags,
+            markdown=markdown,
+            embedded_refs=emb,
+            live_name=ln,
+        )
+
+    @toolmethod(
+        name="edit_report",
+        description=(
+            "Surgical edit of an existing report: replace one occurrence of old_str with new_str against "
+            "the latest snapshot. logical_id is preserved; embedded_refs are re-extracted from the new "
+            "markdown."
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "ref": {
+                    **_ARTIFACT_REF_SCHEMA,
+                    "description": "ArtifactRef of the report to edit (kind='report').",
+                },
+                "old_str": {
+                    "type": "string",
+                    "description": "Substring to replace (must occur exactly once).",
+                },
+                "new_str": {"type": "string", "description": "Replacement text."},
+            },
+            "required": ["ref", "old_str", "new_str"],
+            "additionalProperties": False,
+        },
+        tool_type="return",
+        ui_message="Editing report",
+    )
+    async def edit_report(
+        self,
+        *,
+        context: AgentContext,  # noqa: ARG002 — kept for tool signature symmetry
+        ref: dict[str, Any],
+        old_str: str,
+        new_str: str,
+    ) -> Report:
+        target = _parse_artifact_refs([ref], parameter_name="ref")[0]
+        if target.kind != "report":
+            raise ValueError(
+                f"edit_report: ref must be kind='report', got {target.kind!r}."
+            )
+        if old_str == "":
+            raise ValueError(
+                "edit_report: old_str must be a non-empty substring; full-body "
+                "rewrites should go through return_report."
+            )
+
+        # Resolve to the report's latest snapshot via log.jsonl — the
+        # caller's ``ref.content_sha`` may be stale (e.g. another turn
+        # refreshed the report mid-conversation). Editing always targets
+        # the latest revision.
+        log_path = f".ockham/reports/{target.logical_id}/log.jsonl"
+        try:
+            raw_log = await self.code_executor.read_workspace_file(log_path)
+        except FileNotFoundError as e:
+            raise ValueError(
+                f"edit_report: report {target.logical_id!r} has no log.jsonl "
+                "— it has not been published yet."
+            ) from e
+        last_csha = last_content_sha_from_log(raw_log)
+        if last_csha is None:
+            raise ValueError(
+                f"edit_report: report {target.logical_id!r} log.jsonl has no usable entries."
+            )
+
+        snapshot_path = f".ockham/reports/{target.logical_id}/{last_csha}.report.md"
+        raw = await self.code_executor.read_workspace_file(snapshot_path)
+        markdown = raw.decode("utf-8")
+        n = markdown.count(old_str)
+        if n == 0:
+            raise ValueError("edit_report: old_str not found in report markdown.")
+        if n > 1:
+            raise ValueError(
+                "edit_report: old_str occurs multiple times; provide a more specific target."
+            )
+        new_markdown = markdown.replace(old_str, new_str, 1)
+
+        # Re-extract embedded refs so any newly-introduced
+        # ``.ockham/...`` paths participate in this snapshot's lineage.
+        new_embedded = embedded_refs_from_markdown(new_markdown)
+        await self._validate_refs_resolve(new_embedded)
+
+        # Pull title / description / tags / notes / live_name from the
+        # current curation. These are editable via PATCH /curation but
+        # ARE NOT part of edit_report's surface — this tool only edits
+        # the markdown body.
+        cur_path = f".ockham/reports/{target.logical_id}/curation.json"
+        try:
+            raw_cur = await self.code_executor.read_workspace_file(cur_path)
+            curation = json.loads(raw_cur.decode("utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+            curation = {}
+
+        return Report(
+            logical_id=target.logical_id,  # preserve identity — this is a revision
+            title=str(curation.get("title", "") or ""),
+            description=str(curation.get("description", "") or ""),
+            notes=list(curation.get("notes") or []),
+            tags=list(curation.get("tags") or []),
+            markdown=new_markdown,
+            embedded_refs=new_embedded,
+            live_name=curation.get("live_name") if isinstance(curation.get("live_name"), str) else None,
+        )
+
+    @toolmethod(
+        name="refresh",
+        description=(
+            "Re-derive an existing dataset / chart / report from latest upstream. Walks lineage, "
+            "re-runs producing notebooks, appends a new content_sha under the same logical_id. "
+            "Idempotent when no upstream byte changed. Use this for 'update with latest data' — "
+            "see prompt rule 4."
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "ref": {
+                    **_ARTIFACT_REF_SCHEMA,
+                    "description": (
+                        "ArtifactRef to refresh (kind='dataset' | 'chart' | 'report'). "
+                        "For notebook re-runs, use return_notebook(execute=true)."
+                    ),
+                },
+            },
+            "required": ["ref"],
+            "additionalProperties": False,
+        },
+        tool_type="return",
+        ui_message="Refreshing",
+    )
+    async def refresh(
+        self,
+        *,
+        context: AgentContext,  # noqa: ARG002 — kept for tool signature symmetry
+        ref: dict[str, Any],
+    ) -> Dataset | Chart | Report:
+        try:
+            target_ref = ArtifactRef.from_dict(ref)
+        except (KeyError, ValueError) as e:
+            raise ValueError(f"refresh: malformed ref ({e}).") from e
+
+        new_ref = await refresh_artifact(target_ref, executor=self.code_executor)
+
+        # Read the freshly persisted snapshot back into a typed model so
+        # the streaming layer can emit the standard pill card and
+        # idempotently re-persist (same content_sha → same path → no-op).
+        blob = await self.code_executor.read_workspace_file(new_ref.workspace_file_path)
+        if new_ref.kind == "dataset":
+            from parsimony_agents.dataset_io import deserialize_dataset
+
+            _result, dataset = deserialize_dataset(blob)
+            payload = await self.code_executor.get(dataset.variable_name)
+            if payload is None:
+                raise ValueError(
+                    f"refresh: dataset variable {dataset.variable_name!r} "
+                    "is not in the kernel after refresh."
+                )
+            return dataset.with_payload(payload)
+        if new_ref.kind == "chart":
+            from parsimony_agents.chart_io import deserialize_chart
+
+            chart, _spec = deserialize_chart(blob)
+            payload = await self.code_executor.get(chart.variable_name)
+            if payload is None:
+                raise ValueError(
+                    f"refresh: chart variable {chart.variable_name!r} is "
+                    "not in the kernel after refresh."
+                )
+            return chart.with_payload(payload)
+        if new_ref.kind == "report":
+            # Reports have no kernel payload — read curation + bytes
+            # directly. The streaming layer's persist path handles the
+            # rest idempotently.
+            return await self._reload_report_for_refresh(new_ref, blob)
+        raise AssertionError(f"refresh: unreachable kind {new_ref.kind!r}")
+
+    async def _reload_report_for_refresh(
+        self, ref: ArtifactRef, blob: bytes
+    ) -> Report:
+        """Reconstruct a :class:`Report` model from disk after refresh.
+
+        Reports have no in-kernel payload — snapshot bytes ARE the
+        markdown source. Curation lives in the sibling ``curation.json``;
+        embedded refs are recovered by parsing the markdown's
+        ``.ockham/<kind>s/<lid>/<csha>.<ext>`` paths (the same shape
+        :func:`refresh.embedded_refs_from_markdown` produces).
+        """
+        from parsimony_agents.refresh import embedded_refs_from_markdown
+
+        markdown = blob.decode("utf-8")
+        cur_path = f".ockham/reports/{ref.logical_id}/curation.json"
+        try:
+            raw_cur = await self.code_executor.read_workspace_file(cur_path)
+            cur = json.loads(raw_cur.decode("utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+            cur = {}
+        return Report(
+            logical_id=ref.logical_id,
+            content_sha=ref.content_sha,
+            title=cur.get("title", "") or "",
+            description=cur.get("description", "") or "",
+            tags=list(cur.get("tags") or []),
+            notes=list(cur.get("notes") or []),
+            live_name=cur.get("live_name"),
+            markdown=markdown,
+            embedded_refs=embedded_refs_from_markdown(markdown),
+        )
 
     @staticmethod
     def _require_plain_variable_name(*, value: str, parameter_name: str) -> str:
@@ -2479,49 +2734,20 @@ class Agent:
             )
         return normalized
 
-    async def _validate_return_dataset_refs(
-        self,
-        *,
-        context: AgentContext,
-        dataset_variable_name: str,
-        notebook_refs: list[str],
-    ) -> None:
-        if not notebook_refs:
-            out = await self.code_executor.get(dataset_variable_name)
-            if out is None:
-                raise ValueError(
-                    f"Variable '{dataset_variable_name}' is not in the kernel. "
-                    "When not using notebook_refs, the variable must exist in the current namespace."
-                )
-            return
+    async def _validate_refs_resolve(self, refs: list[ArtifactRef]) -> None:
+        """Each ref must resolve to bytes on disk.
 
-        for ref in notebook_refs:
+        Replaces the legacy substring-matching ``_validate_return_chart_refs``
+        with a single existence check at the snapshot store layer (§5.8 D).
+        """
+        for ref in refs:
             try:
-                await self.code_executor.read_workspace_file(ref)
+                await self.code_executor.read_workspace_file(ref.workspace_file_path)
             except FileNotFoundError as e:  # pragma: no cover
-                raise ValueError(f"Notebook file '{ref}' not found in the workspace.") from e
-            except Exception as e:  # pragma: no cover
-                raise ValueError(f"Could not read notebook file '{ref}': {e}") from e
-
-    async def _validate_return_chart_refs(
-        self,
-        *,
-        context: AgentContext,
-        source_dataset_variable_name: str,
-        chart_variable_name: str,
-        chart_notebook_ref: str,
-    ) -> None:
-        _ = context
-        try:
-            raw = await self.code_executor.read_workspace_file(chart_notebook_ref)
-        except Exception as e:  # pragma: no cover
-            raise ValueError(f"Chart notebook '{chart_notebook_ref}' not found or unreadable: {e}") from e
-        code = deserialize_notebook(raw, path=chart_notebook_ref).code
-        if source_dataset_variable_name not in code:
-            raise ValueError(
-                f"Chart notebook '{chart_notebook_ref}' should reference the dataset variable '{source_dataset_variable_name}'."
-            )
-        if chart_variable_name not in code:
-            raise ValueError(
-                f"Chart notebook '{chart_notebook_ref}' should define chart variable '{chart_variable_name}'."
-            )
+                raise ValueError(
+                    f"Ref {ref.kind}:{ref.logical_id}:{ref.content_sha} does not resolve "
+                    f"({ref.workspace_file_path!r} not found). Copy each {{kind, logical_id, "
+                    "content_sha}} field verbatim from <notebook_ref/> in the most recent tool "
+                    "result, <data_object_ref/> in <fetch_log>, or <artifact/> in "
+                    "session_state.workspace_artifacts."
+                ) from e

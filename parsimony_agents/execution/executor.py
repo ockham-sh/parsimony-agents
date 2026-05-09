@@ -245,7 +245,8 @@ class CodeExecutor(BaseCodeExecutor):
         file_session_materializer: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         # Single async gate: never hold a threading lock across await (would deadlock
-        # the event loop if a second coroutine contends, e.g. two run_notebook tools).
+        # the event loop if a second coroutine contends, e.g. two concurrent
+        # return_notebook(execute=True) tools).
         self._exec_lock = asyncio.Lock()
         self.cwd = cwd
         self._output_factory = output_factory
@@ -293,12 +294,14 @@ class CodeExecutor(BaseCodeExecutor):
         provenance, head/tail samples) for each connector call so the
         agent can reason about its own data lineage. Each fetch is also
         mirrored to a content-addressed file under
-        ``<cwd>/.ockham/data_objects/<sha>.parquet`` (path is identity);
-        the resulting workspace-relative path is stamped on the entry as
-        ``workspace_path`` and surfaces as a clickable artifact in the
-        notebook viewer. Curated outputs of the ``return_dataset`` /
-        ``return_chart`` tools live under ``.ockham/cards/`` and embed
-        their own metadata in the open-format container.
+        ``<cwd>/.ockham/data_objects/<logical_id>/<content_sha>.parquet``
+        (with a sibling ``log.jsonl`` recording each refresh). The
+        persister returns an :class:`ArtifactRef` (kind ``"data_object"``)
+        which is stamped on the entry as ``data_object_ref`` and
+        surfaces as a clickable artifact in the notebook viewer.
+        Curated outputs of the ``return_dataset`` / ``return_chart``
+        tools live under ``.ockham/<kind>s/<logical_id>/<content_sha>.<ext>``
+        with their own curation sidecars and snapshot logs.
         """
         if not self._connectors:
             return

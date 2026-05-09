@@ -123,7 +123,7 @@ def _dataset_dataframe(artifact: Any) -> pd.DataFrame | None:
 
 
 def _collect_fetch_entries(result: AgentResult) -> list[FetchLogEntry]:
-    """Extract deduplicated fetch-log entries from ``run_notebook`` tool results."""
+    """Extract deduplicated fetch-log entries from notebook-execute tool results."""
     entries: list[FetchLogEntry] = []
     seen: set[tuple] = set()
     for event in result.events:

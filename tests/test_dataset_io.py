@@ -31,6 +31,11 @@ from parsimony.result import Provenance, Result
 from parsimony_agents import Dataset, deserialize_dataset, serialize_dataset
 from parsimony_agents.dataset_io import CURATION_META_KEY, write_dataset_bytes
 from parsimony_agents.execution.outputs import DataFrameObject
+from parsimony_agents.identity import ArtifactRef
+
+
+def _nb_ref(sha: str = "nb-csha") -> ArtifactRef:
+    return ArtifactRef(kind="notebook", logical_id=sha, content_sha=sha)
 
 
 @pytest.fixture
@@ -52,9 +57,9 @@ def test_write_dataset_bytes_roundtrips(sample_df: pd.DataFrame, tmp_path: Path)
         title="Demo",
         description="Curation round-trip",
         tags=["demo", "test"],
-        notebook_refs=["notebooks/main.py"],
-        artifact_id="abc123",
-        version=2,
+        notebook_refs=[_nb_ref()],
+        logical_id="lid-abc",
+        content_sha="csha-init",
     )
     blob = write_dataset_bytes(dataset, _payload(sample_df, tmp_path))
 
@@ -66,9 +71,8 @@ def test_write_dataset_bytes_roundtrips(sample_df: pd.DataFrame, tmp_path: Path)
     assert recovered.title == "Demo"
     assert recovered.description == "Curation round-trip"
     assert recovered.tags == ["demo", "test"]
-    assert recovered.notebook_refs == ["notebooks/main.py"]
-    assert recovered.artifact_id == "abc123"
-    assert recovered.version == 2
+    assert recovered.notebook_refs == [_nb_ref()]
+    assert recovered.logical_id == "lid-abc"
 
 
 def test_serialize_dataset_alias_matches_write_dataset_bytes(
@@ -96,8 +100,8 @@ def test_deserialize_handles_vanilla_parquet(sample_df: pd.DataFrame, tmp_path: 
     assert dataset.title == ""
     assert dataset.description == ""
     assert dataset.tags == []
-    assert dataset.sources == []
-    assert dataset.artifact_id != ""
+    assert dataset.source_refs == []
+    assert dataset.notebook_refs == []
 
 
 def test_deserialize_returns_empty_dataset_for_vanilla_parquet(
@@ -111,9 +115,24 @@ def test_deserialize_returns_empty_dataset_for_vanilla_parquet(
     r.to_parquet(target)
 
     result, dataset = deserialize_dataset(target.read_bytes())
-    assert dataset.sources == []
+    assert dataset.source_refs == []
     assert result.provenance.source == "fred"
     assert result.provenance.params == {"series_id": "GDPC1"}
+
+
+def test_write_dataset_bytes_persists_variable_name(
+    sample_df: pd.DataFrame, tmp_path: Path
+) -> None:
+    """R2: ``variable_name`` survives the parquet round-trip via embedded curation."""
+    dataset = Dataset(
+        title="Demo",
+        notebook_refs=[_nb_ref()],
+        logical_id="lid-vn",
+        variable_name="gdp_df",
+    )
+    blob = write_dataset_bytes(dataset, _payload(sample_df, tmp_path))
+    _, recovered = deserialize_dataset(blob)
+    assert recovered.variable_name == "gdp_df"
 
 
 def test_dataset_save_via_typed_api(sample_df: pd.DataFrame, tmp_path: Path) -> None:
@@ -127,7 +146,6 @@ def test_dataset_save_via_typed_api(sample_df: pd.DataFrame, tmp_path: Path) -> 
     _, recovered = deserialize_dataset(target.read_bytes())
     assert recovered.title == "Typed"
     assert recovered.tags == ["typed"]
-    assert recovered.artifact_id == dataset.artifact_id
 
 
 def test_dataset_save_rejects_unattached_payload(tmp_path: Path) -> None:

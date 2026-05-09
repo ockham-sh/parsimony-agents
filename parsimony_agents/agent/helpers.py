@@ -6,10 +6,11 @@ import re
 from collections.abc import Mapping
 
 from parsimony.connector import Connectors
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from parsimony_agents.agent.outputs import SystemToolOutput
 from parsimony_agents.execution.helpers import normalize_connector_bundles
+from parsimony_agents.identity import ArtifactRef
 from parsimony_agents.messages import Text
 
 _CELL_REF_RE = re.compile(r"^(\w+)\[(\d+),([^\]]+)\]$")
@@ -35,6 +36,14 @@ class TurnState(BaseModel):
 
     stopped: bool = False
     final_response_started: bool = False
+    #: Refs minted (or advanced) by ``return_*`` / ``edit_*`` / ``refresh``
+    #: calls during THIS turn. Fused with ``session_state.workspace_artifacts``
+    #: each iteration to render a single, always-current ``<turn_artifacts>``
+    #: block — so the agent never has to scan back through tool-message
+    #: history to find a freshly-published ref. Bounded by ``max_iterations``.
+    minted_refs: list[ArtifactRef] = Field(default_factory=list)
+
+    model_config = {"arbitrary_types_allowed": True}
 
 
 def render_connector_catalog(

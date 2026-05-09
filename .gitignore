@@ -21,6 +21,7 @@ ENV/
 htmlcov/
 .tox/
 .nox/
+MagicMock/
 
 # IDE
 .idea/

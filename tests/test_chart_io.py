@@ -1,17 +1,13 @@
 """Tests for :mod:`parsimony_agents.chart_io`.
 
-Validates the contract: ``.vl.json`` files are valid Vega-Lite, curation
-metadata lives under ``spec.usermeta.parsimony_agents``, and round-trips
-via the typed ``Chart.save`` / ``read_chart`` API.
+Validates the codec contract: ``.vl.json`` files are valid Vega-Lite,
+curation metadata lives under ``spec.usermeta.parsimony_agents``, and
+round-trips via the typed ``Chart.save`` / ``read_chart`` API.
 
-Note: the durable on-disk shape *is* the :class:`Chart` Pydantic model;
-there is no separate ``Curation`` type. ``read_chart`` /
-``deserialize_chart`` return a ``(Chart, spec)`` pair so callers get both
-the curation envelope and the plain Vega-Lite spec without translation.
-
-Payload contract: every codec call in production receives a
-:class:`FigureObject` (the executor's wrapper). Tests follow the same
-contract — there is no fallback for raw dicts or Altair charts.
+Note: the durable on-disk shape *is* the :class:`Chart` Pydantic model.
+``read_chart`` / ``deserialize_chart`` return a ``(Chart, spec)`` pair
+so callers get both the curation envelope and the plain Vega-Lite spec
+without translation.
 """
 
 from __future__ import annotations
@@ -22,7 +18,6 @@ from pathlib import Path
 import altair as alt
 import pandas as pd
 import pytest
-from parsimony.result import Provenance
 
 from parsimony_agents import (
     Chart,
@@ -32,6 +27,7 @@ from parsimony_agents import (
 )
 from parsimony_agents.chart_io import CURATION_META_KEY, write_chart_bytes
 from parsimony_agents.execution.outputs import FigureObject
+from parsimony_agents.identity import ArtifactRef
 
 
 @pytest.fixture
@@ -53,13 +49,21 @@ def sample_alt_chart() -> alt.Chart:
     return alt.Chart(df).mark_line().encode(x="x", y="y")
 
 
+def _nb_ref(sha: str = "nb-csha") -> ArtifactRef:
+    return ArtifactRef(kind="notebook", logical_id=sha, content_sha=sha)
+
+
+def _ds_ref(lid: str = "ds-lid", csha: str = "ds-csha") -> ArtifactRef:
+    return ArtifactRef(kind="dataset", logical_id=lid, content_sha=csha)
+
+
 def test_chart_save_from_dict_roundtrips(sample_spec: dict, tmp_path: Path) -> None:
     chart = Chart(
         title="Demo",
         description="Bar chart",
         notes=["interesting"],
-        source_dataset_path=".ockham/cards/ds-123/v2/demo.parquet",
-        chart_notebook_ref="notebooks/main.py",
+        notebook_ref=_nb_ref(),
+        source_dataset_refs=[_ds_ref()],
     ).with_payload(FigureObject(value=sample_spec))
 
     target = tmp_path / "charts" / "demo.vl.json"
@@ -69,13 +73,34 @@ def test_chart_save_from_dict_roundtrips(sample_spec: dict, tmp_path: Path) -> N
     assert recovered.title == "Demo"
     assert recovered.description == "Bar chart"
     assert recovered.notes == ["interesting"]
-    assert recovered.source_dataset_path == ".ockham/cards/ds-123/v2/demo.parquet"
-    assert recovered.chart_notebook_ref == "notebooks/main.py"
+    assert recovered.notebook_ref == _nb_ref()
+    assert recovered.source_dataset_refs == [_ds_ref()]
     assert spec["mark"] == "bar"
 
 
+def test_write_chart_bytes_persists_variable_name(
+    sample_spec: dict, tmp_path: Path
+) -> None:
+    """R2: ``variable_name`` survives the vl.json round-trip via ``usermeta.parsimony_agents``."""
+    chart = Chart(
+        title="Trend",
+        notebook_ref=_nb_ref(),
+        source_dataset_refs=[_ds_ref()],
+        variable_name="trend_chart",
+    )
+    target = tmp_path / "trend.vl.json"
+    chart.with_payload(FigureObject(value=sample_spec)).save(target)
+    recovered, spec = read_chart(target)
+    assert recovered.variable_name == "trend_chart"
+    # Also visible in the embedded usermeta block — survives transport
+    # outside the workspace.
+    assert spec["usermeta"][CURATION_META_KEY]["variable_name"] == "trend_chart"
+
+
 def test_chart_save_from_altair(sample_alt_chart: alt.Chart, tmp_path: Path) -> None:
-    chart = Chart(title="Lines").with_payload(FigureObject(value=sample_alt_chart))
+    chart = Chart(title="Lines", notebook_ref=_nb_ref()).with_payload(
+        FigureObject(value=sample_alt_chart)
+    )
 
     target = tmp_path / "alt.vl.json"
     chart.save(target)
@@ -91,8 +116,7 @@ def test_serialize_chart_uses_vega_lite_format(sample_spec: dict) -> None:
     chart = Chart(
         title="Stream",
         description="Streaming",
-        source_dataset_path=".ockham/cards/ds-stream/v1/stream.parquet",
-        chart_notebook_ref="notebooks/main.py",
+        notebook_ref=_nb_ref(),
     )
 
     blob = serialize_chart(chart, fig)
@@ -102,7 +126,7 @@ def test_serialize_chart_uses_vega_lite_format(sample_spec: dict) -> None:
     assert "$schema" in spec
     curation_meta = spec["usermeta"][CURATION_META_KEY]
     assert curation_meta["title"] == "Stream"
-    assert curation_meta["chart_notebook_ref"] == "notebooks/main.py"
+    assert curation_meta["notebook_ref"]["content_sha"] == "nb-csha"
     assert curation_meta["schema_version"] >= 1
 
 
@@ -114,7 +138,7 @@ def test_deserialize_handles_vanilla_vegalite(sample_spec: dict, tmp_path: Path)
 
     chart, spec = deserialize_chart(target.read_bytes())
     assert chart.title == ""
-    assert chart.artifact_id != ""  # populated by validator
+    assert chart.notebook_ref is None  # not yet attributed
     assert spec["mark"] == "bar"
 
 
@@ -134,7 +158,9 @@ def test_chart_save_preserves_pre_existing_usermeta(sample_spec: dict, tmp_path:
     """Other usermeta keys must be preserved alongside the parsimony_agents namespace."""
 
     spec = {**sample_spec, "usermeta": {"editor": "vega-editor"}}
-    chart = Chart(title="Co-existence").with_payload(FigureObject(value=spec))
+    chart = Chart(title="Co-existence", notebook_ref=_nb_ref()).with_payload(
+        FigureObject(value=spec)
+    )
     target = tmp_path / "demo.vl.json"
     chart.save(target)
 
@@ -169,14 +195,16 @@ def test_deserialize_chart_ignores_unknown_fields(
         "usermeta": {
             CURATION_META_KEY: {
                 "type": "chart",
-                "artifact_id": "chart-x",
-                "version": 1,
+                "logical_id": "lid-x",
+                "content_sha": "csha-x",
                 "title": "X",
                 "description": "",
                 "notes": [],
                 "future_field_we_dont_know_yet": "ok",
-                "chart_notebook_ref": "notebooks/x.py",
-                "schema_version": 1,
+                "notebook_ref": _nb_ref().to_dict(),
+                "source_dataset_refs": [],
+                "source_refs": [],
+                "schema_version": 2,
             }
         },
     }
@@ -185,5 +213,5 @@ def test_deserialize_chart_ignores_unknown_fields(
 
     chart, spec = deserialize_chart(target.read_bytes())
     assert chart.title == "X"
-    assert chart.chart_notebook_ref == "notebooks/x.py"
+    assert chart.notebook_ref == _nb_ref()
     assert spec["mark"] == "bar"

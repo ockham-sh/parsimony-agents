@@ -9,15 +9,17 @@ log is consumed by the executor to produce
 Optional persister
 ------------------
 When *persist_fn* is supplied, each fetch result is also written to a
-content-addressed file under ``<workspace>/.ockham/data_objects/<sha>.parquet``
-(see :mod:`parsimony_agents.execution.data_objects`). The persister
-returns the workspace-relative path, which is stamped on the entry as
-``workspace_path``. Path is identity: that one string is the only handle
-the rest of the system needs to render the data object as a clickable
-artifact (notebook viewer pill, MetadataRenderer link, etc).
+content-addressed file under
+``.ockham/data_objects/<logical_id>/<content_sha>.parquet`` (see
+:mod:`parsimony_agents.execution.data_objects`). The persister returns
+``(ref, version)`` — the typed :class:`ArtifactRef` and the 1-based
+position of this ``content_sha`` in the data_object's ``log.jsonl``.
+Both ride the entry: ``data_object_ref`` for lineage, ``version`` for
+the user-facing v{N} indicator that the connector produced
+fresh/refreshed data.
 
 When *persist_fn* is ``None`` (default), fetch logs remain observational
-metadata only.
+metadata only — no ref, no version.
 """
 
 from __future__ import annotations
@@ -29,7 +31,12 @@ from typing import Any
 
 import pandas as pd
 
-PersistFn = Callable[[Any], Awaitable[str | None] | str | None]
+from parsimony_agents.identity import ArtifactRef
+
+PersistFn = Callable[
+    [Any],
+    Awaitable[tuple[ArtifactRef, int] | None] | tuple[ArtifactRef, int] | None,
+]
 
 
 def make_fetch_logger(
@@ -38,8 +45,8 @@ def make_fetch_logger(
     """Create a fetch-log list and an async callback that appends to it.
 
     When *persist_fn* is supplied, it is invoked with each ``Result`` and
-    its return value (sync or async) is recorded on the entry as
-    ``workspace_path`` and stamped onto ``provenance.data_object_path``.
+    its ``(ref, version)`` return is split onto the entry as
+    ``data_object_ref`` and ``version`` respectively.
     """
 
     fetch_log: list[dict[str, Any]] = []
@@ -64,13 +71,11 @@ def make_fetch_logger(
             entry["tail"] = None
         if persist_fn is not None:
             ret = persist_fn(result)
-            workspace_path = await ret if inspect.isawaitable(ret) else ret
-            entry["workspace_path"] = workspace_path
-            if workspace_path is not None:
-                try:
-                    result.provenance.data_object_path = workspace_path
-                except Exception:
-                    pass
+            value = await ret if inspect.isawaitable(ret) else ret
+            if value is not None:
+                ref, version = value
+                entry["data_object_ref"] = ref
+                entry["version"] = version
         fetch_log.append(entry)
 
     return fetch_log, _log_fetch

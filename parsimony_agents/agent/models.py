@@ -1,8 +1,14 @@
-"""Agent session state and message models (no FastAPI / SSE dependencies)."""
+"""Agent session state and message models (no FastAPI / SSE dependencies).
+
+The legacy ``ReturnedDatasetState`` / ``ReturnedChartState`` slots have
+been removed (§5.8 item A): with content-addressed identity,
+match-and-reuse is automatic — the same logical inputs always hash to
+the same path, so no per-session bookkeeping is required to detect a
+re-publish.
+"""
 
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import uuid4
@@ -12,70 +18,16 @@ import numpy
 import pandas
 import scipy
 import statsmodels
-from pydantic import BaseModel, Field, model_validator
+from pydantic import Field, model_validator
 
 from parsimony_agents.agent.outputs import SystemToolMessage, SystemToolOutput, UtilityToolOutput
-from parsimony_agents.artifacts import Chart, Dataset
+from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.execution import KernelOutput
+from parsimony_agents.identity import ArtifactRef
 from parsimony_agents.messages import Message, MessageContent, Reasoning, Text
 from parsimony_agents.notebook import Script
 
 from parsimony_agents.agent.session_state import SessionState
-
-
-class ReturnedDatasetState(BaseModel):
-    """Session-only bookkeeping for a dataset the agent has returned.
-
-    Holds the executor variable name and a snapshot of the curation envelope. Does
-    not own a workspace path: snapshots are framework-managed under
-    ``.ockham/cards/`` keyed by ``artifact_id`` + ``version``.
-    """
-
-    artifact_id: str = ""
-    version: int = 1
-    dataset_variable_name: str
-    title: str | None = None
-    description: str = ""
-    notes: list[str] = Field(default_factory=list)
-    source_dataset_variable_names: list[str] = Field(default_factory=list)
-    notebook_refs: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def populate_identity(self) -> ReturnedDatasetState:
-        if not self.artifact_id:
-            self.artifact_id = str(uuid.uuid4())
-        if self.version < 1:
-            self.version = 1
-        return self
-
-
-class ReturnedChartState(BaseModel):
-    """Session-only bookkeeping for a chart the agent has returned.
-
-    Holds the executor variable names (chart + source dataset) and a
-    snapshot of the curation envelope. When a matching dataset was returned
-    in the same session, ``source_dataset_path`` is the workspace-relative
-    dataset snapshot (see :func:`parsimony_agents.artifacts.snapshot_path`);
-    for chart-only deliverables it may be empty.
-    """
-
-    artifact_id: str = ""
-    version: int = 1
-    title: str = ""
-    source_dataset_path: str = ""
-    source_dataset_variable_name: str
-    chart_variable_name: str
-    chart_notebook_ref: str | None = None
-    description: str = ""
-    notes: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def populate_identity(self) -> ReturnedChartState:
-        if not self.artifact_id:
-            self.artifact_id = str(uuid.uuid4())
-        if self.version < 1:
-            self.version = 1
-        return self
 
 
 def _build_workspace_tree(files: list[tuple[str, int]]) -> str:
@@ -147,6 +99,11 @@ class AgentContextSnapshot(MessageContent):
     connectors_catalog: str = ""
     #: Optional kernel + workspace artifact hints (filled by the host in workspace mode).
     session_state: SessionState | None = None
+    #: Refs minted by ``return_*`` / ``edit_*`` / ``refresh`` during the
+    #: current turn (populated from ``TurnState.minted_refs`` each iteration).
+    #: Fused with ``session_state.workspace_artifacts`` to render a single
+    #: always-current ``<turn_artifacts>`` block.
+    minted_refs: list[ArtifactRef] = Field(default_factory=list)
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
         chunks: list[dict[str, Any]] = []
@@ -215,7 +172,7 @@ class AgentContextSnapshot(MessageContent):
             chunks.append(
                 {
                     "type": "text",
-                    "text": self.session_state.to_llm_text(),
+                    "text": self.session_state.to_llm_text(minted_refs=self.minted_refs or None),
                 }
             )
 
@@ -230,7 +187,7 @@ class AgentContextSnapshot(MessageContent):
 
 
 AgentMessageContent = Annotated[
-    Chart | Dataset | Script | AgentContextSnapshot | UtilityToolOutput | SystemToolOutput | SystemToolMessage | KernelOutput | Reasoning | Text | str | list[dict[str, Any]],
+    Chart | Dataset | Report | Script | AgentContextSnapshot | UtilityToolOutput | SystemToolOutput | SystemToolMessage | KernelOutput | Reasoning | Text | str | list[dict[str, Any]],
     Field(union_mode="smart"),
 ]
 
@@ -242,12 +199,6 @@ class AgentMessage(Message):
 class AgentContext(MessageContent):
     session_id: str
     messages: list[AgentMessage] = Field(default_factory=list)
-    returned_datasets: dict[str, ReturnedDatasetState] = Field(default_factory=dict)
-    returned_charts: dict[str, ReturnedChartState] = Field(default_factory=dict)
-    active_returned_dataset_id: str | None = Field(default=None)
-    active_returned_chart_id: str | None = Field(default=None)
-    returned_dataset: ReturnedDatasetState | None = Field(default=None)
-    returned_chart: ReturnedChartState | None = Field(default=None)
 
     # Session-scoped services (runtime only, not serialized). Runtime types: FileStore, SessionVectorStore, SessionKeywordStore.
     files: Any | None = Field(default=None, exclude=True)
@@ -258,47 +209,24 @@ class AgentContext(MessageContent):
     files_list: list[tuple[str, int]] = Field(default_factory=list)
     #: Filled by the host before :meth:`to_snapshot` in workspace mode.
     session_state: SessionState | None = None
+    #: Resolves a notebook working-copy path → its current ``logical_id``.
+    #: The host injects this so the agent's emitted refs honour user-side
+    #: renames: a notebook renamed in the UI keeps its original logical_id
+    #: even when ``return_notebook`` later targets the new path. The resolver
+    #: scans existing curations (no allocation, no flock — slug is
+    #: deterministic from the first creation path).
+    #:
+    #: When ``None`` (parsimony-agents standalone, no workspace host),
+    #: the agent falls back to deriving logical_id from the path directly
+    #: (``notebook_logical_id``).
+    notebook_logical_id_resolver: Any | None = Field(default=None, exclude=True)
 
-    def get_returned_dataset(self, artifact_id: str | None = None) -> ReturnedDatasetState | None:
-        target_id = artifact_id or self.active_returned_dataset_id
-        if target_id and target_id in self.returned_datasets:
-            return self.returned_datasets[target_id]
-        return self.returned_dataset
-
-    def set_returned_dataset(self, state: ReturnedDatasetState) -> ReturnedDatasetState:
-        self.returned_datasets[state.artifact_id] = state
-        self.active_returned_dataset_id = state.artifact_id
-        self.returned_dataset = state
-        return state
-
-    def get_returned_chart(self, artifact_id: str | None = None) -> ReturnedChartState | None:
-        target_id = artifact_id or self.active_returned_chart_id
-        if target_id and target_id in self.returned_charts:
-            return self.returned_charts[target_id]
-        return self.returned_chart
-
-    def set_returned_chart(self, state: ReturnedChartState) -> ReturnedChartState:
-        self.returned_charts[state.artifact_id] = state
-        self.active_returned_chart_id = state.artifact_id
-        self.returned_chart = state
-        return state
-
-    @model_validator(mode="after")
-    def sync_returned_artifacts(self) -> AgentContext:
-        if self.returned_dataset is not None:
-            self.returned_datasets[self.returned_dataset.artifact_id] = self.returned_dataset
-            self.active_returned_dataset_id = self.returned_dataset.artifact_id
-        elif self.active_returned_dataset_id and self.active_returned_dataset_id in self.returned_datasets:
-            self.returned_dataset = self.returned_datasets[self.active_returned_dataset_id]
-
-        if self.returned_chart is not None:
-            self.returned_charts[self.returned_chart.artifact_id] = self.returned_chart
-            self.active_returned_chart_id = self.returned_chart.artifact_id
-        elif self.active_returned_chart_id and self.active_returned_chart_id in self.returned_charts:
-            self.returned_chart = self.returned_charts[self.active_returned_chart_id]
-        return self
-
-    async def to_snapshot(self, *, connectors: Any = None) -> AgentContextSnapshot:
+    async def to_snapshot(
+        self,
+        *,
+        connectors: Any = None,
+        minted_refs: list[ArtifactRef] | None = None,
+    ) -> AgentContextSnapshot:
         from parsimony_agents.agent.helpers import render_connector_catalog
 
         # Prefer the injected file list (workspace mode); fall back to FileStore for
@@ -315,6 +243,7 @@ class AgentContext(MessageContent):
             files_list=files_list,
             connectors_catalog=render_connector_catalog(connectors),
             session_state=self.session_state,
+            minted_refs=list(minted_refs or []),
         )
 
     def _get_ref_name(self, key: str = str(uuid4())[:8], subdir: str = "artifacts") -> str:
@@ -326,7 +255,5 @@ __all__ = [
     "AgentContextSnapshot",
     "AgentMessage",
     "AgentMessageContent",
-    "ReturnedChartState",
-    "ReturnedDatasetState",
     "SessionState",
 ]

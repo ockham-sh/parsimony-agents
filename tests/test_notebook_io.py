@@ -172,3 +172,86 @@ def _flatten_step_text(steps: list) -> list[str]:
             out.append(st.text)
         out.extend(_flatten_step_text(st.children))
     return out
+
+
+# ----------------------------------------------------------------------
+# read_latest_notebook (executor-mediated, content-addressed)
+# ----------------------------------------------------------------------
+
+
+class _StubExecutor:
+    """Minimal in-memory FS executor for read_latest_notebook tests."""
+
+    def __init__(self, files: dict[str, bytes] | None = None) -> None:
+        self._files: dict[str, bytes] = dict(files or {})
+
+    async def read_workspace_file(self, path: str) -> bytes:
+        if path not in self._files:
+            raise FileNotFoundError(path)
+        return self._files[path]
+
+
+@pytest.mark.asyncio
+async def test_read_latest_notebook_resolves_from_log() -> None:
+    """Returns latest snapshot bytes via the log's last content_sha."""
+    from parsimony_agents.notebook_io import read_latest_notebook
+
+    csha_old = "a" * 64
+    csha_new = "b" * 64
+    files = {
+        f".ockham/notebooks/foo/log.jsonl": (
+            f'{{"ts": "t1", "content_sha": "{csha_old}"}}\n'
+            f'{{"ts": "t2", "content_sha": "{csha_new}"}}\n'
+        ).encode("utf-8"),
+        f".ockham/notebooks/foo/{csha_new}.py": b"x = 2\n",
+        f".ockham/notebooks/foo/{csha_old}.py": b"x = 1\n",
+    }
+    executor = _StubExecutor(files)
+    raw, csha = await read_latest_notebook(executor, logical_id="foo")
+    assert csha == csha_new
+    assert raw == b"x = 2\n"
+
+
+@pytest.mark.asyncio
+async def test_read_latest_notebook_missing_log_raises() -> None:
+    """No ``log.jsonl`` for this logical_id → ``FileNotFoundError``."""
+    from parsimony_agents.notebook_io import read_latest_notebook
+
+    executor = _StubExecutor()
+    with pytest.raises(FileNotFoundError):
+        await read_latest_notebook(executor, logical_id="ghost")
+
+
+@pytest.mark.asyncio
+async def test_read_latest_notebook_empty_log_raises() -> None:
+    """Log present but with no usable ``content_sha`` entry → ``FileNotFoundError``."""
+    from parsimony_agents.notebook_io import read_latest_notebook
+
+    files = {
+        ".ockham/notebooks/foo/log.jsonl": b"\n   \n{}\n",
+    }
+    executor = _StubExecutor(files)
+    with pytest.raises(FileNotFoundError):
+        await read_latest_notebook(executor, logical_id="foo")
+
+
+@pytest.mark.asyncio
+async def test_read_latest_notebook_skips_malformed_lines() -> None:
+    """Garbled JSON lines are tolerated; the last well-formed entry wins."""
+    from parsimony_agents.notebook_io import read_latest_notebook
+
+    csha = "c" * 64
+    log_text = (
+        "not json at all\n"
+        '{"ts": "t1"}\n'  # missing content_sha
+        f'{{"ts": "t2", "content_sha": "{csha}"}}\n'
+        '{"ts": "t3", "content_sha": 42}\n'  # non-string content_sha
+    )
+    files = {
+        ".ockham/notebooks/foo/log.jsonl": log_text.encode("utf-8"),
+        f".ockham/notebooks/foo/{csha}.py": b"y = 1\n",
+    }
+    executor = _StubExecutor(files)
+    raw, got = await read_latest_notebook(executor, logical_id="foo")
+    assert got == csha
+    assert raw == b"y = 1\n"

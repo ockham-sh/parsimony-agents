@@ -20,8 +20,6 @@ from parsimony_agents.agent.models import (
     AgentContextSnapshot,
     AgentMessage,
     AgentMessageContent,
-    ReturnedChartState,
-    ReturnedDatasetState,
 )
 from parsimony_agents.agent.outputs import SystemToolMessage, SystemToolOutput, UtilityToolOutput
 from parsimony_agents.agent.tracing import trace_tool_execution
@@ -38,8 +36,6 @@ __all__ = [
     "Agent",
     "FileStore",
     "ReasoningDelta",
-    "ReturnedChartState",
-    "ReturnedDatasetState",
     "StateSnapshot",
     "SystemToolMessage",
     "SystemToolOutput",
