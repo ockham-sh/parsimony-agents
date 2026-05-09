@@ -16,8 +16,10 @@ from parsimony.result import Provenance
 from parsimony.transport import redact_sensitive_text
 from pydantic import BaseModel, Field, TypeAdapter, computed_field, field_serializer, field_validator
 
+from parsimony_agents.agent.xml_render import escape_attr
 from parsimony_agents.execution.dataframe_ref import DataframeRef
 from parsimony_agents.execution.pagination import TablePaginator, get_output_header
+from parsimony_agents.identity import ArtifactRef
 from parsimony_agents.messages import MessageContent
 from parsimony_agents.theme import PARSIMONY_FIGURE_HEIGHT, PARSIMONY_FIGURE_WIDTH
 from parsimony_agents.util import truncate_text
@@ -306,9 +308,19 @@ _kernel_output_type_adapter = TypeAdapter(KernelOutputType)
 class FetchLogEntry(BaseModel):
     """One recorded data operation from sandbox code.
 
-    ``provenance`` is the upstream identity; the remaining fields describe
-    the entry's shape (row count, columns, head/tail samples, snapshot path).
+    ``provenance`` is the upstream identity. ``data_object_ref`` pins
+    the persisted snapshot — typed (``kind="data_object"``) so downstream
+    code consumes a structured ref rather than a path string. ``version``
+    is the 1-based snapshot index for that data_object's ``log.jsonl``;
+    same ``v{N}`` semantic as datasets/charts/reports under the unified
+    versioning model — so the agent can tell ``"GDPC1 v1"`` (first
+    fetch) from ``"GDPC1 v3"`` (data refreshed twice in between).
+
+    Both ``data_object_ref`` and ``version`` are ``None`` when the
+    executor was configured without a persister.
     """
+
+    model_config = {"arbitrary_types_allowed": True}
 
     provenance: Provenance
     row_count: int
@@ -316,7 +328,8 @@ class FetchLogEntry(BaseModel):
     columns: list[dict[str, Any]]
     head: dict[str, Any] | None = None
     tail: dict[str, Any] | None = None
-    workspace_path: str | None = None
+    data_object_ref: ArtifactRef | None = None
+    version: int | None = None
 
     @property
     def source(self) -> str:
@@ -363,7 +376,72 @@ class KernelOutput(MessageContent):
                     "text": "\n---\n",
                 }
             )
+        nb_block = self._notebook_ref_to_llm()
+        if nb_block:
+            blocks.append({"type": "text", "text": nb_block})
+        fetch_block = self._fetch_log_to_llm()
+        if fetch_block:
+            blocks.append({"type": "text", "text": fetch_block})
         return blocks
+
+    def _notebook_ref_to_llm(self) -> str:
+        """Render ``metadata['notebook_ref']`` as a copy-pasteable XML block.
+
+        Set by code tools (``return_notebook`` / ``edit_notebook`` with
+        ``execute=True``) so the agent has the canonical
+        ``(kind, logical_id, content_sha)`` triplet for the notebook the
+        kernel just ran. The agent's ``return_dataset`` /
+        ``return_chart`` / ``return_report`` calls require this triplet
+        verbatim — without it the agent has to recompute the hash, which
+        diverges from the framework's whitespace-stripped canonical form.
+        """
+
+        from parsimony_agents.identity import ArtifactRef
+
+        raw = (self.metadata or {}).get("notebook_ref")
+        if not isinstance(raw, dict):
+            return ""
+        try:
+            ref = ArtifactRef.from_dict(raw)
+        except (KeyError, ValueError):
+            return ""
+        return ref.to_self_closing_tag("notebook_ref") + "\n"
+
+    def _fetch_log_to_llm(self) -> str:
+        """Render persisted fetches as a copy-pasteable ``<fetch_log>`` block.
+
+        Each entry surfaces its ``data_object_ref`` triplet
+        ``(kind, logical_id, content_sha)`` so the agent can pass it
+        directly as a ``source_ref`` in ``return_dataset`` /
+        ``return_chart`` / ``return_report`` without inventing or
+        recomputing hashes.
+        """
+
+        if not self.fetch_log:
+            return ""
+        lines: list[str] = ["<fetch_log>"]
+        for entry in self.fetch_log:
+            params_inline = escape_attr(
+                json.dumps(entry.params or {}, sort_keys=True, default=str)
+            )
+            v_attr = f' version="{escape_attr(entry.version)}"' if entry.version is not None else ""
+            lines.append(
+                f'  <entry source="{escape_attr(entry.source)}" params="{params_inline}"{v_attr}>'
+            )
+            if entry.data_object_ref is not None:
+                lines.append(
+                    "    " + entry.data_object_ref.to_self_closing_tag("data_object_ref")
+                )
+            lines.append("  </entry>")
+        lines.append("</fetch_log>")
+        lines.append(
+            "<note>Each &lt;data_object_ref&gt; above is the typed ArtifactRef "
+            "for the persisted fetch. To use one as a source_ref in "
+            "return_dataset / return_chart / return_report, copy "
+            "{kind, logical_id, content_sha} verbatim — do not invent "
+            "or recompute hashes.</note>"
+        )
+        return "\n".join(lines) + "\n"
 
     def to_frontend_dict(self):
         return {
@@ -375,7 +453,10 @@ class KernelOutput(MessageContent):
 
 
 def _fetch_entry_safe_dump(entry: FetchLogEntry) -> dict[str, Any]:
-    """Wire-safe projection: replace ``provenance`` with its ``safe_dump``."""
-    raw = entry.model_dump(mode="json")
+    """Wire-safe projection: replace ``provenance`` with its ``safe_dump`` and serialize ref."""
+    raw = entry.model_dump(mode="json", exclude={"data_object_ref"})
     raw["provenance"] = entry.provenance.safe_dump()
+    raw["data_object_ref"] = (
+        entry.data_object_ref.to_dict() if entry.data_object_ref is not None else None
+    )
     return raw

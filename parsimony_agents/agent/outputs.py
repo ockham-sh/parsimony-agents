@@ -17,6 +17,56 @@ class ArtifactLlmResult:
     kernel_output: KernelOutput | None = None
 
 
+class ArtifactNotFound(FileNotFoundError):
+    """Read of an artifact failed in a known, agent-actionable way.
+
+    Three flavours, distinguished by ``kind``:
+
+    - ``virtual_unresolved`` — the agent passed a virtual live-tree path
+      (``notebooks/<name>.py`` etc.) but no curation matches that
+      ``live_name``. The agent should list / inspect to discover what
+      exists rather than retrying with the same path.
+    - ``canonical_missing`` — the resolver found a curation for the
+      virtual path, but the latest snapshot bytes are missing on disk.
+      This is real corruption (or mid-turn freshness skew on a remote
+      executor) — the agent should not retry; the operator should
+      investigate.
+    - ``literal_missing`` — non-virtual path that simply does not exist;
+      kept for cases where ``read_artifact`` is called with a raw
+      ``.ockham/...`` path that has been stale-removed.
+
+    Hunt principle 9 (assume breach — information leakage): the
+    agent-visible payload exposes only the original virtual path the
+    caller supplied. Server-side logs may carry the canonical path / lid
+    / sibling-workspace hints; the message stored on the exception
+    (which the agent re-emits in its next prompt) must not.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        *,
+        kind: Literal["virtual_unresolved", "canonical_missing", "literal_missing"],
+    ) -> None:
+        # Compose the agent-visible message — virtual path only, no
+        # canonical bytes, no sibling workspaces, no "did you mean".
+        if kind == "virtual_unresolved":
+            msg = (
+                f"No artifact resolves to {path!r}. The current set of typed artifacts "
+                "is in <session_state>.<turn_artifacts>; copy a path from there."
+            )
+        elif kind == "canonical_missing":
+            msg = (
+                f"{path!r} has a curation entry but its latest snapshot bytes are "
+                "unavailable. Treat as a transient operator-side issue."
+            )
+        else:  # literal_missing
+            msg = f"{path!r} does not exist in the workspace."
+        super().__init__(msg)
+        self.path = path
+        self.kind = kind
+
+
 class UtilityToolOutput(MessageContent):
     """Tool output for utility tools (incl. temporary code). ``ui_message`` / ``ui_message_completed`` are the user-facing label in the terminal."""
 

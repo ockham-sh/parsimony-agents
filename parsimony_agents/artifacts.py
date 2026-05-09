@@ -1,105 +1,60 @@
-"""Published deliverables (datasets, charts) — typed curation primitives.
+"""Published deliverables (datasets, charts, reports) — content-addressed identity.
 
-Datasets and Charts are *durable curation metadata*: artifact_id, title,
-description, lineage. They are deliberately decoupled from the live payload
-and from any storage location.
+Datasets, Charts, and Reports follow the dual-identity model defined in
+``CONTENT_ADDRESSED_ARTIFACTS_PLAN.md`` §2.1:
+
+- ``logical_id`` — "Which artifact is this?" derived from inputs minus
+  their content. Stable across data refreshes. Computed from the
+  per-kind formulas in :mod:`parsimony_agents.identity` (§2.2).
+- ``content_sha`` — "What does it currently look like?" hash of the
+  rendered bytes. Computed at persist time by the framework, not the
+  agent.
+
+Each artifact carries lineage as :class:`~parsimony_agents.identity.ArtifactRef`
+values pointing at frozen snapshots of upstream artifacts:
+
+- Datasets reference notebooks (multi-notebook pipelines OK) and
+  upstream data_objects.
+- Charts reference one notebook + N source datasets. ``source_refs``
+  remains for the uncommon "chart from raw data_objects without an
+  intermediate dataset" case.
+- Reports reference any embedded artifact (dataset, chart, or other
+  report) — frozen by default so the report stays reproducible.
+
+Curation (title, description, tags, notes, live_name) is embedded in
+the artifact for in-process use and ALSO mirrored to a sidecar
+``.ockham/<kind>/<logical_id>/curation.json`` for editable, identity-stable
+renames. The embedded form is **frozen at persist time** (§5.9): a
+later rename of the title bumps the sidecar but never rewrites bytes.
 
 Payload contract (single, typed):
 
-- ``Dataset._payload: DataFrameObject | None`` — the executor wrapper for a
+- ``Dataset._payload: DataFrameObject | None`` — executor wrapper for a
   pandas DataFrame.
-- ``Chart._payload: FigureObject | None`` — the executor wrapper for an
+- ``Chart._payload: FigureObject | None`` — executor wrapper for an
   Altair chart or Vega-Lite spec.
-
-There is exactly one producer in production for each (the ``return_dataset``
-/ ``return_chart`` agent tools), and that producer always has the executor
-wrapper. Tests and ad-hoc scripts construct the same wrapper via
-``DataFrameObject.from_pandas(...)`` / ``FigureObject(value=...)``. There is
-no overload, no coercion table, and no ``Any`` payload anywhere in the
-pipeline — wrong payload type raises :class:`TypeError` at the call site,
-not five hops deep in the streaming dispatcher.
-
-Where the payload is written on disk is not the artifact's concern. The
-agent calls :meth:`Dataset.save` / :meth:`Chart.save` when it wants to
-publish to a user-visible workspace path (``data/foo.parquet``); the
-terminal writes a framework-managed snapshot under
-``.ockham/cards/<artifact_id>/v<n>/<title_slug>.<ext>`` to back the chat
-card. Both paths embed the same curation metadata via the open-format
-codecs.
-
-Why no ``Artifact[T]`` generic
-------------------------------
-The two artifact kinds share roughly fifteen lines of identity machinery
-(``artifact_id``/``version`` defaults + ``populate_identity`` validator,
-``with_payload`` + ``payload`` property), captured here in
-:class:`_ArtifactBase`. Their domain fields, on-disk codecs (Parquet vs
-``.vl.json``), and rendering metadata (``to_llm`` / ``to_frontend_dict``)
-are entirely disjoint, so a Pydantic ``Generic[T]`` payload abstraction
-would buy nothing beyond a writer registry of two single-entry maps.
+- ``Report.markdown: str`` — the markdown source itself (no executor
+  payload — reports are markdown bytes, not in-kernel objects).
 """
 
 from __future__ import annotations
 
-import re
-import uuid
-from pathlib import Path
-from typing import Any, Final, Literal
+__all__ = [
+    "Chart",
+    "Dataset",
+    "Report",
+]
 
-from parsimony.result import Provenance
-from pydantic import ConfigDict, Field, PrivateAttr, model_validator
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import ConfigDict, Field, PrivateAttr
 
 from parsimony_agents._naming import slug_from_title
+from parsimony_agents.agent.xml_render import escape_attr, escape_text
 from parsimony_agents.execution.outputs import DataFrameObject, FigureObject
+from parsimony_agents.identity import ArtifactRef
 from parsimony_agents.messages import MessageContent
-
-# ============================================================================
-# Snapshot path layout — the framework-managed namespace for ``return_*``
-# artifacts. Lives here (not in the terminal) because path layout *is* part
-# of the artifact contract: charts reference their source dataset by path.
-# ============================================================================
-
-CARDS_NAMESPACE: Final[str] = ".ockham/cards"
-
-
-def snapshot_path(*, artifact_id: str, version: int, kind: str, title: str) -> str:
-    """Workspace-relative snapshot path for a published artifact version.
-
-    Layout: ``.ockham/cards/<artifact_id>/v<n>/<title_slug>.<ext>`` so the
-    basename is a human-readable snake_case slug derived from curation title.
-
-    Lives under ``.ockham/cards/`` so it stays out of the user's editable
-    workspace tree but still travels with the workspace blob (and so is
-    accessible to viewer endpoints under the existing storage backend).
-    """
-
-    if not artifact_id:
-        raise ValueError("snapshot_path requires a non-empty artifact_id")
-    if version < 1:
-        raise ValueError(f"snapshot_path requires version >= 1, got {version}")
-    match kind:
-        case "dataset":
-            ext = "parquet"
-        case "chart":
-            ext = "vl.json"
-        case _:
-            raise ValueError(f"snapshot_path: unsupported artifact kind {kind!r}")
-    slug = slug_from_title(title)
-    return f"{CARDS_NAMESPACE}/{artifact_id}/v{version}/{slug}.{ext}"
-
-
-_DATASET_SNAPSHOT_PATH: re.Pattern[str] = re.compile(
-    r"^\.ockham/cards/([^/]+)/v\d+/[^/]+\.parquet$",
-)
-
-
-def artifact_id_from_dataset_snapshot_path(path: str) -> str | None:
-    """Return the ``artifact_id`` segment from a dataset snapshot path, or ``None``."""
-
-    p = (path or "").replace("\\", "/").strip()
-    if not p:
-        return None
-    m = _DATASET_SNAPSHOT_PATH.match(p)
-    return m.group(1) if m else None
 
 
 # ============================================================================
@@ -108,61 +63,62 @@ def artifact_id_from_dataset_snapshot_path(path: str) -> str | None:
 
 
 class _ArtifactBase(MessageContent):
-    """Identity, curation, and lineage shared by :class:`Dataset` / :class:`Chart`."""
+    """Identity, curation, and lineage shared by Dataset / Chart / Report."""
 
-    schema_version: int = 1
-    artifact_id: str = ""
-    version: int = 1
+    model_config = ConfigDict(extra="ignore")
+
+    schema_version: int = 2
+    logical_id: str = ""
+    content_sha: str = ""
     title: str = ""
     description: str = ""
     tags: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
-    sources: list[Provenance] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def populate_identity(self) -> _ArtifactBase:
-        if not self.artifact_id:
-            self.artifact_id = str(uuid.uuid4())
-        if self.version < 1:
-            self.version = 1
-        return self
+    #: ``None`` → hidden from the live workspace tree (§4.6).
+    #: Empty string sentinel mapped to a slugged default at persist time
+    #: by the artifact registry.
+    live_name: str | None = None
 
 
 # ============================================================================
-# Curation primitives
+# Dataset
 # ============================================================================
 
 
 class Dataset(_ArtifactBase):
-    """Curation metadata for a published dataset.
+    """Curation + lineage for a published dataset.
 
-    Pure metadata: no DataFrame, no path, no executor handle. The live
-    payload (DataFrame or :class:`parsimony.Result`) is supplied at publish
-    time via :meth:`save` (user-space) or by the streaming dispatcher
-    (snapshot under ``.ockham/cards/``).
+    Lives on disk at ``.ockham/datasets/<logical_id>/<content_sha>.parquet``
+    with a sibling ``curation.json`` and ``log.jsonl``. The Pydantic
+    model is the in-process projection; the codec
+    :func:`~parsimony_agents.dataset_io.write_dataset_bytes` embeds it
+    in arrow metadata for portability outside the workspace.
     """
 
-    # Old snapshot files (pre "path is identity") may carry fields we have
-    # since dropped (e.g. ``derived_from``). ``extra="ignore"`` lets us
-    # deserialize them without a migration script — the on-disk schema is
-    # framework-managed under ``.ockham/`` and never quoted by users.
-    model_config = ConfigDict(extra="ignore")
-
     type: Literal["dataset"] = "dataset"
-    notebook_refs: list[str] = Field(
+
+    notebook_refs: list[ArtifactRef] = Field(
         default_factory=list,
-        description="Notebook paths used to produce this dataset.",
+        description="Frozen refs to notebooks used to produce this dataset (multi-notebook pipelines OK).",
+    )
+    source_refs: list[ArtifactRef] = Field(
+        default_factory=list,
+        description="Frozen refs to upstream data_objects (and/or composing datasets).",
+    )
+    variable_name: str = Field(
+        default="",
+        description=(
+            "Kernel variable name the agent extracted to produce this dataset. "
+            "Recipe field — participates in ``logical_id`` and is required for "
+            "``refresh`` to re-extract from the kernel after re-running the "
+            "producing notebook. Persisted in arrow ``usermeta`` and curation; "
+            "the PATCH endpoint rejects edits."
+        ),
     )
 
-    # In-process transport: optionally carries the executor's DataFrameObject
-    # for this dataset, so a single ``Dataset`` instance can be handed off
-    # to the streaming dispatcher (or :meth:`save`) without a side channel.
-    # Never serialized.
     _payload: DataFrameObject | None = PrivateAttr(default=None)
 
     def with_payload(self, payload: DataFrameObject) -> Dataset:
-        """Attach the executor's DataFrameObject for this dataset and return self."""
-
         if not isinstance(payload, DataFrameObject):
             raise TypeError(
                 f"Dataset.with_payload expects a DataFrameObject; got "
@@ -179,15 +135,17 @@ class Dataset(_ArtifactBase):
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
         title = self.title or "(untitled)"
         blocks: list[dict[str, Any]] = [
-            {"type": "text", "text": f'<dataset title="{title}">\n'},
+            {"type": "text", "text": f'<dataset title="{escape_attr(title)}">\n'},
         ]
         if self.description:
-            blocks.append({"type": "text", "text": f"<description>{self.description}</description>\n"})
+            blocks.append(
+                {"type": "text", "text": f"<description>{escape_text(self.description)}</description>\n"}
+            )
         if self.notes:
             blocks.append({"type": "text", "text": "<notes>\n"})
-            blocks.extend({"type": "text", "text": f"- {note}\n"} for note in self.notes)
+            blocks.extend({"type": "text", "text": f"- {escape_text(note)}\n"} for note in self.notes)
             blocks.append({"type": "text", "text": "</notes>\n"})
-        blocks.extend(_sources_blocks(self.sources))
+        blocks.extend(_refs_blocks("sources", self.source_refs))
         blocks.append({"type": "text", "text": "</dataset>\n"})
         return blocks
 
@@ -195,30 +153,19 @@ class Dataset(_ArtifactBase):
         return {
             "type": self.type,
             "schema_version": self.schema_version,
-            "artifact_id": self.artifact_id,
-            "version": self.version,
+            "logical_id": self.logical_id,
+            "content_sha": self.content_sha,
             "title": self.title,
             "description": self.description,
             "notes": list(self.notes),
             "tags": list(self.tags),
-            "notebook_refs": list(self.notebook_refs),
+            "live_name": self.live_name,
+            "notebook_refs": [r.to_dict() for r in self.notebook_refs],
+            "source_refs": [r.to_dict() for r in self.source_refs],
+            "variable_name": self.variable_name,
         }
 
     def save(self, path: str | Path) -> None:
-        """Persist this dataset to ``path`` as Parquet with embedded curation.
-
-        ``path`` is the explicit, user-visible workspace location (e.g.
-        ``data/sp500_daily.parquet``). The on-disk file is plain Parquet
-        readable by any client; the curation metadata is recoverable via
-        :func:`parsimony_agents.deserialize_dataset`.
-
-        Requires an in-process ``_payload`` attached via :meth:`with_payload`
-        — there is no per-call payload override. ``return_dataset`` is the
-        only producer that mints datasets in production; if you're calling
-        ``.save`` from a script or test, attach a payload first via
-        ``Dataset(...).with_payload(DataFrameObject.from_pandas(df, local_dir=...))``.
-        """
-
         from parsimony_agents.dataset_io import write_dataset_bytes
 
         if self._payload is None:
@@ -232,33 +179,54 @@ class Dataset(_ArtifactBase):
         target.write_bytes(write_dataset_bytes(self, self._payload))
 
 
+# ============================================================================
+# Chart
+# ============================================================================
+
+
 class Chart(_ArtifactBase):
-    """Curation metadata for a published chart.
+    """Curation + lineage for a published chart.
 
-    Pure metadata: no Vega-Lite spec, no path, no executor handle. The live
-    figure is supplied at publish time via :meth:`save` (user-space) or by
-    the streaming dispatcher (snapshot under ``.ockham/cards/``).
-
-    Charts reference their source dataset by its workspace-relative
-    snapshot path (``source_dataset_path``); the path *is* the identity
-    (see ``snapshot_path``). Staleness is derived from path resolution,
-    not stored on the chart.
+    Lives on disk at ``.ockham/charts/<logical_id>/<content_sha>.vl.json``
+    with sibling curation/log files. ``notebook_ref`` is singular — a
+    chart is rendered in exactly one notebook. ``source_dataset_refs``
+    is plural for multi-dataset comparison charts. ``source_refs``
+    covers the rare case of a chart drawn straight from data_objects
+    without an intermediate ``return_dataset``.
     """
 
-    # See ``Dataset.model_config`` — same rationale (back-compat with old
-    # snapshots that carried ``source_dataset_artifact_id`` /
-    # ``source_dataset_version`` before the swap to ``source_dataset_path``).
-    model_config = ConfigDict(extra="ignore")
-
     type: Literal["chart"] = "chart"
-    source_dataset_path: str = ""
-    chart_notebook_ref: str = ""
+
+    notebook_ref: ArtifactRef | None = Field(
+        default=None,
+        description=(
+            "Frozen ref to the notebook that renders this chart (kind='notebook'). "
+            "Required at persist time; left optional on the model so codec round-trips "
+            "of vanilla vl.json without curation don't fail on construction."
+        ),
+    )
+    source_dataset_refs: list[ArtifactRef] = Field(
+        default_factory=list,
+        description="Frozen refs to source datasets (kind='dataset'). Plural — multi-dataset charts welcome.",
+    )
+    source_refs: list[ArtifactRef] = Field(
+        default_factory=list,
+        description="Frozen refs to upstream data_objects when bypassing return_dataset (uncommon).",
+    )
+    variable_name: str = Field(
+        default="",
+        description=(
+            "Kernel variable name the agent extracted to produce this chart. "
+            "Recipe field — participates in ``logical_id`` and is required for "
+            "``refresh`` to re-extract from the kernel after re-running the "
+            "producing notebook. Persisted in vl.json ``usermeta.parsimony_agents`` "
+            "and curation; the PATCH endpoint rejects edits."
+        ),
+    )
 
     _payload: FigureObject | None = PrivateAttr(default=None)
 
     def with_payload(self, payload: FigureObject) -> Chart:
-        """Attach the executor's FigureObject for this chart and return self."""
-
         if not isinstance(payload, FigureObject):
             raise TypeError(
                 f"Chart.with_payload expects a FigureObject; got "
@@ -275,15 +243,18 @@ class Chart(_ArtifactBase):
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
         title = self.title or "(untitled)"
         blocks: list[dict[str, Any]] = [
-            {"type": "text", "text": f'<chart title="{title}" notebook="{self.chart_notebook_ref}">\n'},
+            {"type": "text", "text": f'<chart title="{escape_attr(title)}">\n'},
         ]
         if self.description:
-            blocks.append({"type": "text", "text": f"<description>{self.description}</description>\n"})
+            blocks.append(
+                {"type": "text", "text": f"<description>{escape_text(self.description)}</description>\n"}
+            )
         if self.notes:
             blocks.append({"type": "text", "text": "<notes>\n"})
-            blocks.extend({"type": "text", "text": f"- {note}\n"} for note in self.notes)
+            blocks.extend({"type": "text", "text": f"- {escape_text(note)}\n"} for note in self.notes)
             blocks.append({"type": "text", "text": "</notes>\n"})
-        blocks.extend(_sources_blocks(self.sources))
+        blocks.extend(_refs_blocks("source_datasets", self.source_dataset_refs))
+        blocks.extend(_refs_blocks("sources", self.source_refs))
         blocks.append({"type": "text", "text": "</chart>\n"})
         return blocks
 
@@ -291,28 +262,20 @@ class Chart(_ArtifactBase):
         return {
             "type": self.type,
             "schema_version": self.schema_version,
-            "artifact_id": self.artifact_id,
-            "version": self.version,
+            "logical_id": self.logical_id,
+            "content_sha": self.content_sha,
             "title": self.title,
             "description": self.description,
             "tags": list(self.tags),
             "notes": list(self.notes),
-            "source_dataset_path": self.source_dataset_path,
-            "chart_notebook_ref": self.chart_notebook_ref,
+            "live_name": self.live_name,
+            "notebook_ref": self.notebook_ref.to_dict() if self.notebook_ref else None,
+            "source_dataset_refs": [r.to_dict() for r in self.source_dataset_refs],
+            "source_refs": [r.to_dict() for r in self.source_refs],
+            "variable_name": self.variable_name,
         }
 
     def save(self, path: str | Path) -> None:
-        """Persist this chart to ``path`` as Vega-Lite JSON with embedded curation.
-
-        ``path`` must end in ``.vl.json``; the on-disk file is plain
-        Vega-Lite that any vega-embed-compatible viewer can render.
-        Curation lives under ``spec.usermeta.parsimony_agents``.
-
-        Requires an in-process ``_payload`` attached via :meth:`with_payload`
-        — there is no per-call payload override (see :meth:`Dataset.save`
-        for the rationale).
-        """
-
         from parsimony_agents.chart_io import write_chart_bytes
 
         if self._payload is None:
@@ -326,23 +289,90 @@ class Chart(_ArtifactBase):
         target.write_bytes(write_chart_bytes(self, self._payload))
 
 
-def _sources_blocks(sources: list[Provenance]) -> list[dict[str, Any]]:
-    """Render upstream sources as ``<sources>``/``<source />`` text blocks for ``to_llm``."""
-    if not sources:
+# ============================================================================
+# Report
+# ============================================================================
+
+
+class Report(_ArtifactBase):
+    """Curation + lineage for a published markdown report.
+
+    Reports are user-readable deliverables: their content is a markdown
+    string, not an in-kernel object. They live at
+    ``.ockham/reports/<logical_id>/<content_sha>.report.md`` with
+    sibling curation/log files. ``embedded_refs`` are frozen by default
+    (§2.7) — a re-author against newer data produces a new report
+    snapshot whose embedded refs may be newer; old snapshots stay
+    byte-stable and reproducible.
+    """
+
+    type: Literal["report"] = "report"
+
+    markdown: str = ""
+    embedded_refs: list[ArtifactRef] = Field(
+        default_factory=list,
+        description="Frozen refs to artifacts embedded in the markdown source.",
+    )
+
+    def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
+        title = self.title or "(untitled)"
+        blocks: list[dict[str, Any]] = [
+            {"type": "text", "text": f'<report title="{escape_attr(title)}">\n'},
+        ]
+        if self.description:
+            blocks.append(
+                {"type": "text", "text": f"<description>{escape_text(self.description)}</description>\n"}
+            )
+        if self.notes:
+            blocks.append({"type": "text", "text": "<notes>\n"})
+            blocks.extend({"type": "text", "text": f"- {escape_text(note)}\n"} for note in self.notes)
+            blocks.append({"type": "text", "text": "</notes>\n"})
+        blocks.extend(_refs_blocks("embedded", self.embedded_refs))
+        blocks.append({"type": "text", "text": "</report>\n"})
+        return blocks
+
+    def to_frontend_dict(self) -> dict[str, Any]:
+        return {
+            "type": self.type,
+            "schema_version": self.schema_version,
+            "logical_id": self.logical_id,
+            "content_sha": self.content_sha,
+            "title": self.title,
+            "description": self.description,
+            "tags": list(self.tags),
+            "notes": list(self.notes),
+            "live_name": self.live_name,
+            "embedded_refs": [r.to_dict() for r in self.embedded_refs],
+        }
+
+    def save(self, path: str | Path) -> None:
+        if not self.markdown.strip():
+            raise ValueError("Report.save: markdown is empty")
+        target = Path(path)
+        if "".join(target.suffixes[-2:]) != ".report.md":
+            raise ValueError(f"Report.save: path must end in .report.md, got {path!r}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(self.markdown.encode("utf-8"))
+
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+
+def _refs_blocks(name: str, refs: list[ArtifactRef]) -> list[dict[str, Any]]:
+    """Render a list of ArtifactRefs as ``<name>``/``<ref />`` text blocks for ``to_llm``."""
+    if not refs:
         return []
     out: list[dict[str, Any]] = [
-        {"type": "text", "text": f'<sources count="{len(sources)}">\n'},
+        {"type": "text", "text": f'<{name} count="{len(refs)}">\n'},
     ]
-    for src in sources:
-        safe = src.safe_dump()
-        fetched = safe.get("fetched_at") or ""
-        params = safe.get("params") or {}
-        params_str = ", ".join(f"{k}={v}" for k, v in sorted(params.items())) if isinstance(params, dict) else ""
-        attrs = f'name="{safe.get("source", "")}"'
-        if fetched:
-            attrs += f' fetched_at="{fetched}"'
-        if params_str:
-            attrs += f' params="{params_str}"'
-        out.append({"type": "text", "text": f"  <source {attrs} />\n"})
-    out.append({"type": "text", "text": "</sources>\n"})
+    for r in refs:
+        out.append({"type": "text", "text": f"  {r.to_self_closing_tag()}\n"})
+    out.append({"type": "text", "text": f"</{name}>\n"})
     return out
+
+
+def derive_live_name(title: str) -> str:
+    """Derive a file-tree-friendly slug from a curation title (§4.6 default)."""
+    return slug_from_title(title)

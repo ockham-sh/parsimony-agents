@@ -12,7 +12,7 @@ Quick start::
 from __future__ import annotations
 
 from parsimony_agents.agent.agent import Agent, AgentResult
-from parsimony_agents.artifacts import Chart, Dataset
+from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.chart_io import (
     deserialize_chart,
     read_chart,
@@ -41,6 +41,7 @@ __all__ = [
     "AgentResult",
     "Chart",
     "Dataset",
+    "Report",
     "Script",
     "ScriptPreview",
     "decode_notebook_state",

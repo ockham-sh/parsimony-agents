@@ -106,8 +106,9 @@ class Script(BaseModel):
     """A workspace notebook file: path and code body.
 
     Identity is the workspace path. Persistence uses :mod:`parsimony_agents.notebook_io`.
-    Execution is not implicit unless the agent uses ``code_set``/``code_edit`` with ``execute`` true
-    or calls :func:`run_notebook`. ``output``/``data_objects`` are set after a kernel run for UI previews and the cache.
+    Execution is not implicit unless the agent uses ``return_notebook`` /
+    ``edit_notebook`` with ``execute=True``. ``output`` / ``data_objects``
+    are set after a kernel run for UI previews and the cache.
     """
 
     type: Literal["script"] = "script"
@@ -149,7 +150,7 @@ class ScriptPreview(BaseModel):
     output: KernelOutput | None = None
     ui_message: str | None = Field(
         default=None,
-        description="Optional non-technical detail after '>' in Created/… labels (code_set only; not used for code_edit).",
+        description="Optional non-technical detail after '>' in Created/… labels (return_notebook only; not used for edit_notebook).",
     )
 
     @computed_field

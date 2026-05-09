@@ -15,9 +15,11 @@ __all__ = [
     "decode_notebook_state",
     "deserialize_notebook",
     "encode_notebook_state",
+    "last_content_sha_from_log",
     "load_notebook_state",
     "notebook_state_cache_key",
     "notebook_state_cache_path",
+    "read_latest_notebook",
     "read_notebook",
     "save_notebook",
     "save_notebook_state",
@@ -27,12 +29,23 @@ __all__ = [
 import hashlib
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from parsimony_agents.execution.outputs import KernelOutput
 from parsimony_agents.notebook import Script
+
+
+class _Executor(Protocol):
+    """Minimal executor surface ``read_latest_notebook`` needs.
+
+    Aligned with :class:`parsimony_agents.execution.executor.BaseCodeExecutor`,
+    typed loosely so tests and downstream consumers can stub it without
+    inheriting the whole abstract base.
+    """
+
+    async def read_workspace_file(self, path: str) -> bytes: ...
 
 
 class NotebookStateDocument(BaseModel):
@@ -89,6 +102,61 @@ def read_notebook(path: str | Path) -> Script:
     """Read a ``.py`` notebook from *path*."""
     target = Path(path)
     return deserialize_notebook(target.read_bytes(), path=str(target))
+
+
+async def read_latest_notebook(
+    executor: _Executor, *, logical_id: str
+) -> tuple[bytes, str]:
+    """Read the latest persisted snapshot bytes for a notebook ``logical_id``.
+
+    Notebooks live solely under ``.ockham/notebooks/<lid>/<csha>.py`` —
+    the user-visible ``notebooks/<live_name>.py`` is a virtual view
+    synthesized by the workspace layer
+    (``service._virtual_live_entries_sync``) and has no real bytes on
+    disk. This helper is the canonical read path for tools that
+    operate on notebook source (``edit_notebook``, refresh).
+
+    Returns ``(raw_bytes, content_sha)``. Callers with a user-visible
+    path should resolve to ``logical_id`` first (via
+    ``context.notebook_logical_id_resolver`` to honour rename-via-
+    curation, or :func:`parsimony_agents.identity.notebook_logical_id`
+    for slug-derived cases).
+
+    Raises :class:`FileNotFoundError` when the notebook was never
+    persisted (no ``log.jsonl``) or its log is empty.
+    """
+    log_path = f".ockham/notebooks/{logical_id}/log.jsonl"
+    raw_log = await executor.read_workspace_file(log_path)
+    last_csha = last_content_sha_from_log(raw_log)
+    if last_csha is None:
+        raise FileNotFoundError(
+            f"notebook {logical_id!r} log.jsonl has no usable content_sha entry"
+        )
+    snapshot_path = f".ockham/notebooks/{logical_id}/{last_csha}.py"
+    raw = await executor.read_workspace_file(snapshot_path)
+    return raw, last_csha
+
+
+def last_content_sha_from_log(raw_log: bytes) -> str | None:
+    """Return the last ``content_sha`` in a ``log.jsonl`` blob, or ``None``.
+
+    Generic across artifact kinds — every kind's ``log.jsonl`` shares the
+    same ``{ts, content_sha, inputs}`` line shape, so this works for
+    notebook / dataset / chart / report logs alike.
+    """
+    last: str | None = None
+    for line in raw_log.decode("utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            entry: Any = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        sha = entry.get("content_sha") if isinstance(entry, dict) else None
+        if isinstance(sha, str) and sha:
+            last = sha
+    return last
 
 
 # ----------------------------------------------------------------------
@@ -169,3 +237,14 @@ def load_notebook_state(script: Script, root: str | Path) -> KernelOutput | None
     if not target.exists():
         return None
     return decode_notebook_state(target.read_bytes(), script=script)
+
+
+# ----------------------------------------------------------------------
+# (Notebook snapshots are written through ``server.api.workspace.streaming``
+# via the same persist_return_artifact-style flow used by every other
+# kind. The standalone ``save_notebook_snapshot`` helper that used to
+# live here was a hold-over from the flat-namespace design where
+# ``logical_id == content_sha``; under the unified model, snapshots live
+# at ``.ockham/notebooks/<logical_id>/<content_sha>.py`` and the path
+# requires the curation-allocated UUID, which only the workspace layer
+# knows. No agent-side mirror remains.)
