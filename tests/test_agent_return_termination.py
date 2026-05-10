@@ -1,16 +1,14 @@
-"""Return tools no longer hard-stop the run (Task 13).
+"""Return tools do not hard-stop the run.
 
-A successful ``return_*`` flips the streaming UI into delivery mode
-(``final_response_started=True``) but does NOT exit the agent loop. The
-agent may legitimately need to publish more deliverables — a compound
-request like *"plot X and write a report"* requires both
+A successful ``return_*`` yields its tool event but does NOT exit the
+agent loop. The agent may legitimately need to publish more deliverables
+— a compound request like *"plot X and write a report"* requires both
 ``return_chart`` and ``return_report``, and they may not all fit in one
 LLM response.
 
-Termination reverts to the natural agent-loop signal: the LLM emits a
-response with no ``tool_calls``, the loop breaks at
-``agent.py:892``-ish. Republish under content-addressing is idempotent,
-so removing the early stop is safe.
+Termination is the natural agent-loop signal: the LLM emits a response
+with no ``tool_calls``, the loop breaks. Republish under
+content-addressing is idempotent, so removing the early stop is safe.
 """
 
 from __future__ import annotations

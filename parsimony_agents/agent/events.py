@@ -11,7 +11,6 @@ class AgentEvent(BaseModel):
     """Base class for all agent streaming events."""
 
     type: str
-    section: Literal["analysis", "final_response"] = "analysis"
 
 
 class TextDelta(AgentEvent):
