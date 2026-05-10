@@ -435,10 +435,9 @@ stateDiagram-v2
 ### Loop control state
 
 `TurnState` (in `agent/helpers.py`) tracks per-turn iteration data:
-- Iteration count for guardrail enforcement
-- Elapsed time for wall-clock enforcement
-- Repeat-tool detection (warn at 2 identical calls, stop at 6)
-- Whether the current turn is in the `"final_response"` section
+- `stopped`: set when the loop should exit cleanly (natural stop or cooperative cancel). Guardrail exits (max_iterations / max_execution_time / LLM error) `break` out of the loop without setting `stopped`.
+- `minted_refs`: refs minted (or advanced) by `return_*` / `edit_*` / `refresh` calls during the current turn, fused with `session_state.workspace_artifacts` each iteration to render `<turn_artifacts>`.
+- Iteration count and elapsed time guardrails are enforced inline; loop-detection (warn at 2 identical calls, stop at 6) is enforced from `tool_call_history`.
 
 ### Context injection pattern
 
@@ -674,18 +673,18 @@ Before accepting a `FigureObject`, `OutputFactory._from_altair()` calls `vlc.veg
 For a single agent turn the stream produces events in this order:
 
 ```
-StateSnapshot(section="analysis")           ← initial context (first turn only)
-  TextDelta ... TextDelta                   ← LLM reasoning tokens
+StateSnapshot                               ← initial context (first turn only)
+  TextDelta ... TextDelta                   ← LLM tokens for iteration 1
   ReasoningDelta ... ReasoningDelta         ← extended thinking (if enabled)
   ToolEvent(completed=False)                ← pre-execution per tool
   ToolEvent(completed=True)                 ← post-execution per tool
   StateSnapshot                             ← context after tool round
-  TextDelta ... TextDelta                   ← next LLM response
+  TextDelta ... TextDelta                   ← LLM tokens for iteration 2
   ... (tool rounds repeat)
-  TextDelta ... TextDelta (section="final_response")
+  TextDelta ... TextDelta                   ← LLM tokens for the iteration that emits no tool_calls
 ```
 
-The `section` field transitions from `"analysis"` to `"final_response"` when the agent enters its concluding response phase (after all tool calls are complete).
+Termination is the natural agent-loop signal: an LLM response with no `tool_calls` ends the turn. Events are emitted in the order they are generated; renderers must preserve that order.
 
 ### Message accumulation
 

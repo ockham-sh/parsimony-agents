@@ -34,8 +34,13 @@ def system_error(msg: str) -> SystemToolOutput:
 class TurnState(BaseModel):
     """Mutable flags tracking progress within a single agent turn."""
 
+    #: Set when the loop should exit cleanly. Two paths set it:
+    #: (1) the LLM returned a response with no tool_calls (natural stop), and
+    #: (2) the user (or a client disconnect) cancelled the run.
+    #: Guardrail exits (max_iterations / max_execution_time / LLM error)
+    #: ``break`` out of the loop without setting ``stopped`` — the post-loop
+    #: ``last_tool_internal_error`` reporter uses that distinction.
     stopped: bool = False
-    final_response_started: bool = False
     #: Refs minted (or advanced) by ``return_*`` / ``edit_*`` / ``refresh``
     #: calls during THIS turn. Fused with ``session_state.workspace_artifacts``
     #: each iteration to render a single, always-current ``<turn_artifacts>``

@@ -402,7 +402,6 @@ class Agent:
         self,
         last_exception: Exception,
         text_message_id: str,
-        turn_state: TurnState,
         agent_span: Any,
     ) -> AsyncIterator[AgentError | TextDeltaEvent]:
         """Classify an LLM exception into a typed ``AgentError`` plus a
@@ -412,7 +411,6 @@ class Agent:
         for unexpected provider errors. Each branch emits exactly the same
         two-event shape so the caller always yields a uniform error frame.
         """
-        section = "final_response" if turn_state.final_response_started else "analysis"
         model_name = self.model_config.get("model", "the configured model")
 
         if isinstance(last_exception, RateLimitError):
@@ -421,7 +419,6 @@ class Agent:
                 message="Rate limit exceeded",
                 recoverable=False,
                 error_type="rate_limit",
-                section=section,
             )
             yield TextDeltaEvent(
                 content=(
@@ -431,7 +428,6 @@ class Agent:
                 ),
                 message_id=text_message_id,
                 delta=False,
-                section="final_response",
             )
         elif isinstance(last_exception, Timeout):
             error_logger.error("Request timeout: %s", last_exception, exc_info=True)
@@ -439,7 +435,6 @@ class Agent:
                 message="Request timeout",
                 recoverable=False,
                 error_type="timeout",
-                section=section,
             )
             yield TextDeltaEvent(
                 content=(
@@ -448,7 +443,6 @@ class Agent:
                 ),
                 message_id=text_message_id,
                 delta=False,
-                section="final_response",
             )
         elif isinstance(last_exception, ServiceUnavailableError) or (
             isinstance(last_exception, APIError) and "unavailable" in str(last_exception).lower()
@@ -458,7 +452,6 @@ class Agent:
                 message="Model unavailable",
                 recoverable=False,
                 error_type="unavailable",
-                section=section,
             )
             yield TextDeltaEvent(
                 content=(
@@ -467,7 +460,6 @@ class Agent:
                 ),
                 message_id=text_message_id,
                 delta=False,
-                section="final_response",
             )
         elif isinstance(last_exception, AuthenticationError):
             error_logger.error("LLM authentication failed: %s", last_exception, exc_info=True)
@@ -476,7 +468,6 @@ class Agent:
                 message=f"Authentication failed for {model_name}: {detail}",
                 recoverable=False,
                 error_type="authentication",
-                section=section,
             )
             yield TextDeltaEvent(
                 content=(
@@ -487,7 +478,6 @@ class Agent:
                 ),
                 message_id=text_message_id,
                 delta=False,
-                section="final_response",
             )
         elif isinstance(last_exception, (BadRequestError, NotFoundError)):
             error_logger.error("LLM bad request: %s", last_exception, exc_info=True)
@@ -496,7 +486,6 @@ class Agent:
                 message=f"Invalid request to {model_name}: {detail}",
                 recoverable=False,
                 error_type="bad_request",
-                section=section,
             )
             yield TextDeltaEvent(
                 content=(
@@ -506,7 +495,6 @@ class Agent:
                 ),
                 message_id=text_message_id,
                 delta=False,
-                section="final_response",
             )
         elif isinstance(last_exception, APIConnectionError):
             error_logger.error("LLM connection error: %s", last_exception, exc_info=True)
@@ -514,7 +502,6 @@ class Agent:
                 message=f"Could not reach the model provider: {last_exception}",
                 recoverable=False,
                 error_type="connection",
-                section=section,
             )
             yield TextDeltaEvent(
                 content=(
@@ -523,7 +510,6 @@ class Agent:
                 ),
                 message_id=text_message_id,
                 delta=False,
-                section="final_response",
             )
         else:
             error_logger.error(
@@ -534,7 +520,6 @@ class Agent:
                 message=f"LLM call failed ({type(last_exception).__name__}): {detail}",
                 recoverable=False,
                 error_type="llm_error",
-                section=section,
             )
             yield TextDeltaEvent(
                 content=(
@@ -543,7 +528,6 @@ class Agent:
                 ),
                 message_id=text_message_id,
                 delta=False,
-                section=section,
             )
 
         if agent_span and agent_span.is_recording():
@@ -604,7 +588,7 @@ class Agent:
 
         if not ctx:
             ctx = AgentContext(messages=[system_message], session_id=self.session_id)
-            yield StateSnapshot(context=ctx, section="analysis")
+            yield StateSnapshot(context=ctx)
         else:
             ctx.messages[0] = system_message
 
@@ -673,7 +657,6 @@ class Agent:
                     message="Time limit reached.",
                     recoverable=True,
                     error_type="time_limit",
-                    section="final_response",
                 )
                 break
 
@@ -687,7 +670,6 @@ class Agent:
                     message="Iteration limit reached.",
                     recoverable=True,
                     error_type="iteration_limit",
-                    section="final_response",
                 )
                 break
 
@@ -761,14 +743,12 @@ class Agent:
                                 content=chunk.choices[0].delta.content,
                                 message_id=text_message_id,
                                 delta=True,
-                                section="final_response" if turn_state.final_response_started else "analysis",
                             )
                         if reasoning_content := getattr(chunk.choices[0].delta, "reasoning_content", None):
                             yield ReasoningDeltaEvent(
                                 content=reasoning_content,
                                 message_id=reasoning_message_id,
                                 delta=True,
-                                section="final_response" if turn_state.final_response_started else "analysis",
                             )
 
                         for tool_call_chunk in (chunk.choices[0].delta.tool_calls or []):
@@ -799,14 +779,12 @@ class Agent:
                                     completed=False,
                                     result=SystemToolMessage(message=loading_label),
                                     ui_message=loading_label,
-                                    section="final_response" if turn_state.final_response_started else "analysis",
                                 )
 
                     if user_broke_stream and cancellation is not None:
                         yield RunCancelled(
                             message="Generation was cancelled before the assistant message completed.",
                             reason=cancellation.reason,
-                            section="final_response" if turn_state.final_response_started else "analysis",
                         )
                         turn_state.stopped = True
                         last_exception = None
@@ -838,7 +816,7 @@ class Agent:
 
             if last_exception is not None:
                 async for event in self._handle_llm_error(
-                    last_exception, text_message_id, turn_state, agent_span
+                    last_exception, text_message_id, agent_span
                 ):
                     yield event
                 break
@@ -860,7 +838,6 @@ class Agent:
 
             if len(_new_tool_calls) == 0:
                 turn_state.stopped = True
-                turn_state.final_response_started = True
 
             response_message.tool_calls = _new_tool_calls if _new_tool_calls else None
 
@@ -891,7 +868,6 @@ class Agent:
                     message_id=reasoning_message_id,
                     title=f"Thought for {accumulated_duration:.1f} seconds",
                     delta=False,
-                    section="final_response" if turn_state.final_response_started else "analysis",
                 )
                 accumulated_reasoning = ""
                 accumulated_duration = 0.0
@@ -903,7 +879,6 @@ class Agent:
                     content=text_message,
                     message_id=text_message_id,
                     delta=False,
-                    section="final_response" if turn_state.final_response_started else "analysis",
                 )
 
 
@@ -983,7 +958,6 @@ class Agent:
                             message="Internal Error",
                             recoverable=False,
                             error_type="loop_detection",
-                            section="final_response" if turn_state.final_response_started else "analysis",
                         )
                         ctx.messages.append(
                             AgentMessage(role="tool", content="Loop detected: You have called the same tool with the same arguments multiple times. Consider trying a different approach.", name=tool_name, tool_call_id=tool_call.id)
@@ -1032,7 +1006,6 @@ class Agent:
                             completed=False,
                             result=preview,
                             ui_message=loading_label,
-                            section="final_response" if turn_state.final_response_started else "analysis",
                         )
                     elif tool_type == "utility":
                         # Emit a second file write with the full tool args in metadata,
@@ -1053,7 +1026,6 @@ class Agent:
                                     tool_args=tool_args,
                                 ),
                             ),
-                            section="final_response" if turn_state.final_response_started else "analysis",
                         )
 
                     tool_executions.append((
@@ -1078,7 +1050,7 @@ class Agent:
                         tool_args = json.loads(tool_call.function.arguments)
                         tool_args.pop("_ui_message", None)
                         for tev in self._emit_cancelled_tool_events(
-                            tools, tool_name, tool_args, tool_call, turn_state
+                            tools, tool_name, tool_args, tool_call
                         ):
                             yield tev
                         ctx.messages.append(
@@ -1093,10 +1065,9 @@ class Agent:
                     yield RunCancelled(
                         message="The run was cancelled before the remaining tools could finish.",
                         reason=cancellation.reason,  # cancellation is not None here
-                        section="final_response" if turn_state.final_response_started else "analysis",
                     )
                     turn_state.stopped = True
-                    yield StateSnapshot(context=ctx.model_copy(deep=False), section="analysis")
+                    yield StateSnapshot(context=ctx.model_copy(deep=False))
                     break
 
                 # ── Phase 2: execute tool coroutines ───────────────────────────────────────
@@ -1124,7 +1095,7 @@ class Agent:
 
                     if isinstance(raw_result, asyncio.CancelledError):
                         for tev in self._emit_cancelled_tool_events(
-                            tools, tool_name, tool_args, tool_call, turn_state
+                            tools, tool_name, tool_args, tool_call
                         ):
                             yield tev
                         ctx.messages.append(
@@ -1171,7 +1142,6 @@ class Agent:
                                     completed=True,
                                     result=tool_call_output,
                                     ui_message_completed=ui_message_completed,
-                                    section="final_response" if turn_state.final_response_started else "analysis",
                                 )
                             else:
                                 tool_call_output = tool_result.exception_message
@@ -1192,7 +1162,6 @@ class Agent:
                                     completed=True,
                                     result=output,
                                     ui_message_completed=ui_message_completed,
-                                    section="final_response" if turn_state.final_response_started else "analysis",
                                 )
 
                         case "return":
@@ -1208,7 +1177,6 @@ class Agent:
                                     # (natural termination at the no-tool-calls branch above)
                                     # or hits ``max_iterations``. Republish is idempotent under
                                     # content-addressing, so this is safe.
-                                    turn_state.final_response_started = True
                                     yield ToolEvent(
                                         tool_name=tool_name,
                                         tool_call_id=tool_call.id,
@@ -1217,7 +1185,6 @@ class Agent:
                                         result=tool_call_output,
                                         ui_message=return_loading,
                                         ui_message_completed=llm_ui_message,
-                                        section="final_response",
                                     )
                                     # After the yield, the streaming layer has persisted
                                     # the artifact and mutated ``content_sha``. Append to
@@ -1284,7 +1251,6 @@ class Agent:
                                     result={"notebook": notebook, "preview": preview},
                                     ui_message_completed=llm_ui_message,
                                     also_executed=ran_kernel,
-                                    section="final_response" if turn_state.final_response_started else "analysis",
                                 )
                                 # Track the notebook ref in the turn ledger
                                 # (Task 15). The ref's content_sha is computed
@@ -1307,7 +1273,6 @@ class Agent:
                                     completed=True,
                                     result=SystemToolMessage(message=system_ui),
                                     ui_message_completed=llm_ui_message,
-                                    section="final_response" if turn_state.final_response_started else "analysis",
                                 )
 
                         case _:
@@ -1332,12 +1297,11 @@ class Agent:
                     yield RunCancelled(
                         message="The run was cancelled while tools were executing.",
                         reason=cancel_reason,
-                        section="final_response" if turn_state.final_response_started else "analysis",
                     )
                     turn_state.stopped = True
 
                 # Persist tool results immediately so a client disconnect mid-turn can recover.
-                yield StateSnapshot(context=ctx.model_copy(deep=False), section="analysis")
+                yield StateSnapshot(context=ctx.model_copy(deep=False))
 
 
         if accumulated_reasoning:
@@ -1346,7 +1310,6 @@ class Agent:
                 message_id=reasoning_message_id,
                 title=f"Thought for {accumulated_duration:.1f} seconds",
                 delta=False,
-                section="final_response" if turn_state.final_response_started else "analysis",
             )
 
         # Log agent run completion (after while loop ends)
@@ -1368,10 +1331,9 @@ class Agent:
                 message=last_tool_internal_error,
                 recoverable=False,
                 error_type="tool_error",
-                section="final_response" if turn_state.final_response_started else "analysis",
             )
 
-        yield StateSnapshot(context=ctx.model_copy(deep=False), section="analysis")
+        yield StateSnapshot(context=ctx.model_copy(deep=False))
 
     async def _run_tool_coros_with_cancellation(
         self,
@@ -1427,10 +1389,8 @@ class Agent:
         tool_name: str,
         tool_args: dict,
         tool_call: Any,
-        turn_state: TurnState,
     ) -> list[ToolEvent]:
         ttype = tools[tool_name].tool_type
-        section = "final_response" if turn_state.final_response_started else "analysis"
         msg = CANCELLED_TOOL_TEXT
         if ttype == "utility":
             ui = tools[tool_name].ui_message or f"Executing {tool_name}"
@@ -1453,7 +1413,6 @@ class Agent:
                     completed=True,
                     result=uo,
                     ui_message_completed=uic,
-                    section=section,
                 )
             ]
         if ttype == "system":
@@ -1469,7 +1428,6 @@ class Agent:
                             tool_name=tool_name,
                             tool_args=tool_args,
                         ),
-                        section=section,
                     )
                 ]
         return []
