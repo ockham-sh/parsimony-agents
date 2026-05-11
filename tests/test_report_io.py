@@ -142,6 +142,21 @@ def test_revealjs_format_round_trips() -> None:
     assert "revealjs" in yaml_dict["ockham"]["formats"]
 
 
+def test_default_theme_is_omitted_from_yaml() -> None:
+    """When the report uses the default 'brand' theme, ``ockham.theme`` is
+    absent from the YAML — keeps preambles minimal for the common case."""
+    r = _make()  # theme defaults to "brand"
+    yaml_dict, _ = read_report_bytes(write_report_bytes(r))
+    assert "theme" not in yaml_dict["ockham"]
+
+
+def test_non_default_theme_is_emitted() -> None:
+    """When the report opts into 'light', the YAML carries it."""
+    r = _make(theme="light")
+    yaml_dict, _ = read_report_bytes(write_report_bytes(r))
+    assert yaml_dict["ockham"]["theme"] == "light"
+
+
 def test_write_idempotent_no_date_field() -> None:
     """write_report_bytes must not embed a `date:` — that would make the same
     body produce a different content_sha across day boundaries."""

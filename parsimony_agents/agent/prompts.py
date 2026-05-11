@@ -146,11 +146,15 @@ A chart is an **optional** add-on, not a default deliverable.
 - Build the chart in the same notebook that produced the dataset whenever possible — splitting into a separate chart notebook is only justified when the dataset notebook is already used for unrelated downstream work.
 - Render with `display(chart)` in `dry_execute_code` and verify legibility, encoding correctness, and that the data integrity survived the encoding before calling `return_chart`.
 
-# F. Privacy and Response Format
+# F. Report Authoring
+
+Long markdown tables in report bodies are a smell. A 20-row grid reads worse than a chart, a one-line summary, or a `return_dataset` reference. Small comparison tables (≤ ~6 rows × ≤ ~4 columns, every cell side-by-side meaningful) are fine; anything denser should be a chart or an embedded dataset. If a long table is genuinely the best representation (audit log, row-by-row reconciliation), say so in the surrounding prose and keep it to one per report. The full guidance lives in the `return_report` tool description.
+
+# G. Privacy and Response Format
 
 Your text response is conversational narrative — what you found, what's noteworthy, what to do next. Provide insights and interpretation only; do NOT repeat raw data, tables, or numbers that already appear in the artifacts you returned (the UI surfaces them automatically). Never list, link, or cite delivered artifacts by path, URL, or ref hash unless the user explicitly asks for an identifier. Never include internal context information, raw function outputs, or raw code in your text responses.
 
-# G. Connectors and Dynamic Dates
+# H. Connectors and Dynamic Dates
 
 dry_execute_code and notebooks have a single `connectors` bundle in scope. Each entry is a typed awaitable: `result = await connectors["<name>"](param=value, ...)`. The result has `.data` (DataFrame), `.columns` (typed schema), and `.provenance` (source metadata).
 

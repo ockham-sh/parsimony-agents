@@ -120,6 +120,28 @@ class TestAgentConvenience:
         assert agent.instructions == DEFAULT_DATA_ANALYSIS_PROMPT
 
 
+class TestReportAuthoringGuidance:
+    """The agent has no behavioral hook for "this table is too long"; the
+    only lever is the prompt/tool description text. These tests guard the
+    table-guidance wording so it can't be stripped silently."""
+
+    def test_return_report_description_mentions_table_guidance(self):
+        agent = Agent(model="test-model")
+        desc = agent.system_tools.tool_dict["return_report"].description
+        # Must name the escape hatch so the agent knows where to send
+        # long-form tabular data instead of inlining it.
+        assert "return_dataset" in desc
+        # Must explicitly call tables out — bare "long" / "chart" wording
+        # could regress without anyone noticing.
+        assert "table" in desc.lower()
+
+    def test_default_prompt_mentions_table_guidance(self):
+        # Same guarantee on the system-prompt side so the agent sees it
+        # even before the return_report tool is loaded into attention.
+        assert "table" in DEFAULT_DATA_ANALYSIS_PROMPT.lower()
+        assert "return_dataset" in DEFAULT_DATA_ANALYSIS_PROMPT
+
+
 # ---------------------------------------------------------------------------
 # Re-exports
 # ---------------------------------------------------------------------------

@@ -53,7 +53,12 @@ from pydantic import ConfigDict, Field, PrivateAttr
 from parsimony_agents._naming import slug_from_title
 from parsimony_agents.agent.xml_render import escape_attr, escape_text
 from parsimony_agents.execution.outputs import DataFrameObject, FigureObject
-from parsimony_agents.identity import ArtifactRef, ExportFormat
+from parsimony_agents.identity import (
+    DEFAULT_REPORT_THEME,
+    ArtifactRef,
+    ExportFormat,
+    ReportTheme,
+)
 from parsimony_agents.messages import MessageContent
 
 
@@ -323,6 +328,16 @@ class Report(_ArtifactBase):
             "build per-format render config."
         ),
     )
+    theme: ReportTheme = Field(
+        default=DEFAULT_REPORT_THEME,
+        description=(
+            "Theme variant to apply to HTML / dashboard renders. 'brand' is "
+            "the workspace-aligned dark theme (default); 'light' is the "
+            "editorial light theme tuned for sharing externally. PDF (typst), "
+            "PPTX, and revealjs use their own format-specific styling and "
+            "ignore this field."
+        ),
+    )
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
         title = self.title or "(untitled)"
@@ -354,6 +369,7 @@ class Report(_ArtifactBase):
             "live_name": self.live_name,
             "embedded_refs": [r.to_dict() for r in self.embedded_refs],
             "formats": list(self.formats),
+            "theme": self.theme,
         }
 
 

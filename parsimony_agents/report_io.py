@@ -40,7 +40,7 @@ from typing import Final
 import yaml
 
 from parsimony_agents.artifacts import Report
-from parsimony_agents.identity import ExportFormat
+from parsimony_agents.identity import DEFAULT_REPORT_THEME, ExportFormat
 
 DEFAULT_FORMATS: Final[tuple[ExportFormat, ...]] = ("html", "pdf")
 
@@ -77,7 +77,13 @@ def write_report_bytes(report: Report) -> bytes:
         payload["abstract"] = "\n\n".join(report.notes)
     if report.tags:
         payload["keywords"] = list(report.tags)
-    payload["ockham"] = {"formats": formats}
+    ockham_block: dict[str, object] = {"formats": formats}
+    # Only emit `theme` when it diverges from the default — keeps the YAML
+    # minimal for the common case and the renderer reads ``"brand"`` from
+    # an absent key just as well as a present one.
+    if report.theme and report.theme != DEFAULT_REPORT_THEME:
+        ockham_block["theme"] = report.theme
+    payload["ockham"] = ockham_block
     yaml_text = yaml.safe_dump(
         payload,
         sort_keys=False,

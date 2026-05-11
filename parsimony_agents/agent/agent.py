@@ -70,6 +70,7 @@ from parsimony_agents.identity import (
     ArtifactRef,
     EXPORT_FORMATS,
     ExportFormat,
+    REPORT_THEMES,
     chart_logical_id,
     dataset_logical_id,
     notebook_content_sha,
@@ -2423,7 +2424,20 @@ class Agent:
             "  - Layout: ::: {.column-screen} for full-bleed, ::: {.column-page} for slightly "
             "wider, ::: {.column-margin} for Tufte-style margin notes, ::: {.aside} for asides.\n"
             "  - Cross-refs: ![Caption](file://...){#fig-name} then write '@fig-name' to auto-link "
-            "to 'Figure N'."
+            "to 'Figure N'.\n\n"
+            "Tables — when to use, when to avoid:\n"
+            "  - Default to prose, charts, and callouts. A reader scanning a report "
+            "learns more from a one-line summary or a chart than from a 20-row grid.\n"
+            "  - Small comparison tables are fine: ≤ ~6 rows and ≤ ~4 columns, where "
+            "every cell is genuinely meaningful side-by-side (scenario A vs B vs C, "
+            "before/after, pros/cons).\n"
+            "  - For longer or denser data, do NOT inline a markdown table. Either "
+            "(a) embed a chart that shows the shape of the data, or (b) call "
+            "return_dataset and reference the dataset by file:// path — the renderer "
+            "formats it for the export target.\n"
+            "  - If a long table is genuinely the best representation (e.g. an audit "
+            "log or a row-by-row reconciliation), say so explicitly in the surrounding "
+            "prose and keep it to one such table per report."
         ),
         parameters_schema={
             "type": "object",
@@ -2463,6 +2477,17 @@ class Agent:
                         "Quarto dashboard (cards, value-boxes, rows)."
                     ),
                 },
+                "theme": {
+                    "type": "string",
+                    "enum": ["brand", "light"],
+                    "description": (
+                        "Theme variant for HTML / dashboard output. 'brand' (default) "
+                        "is the workspace-aligned dark theme. 'light' is the editorial "
+                        "light theme — choose it when the report will be shared "
+                        "externally (publish, screenshot, send to stakeholders). "
+                        "PDF, PPTX, and revealjs ignore this field."
+                    ),
+                },
             },
             "required": ["title", "markdown", "embedded_refs", "description", "notes"],
             "additionalProperties": False,
@@ -2481,7 +2506,8 @@ class Agent:
         notes: list[str],
         tags: list[str] | None = None,
         live_name: str | None = None,
-        formats: list[Literal["html", "pdf", "pptx", "dashboard"]] | None = None,
+        formats: list[Literal["html", "pdf", "pptx", "revealjs", "dashboard"]] | None = None,
+        theme: Literal["brand", "light"] | None = None,
     ) -> Report:
         title = title.strip()
         if not title:
@@ -2502,17 +2528,20 @@ class Agent:
         else:
             ln = live_name
         report_formats: list[ExportFormat] = list(formats) if formats else ["html", "pdf"]
-        return Report(
-            logical_id=report_logical_id(embedded_refs=emb, title=title),
-            title=title,
-            description=description,
-            notes=notes,
-            tags=final_tags,
-            markdown=markdown,
-            embedded_refs=emb,
-            live_name=ln,
-            formats=report_formats,
-        )
+        report_kwargs: dict[str, Any] = {
+            "logical_id": report_logical_id(embedded_refs=emb, title=title),
+            "title": title,
+            "description": description,
+            "notes": notes,
+            "tags": final_tags,
+            "markdown": markdown,
+            "embedded_refs": emb,
+            "live_name": ln,
+            "formats": report_formats,
+        }
+        if theme is not None:
+            report_kwargs["theme"] = theme
+        return Report(**report_kwargs)
 
     @toolmethod(
         name="edit_report",
@@ -2605,25 +2634,33 @@ class Agent:
         except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
             curation = {}
 
-        # Carry formats forward from the prior snapshot's YAML — edit_report
-        # is a body-only edit, not a format-selection surface. Default to the
-        # Report model's default if the prior YAML is missing/malformed.
-        prior_formats_raw = (prior_yaml.get("ockham") or {}).get("formats") if isinstance(prior_yaml.get("ockham"), dict) else None
+        # Carry formats + theme forward from the prior snapshot's YAML —
+        # edit_report is a body-only edit, not a styling surface. Defaults
+        # to the Report model's defaults if the prior YAML is missing the
+        # field.
+        prior_ockham_dict = prior_yaml.get("ockham") if isinstance(prior_yaml.get("ockham"), dict) else {}
+        prior_formats_raw = prior_ockham_dict.get("formats") if isinstance(prior_ockham_dict, dict) else None
         prior_formats: list[ExportFormat] | None = None
         if isinstance(prior_formats_raw, list):
             prior_formats = [f for f in prior_formats_raw if f in EXPORT_FORMATS]
+        prior_theme_raw = prior_ockham_dict.get("theme") if isinstance(prior_ockham_dict, dict) else None
+        prior_theme = prior_theme_raw if isinstance(prior_theme_raw, str) and prior_theme_raw in REPORT_THEMES else None
 
-        return Report(
-            logical_id=target.logical_id,  # preserve identity — this is a revision
-            title=str(curation.get("title", "") or ""),
-            description=str(curation.get("description", "") or ""),
-            notes=list(curation.get("notes") or []),
-            tags=list(curation.get("tags") or []),
-            markdown=new_markdown,
-            embedded_refs=new_embedded,
-            live_name=curation.get("live_name") if isinstance(curation.get("live_name"), str) else None,
-            **({"formats": prior_formats} if prior_formats else {}),
-        )
+        revision_kwargs: dict[str, Any] = {
+            "logical_id": target.logical_id,  # preserve identity — this is a revision
+            "title": str(curation.get("title", "") or ""),
+            "description": str(curation.get("description", "") or ""),
+            "notes": list(curation.get("notes") or []),
+            "tags": list(curation.get("tags") or []),
+            "markdown": new_markdown,
+            "embedded_refs": new_embedded,
+            "live_name": curation.get("live_name") if isinstance(curation.get("live_name"), str) else None,
+        }
+        if prior_formats:
+            revision_kwargs["formats"] = prior_formats
+        if prior_theme is not None:
+            revision_kwargs["theme"] = prior_theme
+        return Report(**revision_kwargs)
 
     @toolmethod(
         name="refresh",

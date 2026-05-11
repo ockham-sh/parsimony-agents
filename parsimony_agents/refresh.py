@@ -47,6 +47,7 @@ from parsimony_agents.chart_io import deserialize_chart, write_chart_bytes
 from parsimony_agents.dataset_io import deserialize_dataset, write_dataset_bytes
 from parsimony_agents.identity import (
     EXPORT_FORMATS,
+    REPORT_THEMES,
     ArtifactRef,
     SnapshotKind,
     content_sha,
@@ -258,14 +259,20 @@ async def _refresh_report(ref: ArtifactRef, *, executor: _Executor) -> ArtifactR
                 emb.workspace_file_path, refreshed.workspace_file_path
             )
 
-    # Preserve formats from the prior snapshot's YAML — refresh is a
-    # data-axis update, not a format-selection surface. Falls back to the
-    # Report model's default if the prior YAML lacks the field.
+    # Preserve formats + theme from the prior snapshot's YAML — refresh is
+    # a data-axis update, not a styling surface. Falls back to the Report
+    # model's defaults if the prior YAML lacks the field.
     prior_ockham = prior_yaml.get("ockham") if isinstance(prior_yaml, dict) else None
     prior_formats_raw = prior_ockham.get("formats") if isinstance(prior_ockham, dict) else None
     prior_formats = (
         [f for f in prior_formats_raw if f in EXPORT_FORMATS]
         if isinstance(prior_formats_raw, list)
+        else None
+    )
+    prior_theme_raw = prior_ockham.get("theme") if isinstance(prior_ockham, dict) else None
+    prior_theme = (
+        prior_theme_raw
+        if isinstance(prior_theme_raw, str) and prior_theme_raw in REPORT_THEMES
         else None
     )
 
@@ -281,6 +288,8 @@ async def _refresh_report(ref: ArtifactRef, *, executor: _Executor) -> ArtifactR
     }
     if prior_formats:
         report_kwargs["formats"] = prior_formats
+    if prior_theme is not None:
+        report_kwargs["theme"] = prior_theme
     new_report = Report(**report_kwargs)
     new_blob = write_report_bytes(new_report)
     return await _persist_layer(

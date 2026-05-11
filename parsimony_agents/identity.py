@@ -36,10 +36,13 @@ git treats renames (delete + add) and lets all five kinds share a
 from __future__ import annotations
 
 __all__ = [
-    "ArtifactRef",
+    "DEFAULT_REPORT_THEME",
     "EXPORT_FORMATS",
-    "ExportFormat",
+    "REPORT_THEMES",
     "SNAPSHOT_KINDS",
+    "ArtifactRef",
+    "ExportFormat",
+    "ReportTheme",
     "SnapshotKind",
     "chart_logical_id",
     "content_sha",
@@ -74,6 +77,20 @@ SNAPSHOT_KINDS: Final[tuple[SnapshotKind, ...]] = get_args(SnapshotKind)
 ExportFormat = Literal["html", "pdf", "pptx", "revealjs", "dashboard"]
 
 EXPORT_FORMATS: Final[tuple[ExportFormat, ...]] = get_args(ExportFormat)
+
+
+# Per-report theme variant. Persisted in the report snapshot's YAML
+# preamble (``ockham.theme``) and read by the server's renderer to
+# pick the matching SCSS file. Affects HTML and dashboard formats only —
+# revealjs has its own light theme; PDF (typst) and PPTX (reference doc)
+# are intentionally theme-agnostic at this layer.
+#
+# - brand: workspace-aligned dark theme (default).
+# - light: editorial light theme tuned for sharing externally.
+ReportTheme = Literal["brand", "light"]
+
+REPORT_THEMES: Final[tuple[ReportTheme, ...]] = get_args(ReportTheme)
+DEFAULT_REPORT_THEME: Final[ReportTheme] = "brand"
 
 _EXT_BY_KIND: Final[dict[SnapshotKind, str]] = {
     "notebook": ".py",
