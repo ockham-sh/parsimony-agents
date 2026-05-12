@@ -128,18 +128,31 @@ class TestReportAuthoringGuidance:
     def test_return_report_description_mentions_table_guidance(self):
         agent = Agent(model="test-model")
         desc = agent.system_tools.tool_dict["return_report"].description
-        # Must name the escape hatch so the agent knows where to send
-        # long-form tabular data instead of inlining it.
-        assert "return_dataset" in desc
         # Must explicitly call tables out — bare "long" / "chart" wording
         # could regress without anyone noticing.
         assert "table" in desc.lower()
+        # Must show the literal image-embed syntax for datasets, because
+        # the agent previously regressed to link-syntax `[…](file://…)`
+        # when the guidance only said "reference the dataset by file://".
+        # The `![` prefix is the load-bearing distinction.
+        assert "![Caption](file://" in desc
+        assert ".parquet" in desc
+        # Must document the per-embed row-cap override so the agent has
+        # a way to ask for "show me the top 20" without falling back to
+        # hand-authoring a markdown table.
+        assert "preview-rows" in desc
 
     def test_default_prompt_mentions_table_guidance(self):
         # Same guarantee on the system-prompt side so the agent sees it
         # even before the return_report tool is loaded into attention.
         assert "table" in DEFAULT_DATA_ANALYSIS_PROMPT.lower()
-        assert "return_dataset" in DEFAULT_DATA_ANALYSIS_PROMPT
+        # Image syntax must be cited literally in the prose, not just
+        # described — otherwise the LLM falls back to link syntax.
+        assert ".parquet" in DEFAULT_DATA_ANALYSIS_PROMPT
+        assert "![" in DEFAULT_DATA_ANALYSIS_PROMPT
+        # The system prompt should also surface the {preview-rows=N}
+        # override so it's visible even before the tool description loads.
+        assert "preview-rows" in DEFAULT_DATA_ANALYSIS_PROMPT
 
 
 # ---------------------------------------------------------------------------

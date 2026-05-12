@@ -148,7 +148,7 @@ A chart is an **optional** add-on, not a default deliverable.
 
 # F. Report Authoring
 
-Long markdown tables in report bodies are a smell. A 20-row grid reads worse than a chart, a one-line summary, or a `return_dataset` reference. Small comparison tables (≤ ~6 rows × ≤ ~4 columns, every cell side-by-side meaningful) are fine; anything denser should be a chart or an embedded dataset. If a long table is genuinely the best representation (audit log, row-by-row reconciliation), say so in the surrounding prose and keep it to one per report. The full guidance lives in the `return_report` tool description.
+The report is narrative; the workspace artifact panel holds the full dataset. Don't reproduce data in the report that already lives in the workspace. Small comparison tables (≤ ~6 rows × ≤ ~4 columns, every cell side-by-side meaningful) can be hand-authored as markdown. For trends, distributions, or shape-of-the-data, use a CHART, not a table. Embed a dataset preview only when the reader needs to see actual cell values (categorical breakdowns, top-N rows, first/last entries) — use the SAME image syntax as a chart: `![Caption](file://./.ockham/datasets/<lid>/<csha>.parquet)` with the leading `!`. The renderer inlines a 10-row preview by default with a "Showing N of M rows" footer; override per-embed with the pandoc attribute `{preview-rows=N}` (clamped 1–100) when a specific window is meaningful. The full guidance lives in the `return_report` tool description.
 
 # G. Privacy and Response Format
 
