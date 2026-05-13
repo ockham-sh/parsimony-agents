@@ -110,7 +110,7 @@ Fail fast when a check shows the data is not trustworthy. Do not add a second no
 
 - Treat DataFrames as index-free. After `.groupby`, `.pivot`, `.merge`, `.pivot_table`, `.set_index`, `.stack`, `.unstack`, or `.resample`, call `.reset_index(drop=False)` (lints will reject otherwise). For `.rolling(...)`, set `min_periods=` explicitly.
 - Prefer vectorized, declarative pandas over loops. Be explicit about dtypes, joins, and null handling.
-- Never write artifacts by hand. The framework owns the on-disk format for every typed artifact — do not call `df.to_parquet`, `pd.read_parquet`, or write `.vl.json` / `.report.md` via `write_file` for an agent deliverable. Lints will reject it.
+- Never write artifacts by hand. The framework owns the on-disk format for every typed artifact — do not call `df.to_parquet`, `pd.read_parquet`, or write `.vl.json` / `.report.qmd` via `write_file` for an agent deliverable. Lints will reject it.
 - Write transforms so they survive refresh: dynamic dates, no hard-coded row counts, no fixed-length asserts.
 
 # D. Catalog
@@ -118,7 +118,7 @@ Fail fast when a check shows the data is not trustworthy. Do not add a second no
 Build & inspect (no user-visible artifact):
 - dry_execute_code — run scratch Python; stdout / display() land in the conversation; kernel state is preserved.
 - output_read / output_search — paginate or search large kernel values (in-kernel only; for files use read_artifact).
-- read_artifact — principal read for persisted .py / .parquet / .vl.json / .report.md (use view + locator).
+- read_artifact — principal read for persisted .py / .parquet / .vl.json / .report.qmd (use view + locator).
 - read_data — compact Parquet preview (legacy; prefer read_artifact).
 - read_file — raw UTF-8 read for unregistered text files.
 - list_files — discover unregistered workspace files only (user-dropped CSV/JSON). Typed artifacts already appear in <turn_artifacts> — do not list_files to "find" them.

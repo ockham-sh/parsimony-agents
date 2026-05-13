@@ -1801,7 +1801,7 @@ class Agent:
     @toolmethod(
         name="read_artifact",
         description=(
-            "Principal read for typed workspace files (.py / .parquet / .vl.json / .report.md / images). "
+            "Principal read for typed workspace files (.py / .parquet / .vl.json / .report.qmd / images). "
             "view=summary (default) | outline | page | full. page requires locator (e.g. {kind: rows, "
             "offset, limit} for Parquet, {kind: section, section_index} for .py). full renders charts as images."
         ),
@@ -2397,10 +2397,42 @@ class Agent:
     @toolmethod(
         name="return_report",
         description=(
-            "Publish a markdown report. markdown is the full body — leading '# Title', prose, and "
-            "embedded refs as ![](file://./.ockham/<kind>s/<logical_id>/<content_sha>.<ext>). "
-            "Each embedded path is the workspace_file_path of an existing snapshot (see prompt rule 5). "
-            "Pass every embedded artifact's triplet in embedded_refs for lineage."
+            "Publish a markdown report rendered by Quarto. markdown is the full body — leading '# Title', "
+            "prose, and embedded refs as ![](file://./.ockham/<kind>s/<logical_id>/<content_sha>.<ext>). "
+            "Embedded refs must be kind='chart' (vega-lite), 'dataset', or 'data_object' (both parquet). "
+            "formats is the list of output formats to publish — pick any subset of "
+            "['html','pdf','pptx','dashboard','revealjs']; default ['html','pdf']. "
+            "Do NOT write Quarto YAML, themes, or shortcodes — the framework owns rendering.\n\n"
+            "Tables vs charts. When you embed a dataset / data_object ref, the renderer "
+            "displays it as a table. Tables are for SHORT, CATEGORICAL, or COMPARATIVE data — "
+            "not for numerical data dumps. Use a table for: top-N rankings (e.g. 'top 5 customers "
+            "by revenue'), small benchmark grids (3–5 rows of method × metric), threshold or "
+            "reference values, headline KPIs. Use a CHART for: time series, wide numeric "
+            "dataframes, anything with a trend, distribution, or relationship. Heuristic — if "
+            "the data has more than ~6 rows AND multiple numeric columns, it's a chart, not a "
+            "table; build a return_chart on the dataset first, then embed that chart's ref in "
+            "the report. Long numeric tables render but are illegible.\n\n"
+            "Slide formats (revealjs, pptx) chop the SAME body on H2 boundaries (slide-level: 2). "
+            "When either is in formats, author the body so it works as both a flowing document AND a deck:\n"
+            "- '# Title' = cover slide; each '## Heading' = one new slide. Aim for 5–9 slides total.\n"
+            "- One idea per H2 section. Budget: ONE chart + 3–5 short bullets, OR ONE small table "
+            "(≤6 rows × ≤5 cols) + one-line caption, OR 2 short paragraphs of prose. Not all three.\n"
+            "- Two-column layouts use Quarto fenced divs:\n"
+            "  ::: {.columns}\n"
+            "  ::: {.column width=\"55%\"}\n"
+            "  ![Trend](file://./.ockham/charts/<lid>/<sha>.vl.json)\n"
+            "  :::\n"
+            "  ::: {.column width=\"45%\"}\n"
+            "  - Up 12% YoY\n"
+            "  - Asia-Pac drove the move\n"
+            "  :::\n"
+            "  :::\n"
+            "- Speaker notes (hidden in HTML/PDF, shown in pptx presenter view):\n"
+            "  ::: {.notes}\n  Q4 surge driven by enterprise renewals.\n  :::\n"
+            "- Per-slide escape hatches (use sparingly): '## Title {.smaller}' shrinks font on one "
+            "slide; '## Title {.scrollable}' lets revealjs scroll a single overflowing slide.\n"
+            "The renderer defensively caps oversized tables and resizes charts for slide formats, but "
+            "plan content to fit — relying on auto-truncation produces visible truncation notes."
         ),
         parameters_schema={
             "type": "object",
@@ -2427,6 +2459,11 @@ class Agent:
                     "type": "string",
                     "description": "File-tree name (no extension); '' hides from live tree.",
                 },
+                "formats": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["html", "pdf", "pptx", "dashboard", "revealjs"]},
+                    "description": "Output formats Quarto should produce. Defaults to ['html'] when omitted.",
+                },
             },
             "required": ["title", "markdown", "embedded_refs", "description", "notes"],
             "additionalProperties": False,
@@ -2445,7 +2482,10 @@ class Agent:
         notes: list[str],
         tags: list[str] | None = None,
         live_name: str | None = None,
+        formats: list[str] | None = None,
     ) -> Report:
+        from parsimony_agents.report_format import DEFAULT_FORMATS, VALID_FORMATS
+
         title = title.strip()
         if not title:
             raise ValueError("title must be a non-empty string.")
@@ -2453,6 +2493,12 @@ class Agent:
             raise ValueError("markdown must be a non-empty string.")
         notes = TypeAdapter(list[str]).validate_python(notes)
         emb = _parse_artifact_refs(embedded_refs, parameter_name="embedded_refs")
+        for ref in emb:
+            if ref.kind not in ("chart", "dataset", "data_object"):
+                raise ValueError(
+                    f"return_report: embedded_refs only accepts kind in {{chart, dataset, data_object}}; "
+                    f"got kind={ref.kind!r}. Reports embed published artifacts, not notebooks or other reports."
+                )
         await self._validate_refs_resolve(emb)
         final_tags: list[str] = []
         for t in TypeAdapter(list[str]).validate_python(tags or []):
@@ -2464,6 +2510,24 @@ class Agent:
             ln = None if live_name == "" else None
         else:
             ln = live_name
+        chosen_formats: list[str]
+        if formats is None or not formats:
+            chosen_formats = list(DEFAULT_FORMATS)
+        else:
+            seen: set[str] = set()
+            chosen_formats = []
+            for f in TypeAdapter(list[str]).validate_python(formats):
+                s = f.strip()
+                if not s or s in seen:
+                    continue
+                if s not in VALID_FORMATS:
+                    raise ValueError(
+                        f"return_report: unknown format {s!r}; pick from {sorted(VALID_FORMATS)}."
+                    )
+                seen.add(s)
+                chosen_formats.append(s)
+            if not chosen_formats:
+                chosen_formats = list(DEFAULT_FORMATS)
         return Report(
             logical_id=report_logical_id(embedded_refs=emb, title=title),
             title=title,
@@ -2473,14 +2537,16 @@ class Agent:
             markdown=markdown,
             embedded_refs=emb,
             live_name=ln,
+            formats=chosen_formats,
         )
 
     @toolmethod(
         name="edit_report",
         description=(
             "Surgical edit of an existing report: replace one occurrence of old_str with new_str against "
-            "the latest snapshot. logical_id is preserved; embedded_refs are re-extracted from the new "
-            "markdown."
+            "the latest snapshot. logical_id and the persisted formats list are preserved; "
+            "embedded_refs are re-extracted from the new markdown. To switch output formats, "
+            "re-publish via return_report with the new formats list."
         ),
         parameters_schema={
             "type": "object",
@@ -2509,6 +2575,8 @@ class Agent:
         old_str: str,
         new_str: str,
     ) -> Report:
+        from parsimony_agents.report_format import parse_snapshot
+
         target = _parse_artifact_refs([ref], parameter_name="ref")[0]
         if target.kind != "report":
             raise ValueError(
@@ -2538,9 +2606,13 @@ class Agent:
                 f"edit_report: report {target.logical_id!r} log.jsonl has no usable entries."
             )
 
-        snapshot_path = f".ockham/reports/{target.logical_id}/{last_csha}.report.md"
+        snapshot_path = f".ockham/reports/{target.logical_id}/{last_csha}.report.qmd"
         raw = await self.code_executor.read_workspace_file(snapshot_path)
-        markdown = raw.decode("utf-8")
+        # Read/edit symmetry: old_str matches against the body the agent
+        # authored, not the persisted bytes (which carry a leading
+        # ``formats:`` line). Parse the snapshot first, edit the body
+        # alone, recompose at persist time.
+        formats, markdown = parse_snapshot(raw.decode("utf-8"))
         n = markdown.count(old_str)
         if n == 0:
             raise ValueError("edit_report: old_str not found in report markdown.")
@@ -2575,6 +2647,7 @@ class Agent:
             markdown=new_markdown,
             embedded_refs=new_embedded,
             live_name=curation.get("live_name") if isinstance(curation.get("live_name"), str) else None,
+            formats=formats,  # preserved across edits — see tool description
         )
 
     @toolmethod(

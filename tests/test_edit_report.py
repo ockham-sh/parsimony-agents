@@ -83,10 +83,13 @@ def _seed_report(
     tags: list[str] | None = None,
     notes: list[str] | None = None,
 ) -> ArtifactRef:
-    """Write a published report's snapshot + log + curation into the stub FS."""
-    blob = markdown.encode("utf-8")
+    """Write a published report's snapshot + log + curation into the stub FS.
+
+    Seeds the canonical snapshot bytes: ``formats: html\\n\\n<markdown>``.
+    """
+    blob = f"formats: html\n\n{markdown}".encode("utf-8")
     csha = content_sha(blob)
-    snap_path = f".ockham/reports/{logical_id}/{csha}.report.md"
+    snap_path = f".ockham/reports/{logical_id}/{csha}.report.qmd"
     log_path = f".ockham/reports/{logical_id}/log.jsonl"
     cur_path = f".ockham/reports/{logical_id}/curation.json"
     executor.files[snap_path] = blob
@@ -230,14 +233,14 @@ async def test_edit_report_resolves_to_latest_snapshot() -> None:
     """When ``ref.content_sha`` is stale, the edit applies to the latest revision."""
     ex = _ReportExecutor()
     # Initial revision.
-    md1 = "# Hi\n\noriginal text\n"
+    md1 = "formats: html\n\n# Hi\n\noriginal text\n"
     csha1 = content_sha(md1.encode("utf-8"))
-    snap_path1 = f".ockham/reports/rep4/{csha1}.report.md"
+    snap_path1 = f".ockham/reports/rep4/{csha1}.report.qmd"
     ex.files[snap_path1] = md1.encode("utf-8")
     # Newer revision (refresh, etc.). Both entries in log.jsonl; latest wins.
-    md2 = "# Hi\n\nupdated text\n"
+    md2 = "formats: html\n\n# Hi\n\nupdated text\n"
     csha2 = content_sha(md2.encode("utf-8"))
-    snap_path2 = f".ockham/reports/rep4/{csha2}.report.md"
+    snap_path2 = f".ockham/reports/rep4/{csha2}.report.qmd"
     ex.files[snap_path2] = md2.encode("utf-8")
     ex.files[".ockham/reports/rep4/log.jsonl"] = (
         json.dumps({"ts": "t1", "content_sha": csha1, "inputs": {}}) + "\n"

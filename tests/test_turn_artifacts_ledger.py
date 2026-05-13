@@ -154,7 +154,7 @@ def test_to_llm_text_replaces_advanced_artifact_in_place() -> None:
     state = SessionState(
         workspace_artifacts=[
             WorkspaceArtifactLine(
-                path="reports/r.report.md",
+                path="reports/r.report.qmd",
                 kind="report",
                 summary="orig",
                 ref=ArtifactRef(kind="report", logical_id="lid-r", content_sha="cs1"),

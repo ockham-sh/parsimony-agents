@@ -236,8 +236,13 @@ async def _refresh_chart(ref: ArtifactRef, *, executor: _Executor) -> ArtifactRe
 
 
 async def _refresh_report(ref: ArtifactRef, *, executor: _Executor) -> ArtifactRef:
+    from parsimony_agents.report_format import parse_snapshot
+
     blob = await _read_snapshot(executor, ref)
-    markdown = blob.decode("utf-8")
+    # Snapshot bytes carry the leading ``formats:`` line — separate it
+    # from the body so ref-substitution only touches what the agent
+    # authored, and the formats list survives the refresh.
+    formats, markdown = parse_snapshot(blob.decode("utf-8"))
     embedded = embedded_refs_from_markdown(markdown)
     curation = await _load_report_curation(executor, ref)
 
@@ -265,8 +270,9 @@ async def _refresh_report(ref: ArtifactRef, *, executor: _Executor) -> ArtifactR
         live_name=curation.get("live_name"),
         markdown=new_markdown,
         embedded_refs=new_embedded,
+        formats=formats,
     )
-    new_blob = new_markdown.encode("utf-8")
+    new_blob = new_report.snapshot_bytes()
     return await _persist_layer(
         executor=executor,
         kind="report",

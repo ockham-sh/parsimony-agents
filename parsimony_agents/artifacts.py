@@ -299,16 +299,28 @@ class Report(_ArtifactBase):
 
     Reports are user-readable deliverables: their content is a markdown
     string, not an in-kernel object. They live at
-    ``.ockham/reports/<logical_id>/<content_sha>.report.md`` with
-    sibling curation/log files. ``embedded_refs`` are frozen by default
-    (§2.7) — a re-author against newer data produces a new report
-    snapshot whose embedded refs may be newer; old snapshots stay
-    byte-stable and reproducible.
+    ``.ockham/reports/<logical_id>/<content_sha>.report.qmd`` with
+    sibling curation/log files.
+
+    Snapshot byte shape (axis B / D in PICKS.md): an optional leading
+    ``formats: html,pdf,...`` line, a blank line, then the agent's
+    markdown body. The formats line is part of the persisted bytes — it
+    participates in ``content_sha``, so format-list changes fork a new
+    snapshot under the same ``logical_id``. Everything else (themes,
+    paths, embed-resources) is composed server-side at render time.
+
+    ``embedded_refs`` are frozen by default — a re-author against newer
+    data produces a new report snapshot whose embedded refs may be
+    newer; old snapshots stay byte-stable and reproducible.
     """
 
     type: Literal["report"] = "report"
 
     markdown: str = ""
+    formats: list[str] = Field(
+        default_factory=lambda: ["html"],
+        description="Output formats the agent requested at publish time.",
+    )
     embedded_refs: list[ArtifactRef] = Field(
         default_factory=list,
         description="Frozen refs to artifacts embedded in the markdown source.",
@@ -342,17 +354,29 @@ class Report(_ArtifactBase):
             "tags": list(self.tags),
             "notes": list(self.notes),
             "live_name": self.live_name,
+            "formats": list(self.formats),
             "embedded_refs": [r.to_dict() for r in self.embedded_refs],
         }
 
-    def save(self, path: str | Path) -> None:
+    def snapshot_bytes(self) -> bytes:
+        """Serialize the canonical on-disk shape: ``formats:`` line + body.
+
+        Single source of truth for what hits disk and what gets hashed
+        into ``content_sha``. Validation runs on the body part upstream;
+        this just composes the two halves.
+        """
+        from parsimony_agents.report_format import compose_snapshot
+
         if not self.markdown.strip():
-            raise ValueError("Report.save: markdown is empty")
+            raise ValueError("Report.snapshot_bytes: markdown is empty")
+        return compose_snapshot(self.formats, self.markdown).encode("utf-8")
+
+    def save(self, path: str | Path) -> None:
         target = Path(path)
-        if "".join(target.suffixes[-2:]) != ".report.md":
-            raise ValueError(f"Report.save: path must end in .report.md, got {path!r}")
+        if "".join(target.suffixes[-2:]) != ".report.qmd":
+            raise ValueError(f"Report.save: path must end in .report.qmd, got {path!r}")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(self.markdown.encode("utf-8"))
+        target.write_bytes(self.snapshot_bytes())
 
 
 # ============================================================================

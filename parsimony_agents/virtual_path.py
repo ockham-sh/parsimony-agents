@@ -29,7 +29,7 @@ VIRTUAL_LIVE_KINDS: Final[dict[str, tuple[str, str]]] = {
     "notebooks": ("notebook", ".py"),
     "data": ("dataset", ".parquet"),
     "charts": ("chart", ".vl.json"),
-    "reports": ("report", ".report.md"),
+    "reports": ("report", ".report.qmd"),
 }
 
 
