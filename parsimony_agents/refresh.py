@@ -35,7 +35,11 @@ intent.
 
 from __future__ import annotations
 
-__all__ = ["embedded_refs_from_markdown", "refresh_artifact"]
+__all__ = [
+    "embedded_refs_from_markdown",
+    "extract_embed_keys_from_markdown",
+    "refresh_artifact",
+]
 
 import json
 import re
@@ -236,37 +240,40 @@ async def _refresh_chart(ref: ArtifactRef, *, executor: _Executor) -> ArtifactRe
 
 
 async def _refresh_report(ref: ArtifactRef, *, executor: _Executor) -> ArtifactRef:
+    from parsimony_agents.report_format import parse_snapshot
+
     blob = await _read_snapshot(executor, ref)
-    markdown = blob.decode("utf-8")
-    embedded = embedded_refs_from_markdown(markdown)
+    # Snapshot bytes carry a YAML frontmatter ``parsimony:`` block with
+    # title/subtitle, the formats list, and the live_name → ArtifactRef
+    # pin map. Body is immutable under refresh (it speaks in live_names,
+    # not content hashes); only the pin map drifts as upstream artifacts
+    # get new content_shas. Title/subtitle are preserved from the
+    # snapshot, not re-sourced from curation — refresh keeps the report's
+    # authored presentation intact.
+    snap = parse_snapshot(blob.decode("utf-8"))
     curation = await _load_report_curation(executor, ref)
 
-    new_embedded: list[ArtifactRef] = []
-    new_markdown = markdown
-    for emb in embedded:
+    new_pin_map: dict[str, ArtifactRef] = {}
+    for live_name, emb in snap.pins.items():
         if emb.kind not in _REFRESHABLE_KINDS:
-            # data_objects can't be refreshed standalone; notebooks
-            # aren't valid embed targets in reports. Pass through.
-            new_embedded.append(emb)
+            new_pin_map[live_name] = emb
             continue
-        refreshed = await _refresh(emb, executor=executor)
-        new_embedded.append(refreshed)
-        if refreshed.content_sha != emb.content_sha:
-            new_markdown = new_markdown.replace(
-                emb.workspace_file_path, refreshed.workspace_file_path
-            )
+        new_pin_map[live_name] = await _refresh(emb, executor=executor)
+    new_embedded = embedded_refs_from_markdown(snap.body, new_pin_map)
 
     new_report = Report(
         logical_id=ref.logical_id,
-        title=curation.get("title", "") or "",
+        title=snap.title,
+        subtitle=snap.subtitle,
         description=curation.get("description", "") or "",
         tags=list(curation.get("tags") or []),
         notes=list(curation.get("notes") or []),
         live_name=curation.get("live_name"),
-        markdown=new_markdown,
-        embedded_refs=new_embedded,
+        markdown=snap.body,
+        live_name_pins=new_pin_map,
+        formats=snap.formats,
     )
-    new_blob = new_markdown.encode("utf-8")
+    new_blob = new_report.snapshot_bytes()
     return await _persist_layer(
         executor=executor,
         kind="report",
@@ -421,31 +428,80 @@ async def _load_report_curation(
     return data if isinstance(data, dict) else {}
 
 
-_EMBEDDED_PATH_RE = re.compile(
-    r"\.ockham/(?:notebooks|data_objects|datasets|charts|reports)/[^\s)\"']+"
+# Body embeds reference live tree paths, not content-addressed paths:
+# the renderer resolves them against the snapshot's frozen pin map.
+_EMBED_URI_RE = re.compile(
+    r"file://\./(?P<dir>charts|data)/(?P<live_name>[A-Za-z0-9_-]+)\.(?P<ext>vl\.json|parquet)"
 )
 
+# Body URI dir → canonical artifact kind. Charts live under ``charts/``;
+# datasets live under ``data/`` (matches VIRTUAL_LIVE_KINDS).
+_DIR_TO_KIND: dict[str, SnapshotKind] = {
+    "charts": "chart",
+    "data": "dataset",
+}
 
-def embedded_refs_from_markdown(markdown: str) -> list[ArtifactRef]:
-    """Recover embedded ArtifactRefs by parsing ``.ockham/...`` paths.
+_KIND_TO_DIR: dict[SnapshotKind, str] = {v: k for k, v in _DIR_TO_KIND.items()}
 
-    Reports embed snapshots via
-    ``![](file://./.ockham/<kind>s/<lid>/<csha>.<ext>)`` — the path IS
-    the ref, so we re-derive it via
-    :meth:`ArtifactRef.from_workspace_file_path` rather than threading a
-    duplicate field through the log. Order-preserving and dedup'd by
-    ``workspace_file_path`` (same path = same ref).
+_EXT_BY_KIND: dict[SnapshotKind, str] = {
+    "chart": "vl.json",
+    "dataset": "parquet",
+}
+
+
+def extract_embed_keys_from_markdown(markdown: str) -> list[tuple[SnapshotKind, str]]:
+    """Return ``(kind, live_name)`` for each embed URI in body order.
+
+    Used at ``return_report`` persist time to discover which artifacts
+    the agent embedded; the pin map is then built by curation lookup
+    for each tuple. Deduplicated by ``(kind, live_name)``; later
+    duplicates are dropped.
     """
-    seen: set[str] = set()
-    out: list[ArtifactRef] = []
-    for match in _EMBEDDED_PATH_RE.finditer(markdown):
-        path = match.group(0)
-        if path in seen:
+    seen: set[tuple[SnapshotKind, str]] = set()
+    out: list[tuple[SnapshotKind, str]] = []
+    for m in _EMBED_URI_RE.finditer(markdown):
+        key = (_DIR_TO_KIND[m.group("dir")], m.group("live_name"))
+        if key in seen:
             continue
-        seen.add(path)
-        ref = ArtifactRef.from_workspace_file_path(path)
-        if ref is not None:
-            out.append(ref)
+        seen.add(key)
+        out.append(key)
+    return out
+
+
+def embedded_refs_from_markdown(
+    markdown: str, pin_map: dict[str, ArtifactRef]
+) -> list[ArtifactRef]:
+    """Resolve every embed URI in ``markdown`` to an ``ArtifactRef`` via ``pin_map``.
+
+    Reports embed published artifacts via
+    ``![](file://./charts/<live_name>.vl.json)`` (chart) or
+    ``![](file://./data/<live_name>.parquet)`` (dataset). The pin map
+    travels with the snapshot bytes — see :mod:`report_format` — so
+    refresh and rename never change what an old snapshot renders to.
+
+    Raises ``ValueError`` when a body live_name is not in ``pin_map``
+    or when the pin's ``kind`` disagrees with the URI's directory.
+    """
+    out: list[ArtifactRef] = []
+    seen: set[str] = set()
+    for kind, live_name in extract_embed_keys_from_markdown(markdown):
+        if live_name in seen:
+            continue
+        seen.add(live_name)
+        ref = pin_map.get(live_name)
+        if ref is None:
+            raise ValueError(
+                f"report body references live_name {live_name!r} but the snapshot "
+                "pin map has no entry for it; rebuild via return_report so the "
+                "framework can re-mint the pin map."
+            )
+        if ref.kind != kind:
+            raise ValueError(
+                f"report body references {live_name!r} under {_KIND_TO_DIR[kind]}/ "
+                f"(kind={kind!r}), but the pin map binds it to kind={ref.kind!r}; "
+                "rebuild via return_report."
+            )
+        out.append(ref)
     return out
 
 

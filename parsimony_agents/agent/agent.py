@@ -69,6 +69,7 @@ from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.identity import (
     ArtifactRef,
     LiveNameCollisionError,
+    SnapshotKind,
     chart_logical_id,
     dataset_logical_id,
     notebook_content_sha,
@@ -76,7 +77,11 @@ from parsimony_agents.identity import (
     report_logical_id,
 )
 from parsimony_agents.agent.seen_refs import extract_seen_live_names
-from parsimony_agents.refresh import embedded_refs_from_markdown, refresh_artifact
+from parsimony_agents.refresh import (
+    embedded_refs_from_markdown,
+    extract_embed_keys_from_markdown,
+    refresh_artifact,
+)
 from parsimony_agents.agent.xml_render import escape_attr, escape_text
 from parsimony_agents.execution import (
     DataFrameObject,
@@ -2507,17 +2512,45 @@ class Agent:
     @toolmethod(
         name="return_report",
         description=(
-            "Publish a markdown report. ``markdown`` is the full body — leading "
-            "'# Title', prose, and embedded artifacts as "
-            "``![](file://./.ockham/<kind>s/<logical_id>/<content_sha>.<ext>)``. "
-            "The framework parses those paths and treats them as the report's "
-            "embedded_refs; you do not pass a separate lineage list."
+            "Publish a markdown report rendered by Quarto. The framework parses embedded "
+            "artifact URIs from the body, freezes a pin map alongside the snapshot so old "
+            "reports stay byte-stable when an embedded artifact is later renamed, and "
+            "renders each requested format. Title and subtitle render at the top of "
+            "documents and as the cover slide of decks — they live in the parsimony "
+            "metadata, NOT as a leading '# Title' heading in the body. Don't write Quarto "
+            "YAML, themes, or shortcodes — the framework owns rendering. See section F of "
+            "the system prompt for tables-vs-charts and slide-deck composition guidance."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
-                "title": {"type": "string", "description": "Display title (matches leading '# Title')."},
-                "markdown": {"type": "string", "description": "Full markdown body with embedded refs."},
+                "title": {
+                    "type": "string",
+                    "description": (
+                        "Display title rendered at the top of documents and on the cover "
+                        "slide of decks. Do NOT also include it as a leading '# Title' "
+                        "heading in markdown — that would duplicate it."
+                    ),
+                },
+                "subtitle": {
+                    "type": "string",
+                    "description": (
+                        "Optional one-line subtitle rendered below the title in documents "
+                        "and on the cover slide in decks. Omit when there is nothing to "
+                        "add — empty subtitles render no extra line."
+                    ),
+                },
+                "markdown": {
+                    "type": "string",
+                    "description": (
+                        "Body content only (no leading '# Title' — that comes from the "
+                        "title parameter). Prose plus embedded artifacts referenced by "
+                        "live_name. Embed syntax: ![alt](file://./charts/<live_name>.vl.json) "
+                        "for charts, ![alt](file://./data/<live_name>.parquet) for datasets "
+                        "(renders as a table). Only charts and datasets are embeddable — "
+                        "notebooks, data_objects, and other reports are not."
+                    ),
+                },
                 "description": {"type": "string", "description": "One sentence on what the report covers."},
                 "notes": {
                     "type": "array",
@@ -2531,7 +2564,16 @@ class Agent:
                 },
                 "live_name": {
                     "type": "string",
-                    "description": "File-tree slug (no extension).",
+                    "description": "File-tree slug (no extension); the handle other tools reference this report by.",
+                },
+                "formats": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["html", "pdf", "pptx", "dashboard", "revealjs"]},
+                    "description": (
+                        "Output formats Quarto should produce. Defaults to ['html','pdf']. "
+                        "Slide formats (pptx, revealjs) slice the body on H2 boundaries — "
+                        "see section F of the system prompt for deck composition."
+                    ),
                 },
             },
             "required": ["title", "markdown", "description", "notes", "live_name"],
@@ -2549,8 +2591,12 @@ class Agent:
         description: str,
         notes: list[str],
         live_name: str,
+        subtitle: str | None = None,
         tags: list[str] | None = None,
+        formats: list[str] | None = None,
     ) -> Report:
+        from parsimony_agents.report_format import DEFAULT_FORMATS, VALID_FORMATS
+
         title = title.strip()
         if not title:
             raise ValueError("title must be a non-empty string.")
@@ -2559,36 +2605,53 @@ class Agent:
         live_name = (live_name or "").strip()
         if not live_name:
             raise ValueError("live_name must be a non-empty workspace slug.")
+        subtitle_value = (subtitle or "").strip()
         notes = TypeAdapter(list[str]).validate_python(notes)
-        # Parse the embedded refs from the markdown body — the path IS the ref.
-        # Reject the report if any reference does not resolve on disk.
-        #
-        # TODO(report-embed-by-live_name): swap this surface to live_name —
-        # the lid/csha in the path is the last hash leak in the agent surface,
-        # and the agent has been observed typing `latest` here in the hope it
-        # would resolve (it does not). Keep snapshots reproducible by
-        # persisting a frozen live_name → ArtifactRef pin map alongside the
-        # report curation (analogue of dataset/chart source_refs); the
-        # renderer resolves embeds against that pin map, so refresh produces a
-        # new report snapshot pointing at the new version while old snapshots
-        # stay byte-stable. Also update ``embedded_refs_from_markdown`` and
-        # ``_validate_refs_resolve`` once the surface flips.
-        emb = embedded_refs_from_markdown(markdown)
+        # Body embeds artifacts by live_name. We walk every URI in the
+        # body, look up the artifact's latest snapshot via curation, and
+        # build a frozen ``live_name -> ArtifactRef`` pin map that
+        # travels with the snapshot bytes. The renderer resolves embeds
+        # against THIS map (not current curation), so renaming an
+        # embedded artifact after publication never silently mutates an
+        # old render. Closes TODO(report-embed-by-live_name).
+        embed_keys = extract_embed_keys_from_markdown(markdown)
+        pin_map = await self._build_report_pin_map(embed_keys)
+        emb = embedded_refs_from_markdown(markdown, pin_map)
         await self._validate_refs_resolve(emb)
         final_tags: list[str] = []
         for t in TypeAdapter(list[str]).validate_python(tags or []):
             s = str(t).strip()
             if s and s not in final_tags:
                 final_tags.append(s)
+        chosen_formats: list[str]
+        if formats is None or not formats:
+            chosen_formats = list(DEFAULT_FORMATS)
+        else:
+            seen: set[str] = set()
+            chosen_formats = []
+            for f in TypeAdapter(list[str]).validate_python(formats):
+                s = f.strip()
+                if not s or s in seen:
+                    continue
+                if s not in VALID_FORMATS:
+                    raise ValueError(
+                        f"return_report: unknown format {s!r}; pick from {sorted(VALID_FORMATS)}."
+                    )
+                seen.add(s)
+                chosen_formats.append(s)
+            if not chosen_formats:
+                chosen_formats = list(DEFAULT_FORMATS)
         return Report(
             logical_id=report_logical_id(embedded_refs=emb, title=title),
             title=title,
+            subtitle=subtitle_value,
             description=description,
             notes=notes,
             tags=final_tags,
             markdown=markdown,
-            embedded_refs=emb,
+            live_name_pins=pin_map,
             live_name=live_name,
+            formats=chosen_formats,
         )
 
     @toolmethod(
@@ -2596,8 +2659,9 @@ class Agent:
         description=(
             "Surgical edit of an existing report: replace one occurrence of old_str "
             "with new_str against the latest snapshot. Identify the report by its "
-            "workspace slug (live_name). logical_id is preserved; embedded refs "
-            "are re-extracted from the new markdown body."
+            "workspace slug (live_name). logical_id and the persisted formats list "
+            "are preserved; embedded refs are re-extracted from the new markdown body. "
+            "To switch output formats, re-publish via return_report with the new formats list."
         ),
         parameters_schema={
             "type": "object",
@@ -2626,6 +2690,8 @@ class Agent:
         old_str: str,
         new_str: str,
     ) -> Report:
+        from parsimony_agents.report_format import parse_snapshot
+
         live_name = (live_name or "").strip()
         if not live_name:
             raise ValueError("edit_report: live_name must be non-empty.")
@@ -2654,19 +2720,28 @@ class Agent:
                 f"edit_report: report {live_name!r} log.jsonl has no usable entries."
             )
 
-        snapshot_path = f".ockham/reports/{target_lid}/{last_csha}.report.md"
+        snapshot_path = f".ockham/reports/{target_lid}/{last_csha}.qmd"
         raw = await self.code_executor.read_workspace_file(snapshot_path)
-        markdown = raw.decode("utf-8")
-        n = markdown.count(old_str)
+        # Read/edit symmetry: old_str matches against the body the agent
+        # authored, not the persisted bytes (which carry YAML
+        # frontmatter). Parse the snapshot first, edit the body alone,
+        # recompose at persist time. Title, subtitle, and pin map all
+        # travel through unchanged — edit_report is body-only; use
+        # return_report to change title/subtitle or embeds.
+        snap = parse_snapshot(raw.decode("utf-8"))
+        n = snap.body.count(old_str)
         if n == 0:
             raise ValueError("edit_report: old_str not found in report markdown.")
         if n > 1:
             raise ValueError(
                 "edit_report: old_str occurs multiple times; provide a more specific target."
             )
-        new_markdown = markdown.replace(old_str, new_str, 1)
+        new_markdown = snap.body.replace(old_str, new_str, 1)
 
-        new_embedded = embedded_refs_from_markdown(new_markdown)
+        # Resolve embeds against the PRESERVED pin map. If the edit
+        # added a new live_name URI that's not in the pin map this
+        # raises — by design, since the snapshot's pin map is frozen.
+        new_embedded = embedded_refs_from_markdown(new_markdown, snap.pins)
         await self._validate_refs_resolve(new_embedded)
 
         cur_path = f".ockham/reports/{target_lid}/curation.json"
@@ -2678,13 +2753,15 @@ class Agent:
 
         return Report(
             logical_id=target_lid,
-            title=str(curation.get("title", "") or ""),
+            title=snap.title,
+            subtitle=snap.subtitle,
             description=str(curation.get("description", "") or ""),
             notes=list(curation.get("notes") or []),
             tags=list(curation.get("tags") or []),
             markdown=new_markdown,
-            embedded_refs=new_embedded,
+            live_name_pins=snap.pins,  # frozen — edits never re-pin
             live_name=curation.get("live_name") if isinstance(curation.get("live_name"), str) else live_name,
+            formats=snap.formats,
         )
 
     @toolmethod(
@@ -2764,14 +2841,13 @@ class Agent:
         """Reconstruct a :class:`Report` model from disk after refresh.
 
         Reports have no in-kernel payload — snapshot bytes ARE the
-        markdown source. Curation lives in the sibling ``curation.json``;
-        embedded refs are recovered by parsing the markdown's
-        ``.ockham/<kind>s/<lid>/<csha>.<ext>`` paths (the same shape
-        :func:`refresh.embedded_refs_from_markdown` produces).
+        source document. The YAML frontmatter carries the pin map; the
+        body's ``file://./charts|data/<live_name>.<ext>`` URIs resolve
+        against it.
         """
-        from parsimony_agents.refresh import embedded_refs_from_markdown
+        from parsimony_agents.report_format import parse_snapshot
 
-        markdown = blob.decode("utf-8")
+        snap = parse_snapshot(blob.decode("utf-8"))
         cur_path = f".ockham/reports/{ref.logical_id}/curation.json"
         try:
             raw_cur = await self.code_executor.read_workspace_file(cur_path)
@@ -2781,13 +2857,15 @@ class Agent:
         return Report(
             logical_id=ref.logical_id,
             content_sha=ref.content_sha,
-            title=cur.get("title", "") or "",
+            title=snap.title,
+            subtitle=snap.subtitle,
             description=cur.get("description", "") or "",
             tags=list(cur.get("tags") or []),
             notes=list(cur.get("notes") or []),
             live_name=cur.get("live_name"),
-            markdown=markdown,
-            embedded_refs=embedded_refs_from_markdown(markdown),
+            markdown=snap.body,
+            live_name_pins=snap.pins,
+            formats=snap.formats,
         )
 
     @staticmethod
@@ -2805,10 +2883,11 @@ class Agent:
     async def _validate_refs_resolve(self, refs: list[ArtifactRef]) -> None:
         """Each ref must resolve to bytes on disk.
 
-        Used for ``return_report``: every embedded ``.ockham/...`` path
-        in the markdown body must point at a real snapshot. Refresh and
-        return_dataset/chart derive their refs from the framework (the
-        run scope and the snapshot store), so they never hit this path.
+        Used by ``return_report`` / ``edit_report``: every ArtifactRef
+        the body resolves to (via the pin map) must point at a real
+        snapshot on disk. Refresh and return_dataset/chart derive their
+        refs from the framework (the run scope + snapshot store), so
+        they never hit this path.
         """
         for ref in refs:
             try:
@@ -2817,9 +2896,85 @@ class Agent:
                 raise ValueError(
                     f"Embedded ref {ref.kind}:{ref.logical_id}:{ref.content_sha} does not "
                     f"resolve ({ref.workspace_file_path!r} not found). Reports embed "
-                    "artifacts via ![](file://./.ockham/<kind>s/<lid>/<csha>.<ext>) — "
-                    "the path must be one of the rows in <turn_artifacts>."
+                    "artifacts via ![](file://./charts/<live_name>.vl.json) or "
+                    "![](file://./data/<live_name>.parquet) — the live_name must already "
+                    "be a published chart or dataset in this workspace."
                 ) from e
+
+    async def _build_report_pin_map(
+        self, embed_keys: list[tuple[SnapshotKind, str]]
+    ) -> dict[str, ArtifactRef]:
+        """Resolve each ``(kind, live_name)`` to its latest published snapshot.
+
+        Walks ``.ockham/<kind>s/*/curation.json`` for the first match
+        whose ``live_name`` equals the requested slug AND whose
+        ``log.jsonl`` has at least one persisted snapshot. Returns the
+        ``live_name -> ArtifactRef`` mapping that travels with the
+        snapshot bytes — the renderer never re-resolves through
+        curation, so this map alone determines what an old report
+        renders to.
+
+        Raises ``ValueError`` when a live_name has no matching artifact
+        on disk; the agent must publish the embedded chart/dataset
+        before publishing the report.
+        """
+        pin_map: dict[str, ArtifactRef] = {}
+        seen_live_names: set[str] = set()
+        for kind, live_name in embed_keys:
+            if live_name in seen_live_names:
+                continue  # already pinned via earlier (kind, live_name) tuple
+            seen_live_names.add(live_name)
+            ref = await self._resolve_live_name_to_latest_ref(
+                kind=kind, live_name=live_name
+            )
+            if ref is None:
+                raise ValueError(
+                    f"return_report: embedded {kind} live_name {live_name!r} has no "
+                    f"published snapshot in this workspace. Publish the {kind} via "
+                    f"return_{kind} before embedding it in a report."
+                )
+            pin_map[live_name] = ref
+        return pin_map
+
+    async def _resolve_live_name_to_latest_ref(
+        self, *, kind: SnapshotKind, live_name: str
+    ) -> ArtifactRef | None:
+        """Look up the latest snapshot for ``(kind, live_name)`` via curation.
+
+        Scans ``.ockham/<kind>s/*/curation.json`` for a curation whose
+        ``live_name`` matches; reads the sibling ``log.jsonl`` for the
+        most recent ``content_sha``. Returns ``None`` if no published
+        artifact in this workspace matches.
+        """
+        listing_path = f".ockham/{kind}s"
+        try:
+            entries = await self.code_executor.list_workspace_files(listing_path)
+        except FileNotFoundError:
+            return None
+        lids: set[str] = set()
+        for path, _size in entries:
+            parts = path.split("/")
+            if len(parts) >= 3 and parts[0] == ".ockham" and parts[1] == f"{kind}s":
+                lids.add(parts[2])
+        for lid in lids:
+            cur_path = f".ockham/{kind}s/{lid}/curation.json"
+            try:
+                raw_cur = await self.code_executor.read_workspace_file(cur_path)
+                cur = json.loads(raw_cur.decode("utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if not isinstance(cur, dict) or cur.get("live_name") != live_name:
+                continue
+            log_path = f".ockham/{kind}s/{lid}/log.jsonl"
+            try:
+                raw_log = await self.code_executor.read_workspace_file(log_path)
+            except FileNotFoundError:
+                continue
+            last_csha = last_content_sha_from_log(raw_log)
+            if not last_csha:
+                continue
+            return ArtifactRef(kind=kind, logical_id=lid, content_sha=last_csha)
+        return None
 
     async def _lineage_for_variable(
         self,

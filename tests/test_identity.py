@@ -46,7 +46,7 @@ def test_artifact_ref_workspace_path_for_each_kind() -> None:
     )
     assert (
         ArtifactRef(kind="report", logical_id="lid", content_sha="csha").workspace_file_path
-        == ".ockham/reports/lid/csha.report.md"
+        == ".ockham/reports/lid/csha.qmd"
     )
 
 

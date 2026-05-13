@@ -56,7 +56,11 @@ def _bare_executor(tmp_path: Path) -> MagicMock:
     ex.set_connectors = AsyncMock()
     ex.eval = AsyncMock(return_value=KernelOutput(outputs=[]))
     ex.delete_workspace_file = AsyncMock()
-    ex.list_workspace_files = AsyncMock(return_value=[])
+
+    async def _list(prefix: str = "") -> list[tuple[str, int]]:
+        return [(p, len(d)) for p, d in files.items() if p.startswith(prefix)]
+
+    ex.list_workspace_files = AsyncMock(side_effect=_list)
     ex.execute_workspace = AsyncMock(return_value=KernelOutput(outputs=[]))
     ex.get_locals = MagicMock(return_value={})
     return ex, csha
@@ -150,20 +154,34 @@ async def test_return_chart_partitions_load_and_fetch(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_return_report_parses_embedded_paths_from_markdown(tmp_path: Path) -> None:
+async def test_return_report_pins_embedded_live_names(tmp_path: Path) -> None:
+    """Body URIs name embeds by live_name; return_report resolves each against
+    curation and freezes the pin map into the snapshot bytes."""
+    import json as _json
+    from parsimony_agents.identity import content_sha
+
     ex, _ = _bare_executor(tmp_path)
     agent = Agent(model="m", code_executor=ex)
     ctx = AgentContext(session_id="s")
 
-    # Seed a dataset snapshot path so the embedded ref resolves.
-    embedded_path = ".ockham/datasets/lid_x/csha_y.parquet"
-    files_dict = ex.read_workspace_file.side_effect.__self__ if False else None  # noqa: SIM103
-    # Re-use the executor's internal files dict via write_workspace_file:
-    await ex.write_workspace_file(embedded_path, b"FAKE_PARQUET_BYTES")
+    # Seed a published dataset with live_name "sales".
+    blob = b"FAKE_PARQUET_BYTES"
+    csha = content_sha(blob)
+    await ex.write_workspace_file(
+        f".ockham/datasets/lid_x/{csha}.parquet", blob
+    )
+    await ex.write_workspace_file(
+        ".ockham/datasets/lid_x/curation.json",
+        _json.dumps({"live_name": "sales"}).encode("utf-8"),
+    )
+    await ex.write_workspace_file(
+        ".ockham/datasets/lid_x/log.jsonl",
+        (_json.dumps({"ts": "t1", "content_sha": csha, "inputs": {}}) + "\n").encode("utf-8"),
+    )
 
     md = (
         "# Title\n\nSee the dataset:\n\n"
-        f"![](file://./{embedded_path})\n"
+        "![](file://./data/sales.parquet)\n"
     )
     r = await agent.return_report(
         context=ctx,
@@ -179,14 +197,19 @@ async def test_return_report_parses_embedded_paths_from_markdown(tmp_path: Path)
     assert len(rep.embedded_refs) == 1
     assert rep.embedded_refs[0].kind == "dataset"
     assert rep.embedded_refs[0].logical_id == "lid_x"
+    # The pin map travels with the snapshot bytes — body URIs resolve
+    # against it, not against current curation.
+    assert "sales" in rep.live_name_pins
+    assert rep.live_name_pins["sales"].kind == "dataset"
 
 
 @pytest.mark.asyncio
 async def test_return_report_rejects_unresolved_embed(tmp_path: Path) -> None:
+    """Body references a live_name with no published snapshot in this workspace."""
     ex, _ = _bare_executor(tmp_path)
     agent = Agent(model="m", code_executor=ex)
     ctx = AgentContext(session_id="s")
-    md = "# Hi\n\n![](file://./.ockham/datasets/ghost/missing.parquet)\n"
+    md = "# Hi\n\n![](file://./data/ghost.parquet)\n"
     r = await agent.return_report(
         context=ctx,
         title="X",
@@ -196,4 +219,6 @@ async def test_return_report_rejects_unresolved_embed(tmp_path: Path) -> None:
         live_name="ghost_report",
     )
     assert not r.success
-    assert "not found" in r.exception_message.lower() or "not resolve" in r.exception_message.lower()
+    msg = r.exception_message.lower()
+    assert "ghost" in msg
+    assert "no published snapshot" in msg or "not found" in msg

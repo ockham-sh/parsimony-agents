@@ -299,20 +299,61 @@ class Report(_ArtifactBase):
 
     Reports are user-readable deliverables: their content is a markdown
     string, not an in-kernel object. They live at
-    ``.ockham/reports/<logical_id>/<content_sha>.report.md`` with
-    sibling curation/log files. ``embedded_refs`` are frozen by default
-    (§2.7) — a re-author against newer data produces a new report
-    snapshot whose embedded refs may be newer; old snapshots stay
-    byte-stable and reproducible.
+    ``.ockham/reports/<logical_id>/<content_sha>.qmd`` with
+    sibling curation/log files.
+
+    Snapshot byte shape: a valid Quarto ``.qmd`` document with a YAML
+    frontmatter block under the ``parsimony:`` namespace carrying
+    ``formats`` and ``pins`` (see :mod:`report_format`). The frontmatter
+    participates in ``content_sha``, so format-list or pin-map changes
+    fork a new snapshot under the same ``logical_id``.
+
+    ``embedded_refs`` are derived from ``live_name_pins`` (every pin is
+    an embedded ref). They are frozen by default — re-authoring against
+    newer data produces a new report snapshot whose pin map may point
+    at newer artifact versions; old snapshots stay byte-stable because
+    their pin map travels with the bytes.
     """
 
     type: Literal["report"] = "report"
 
     markdown: str = ""
-    embedded_refs: list[ArtifactRef] = Field(
-        default_factory=list,
-        description="Frozen refs to artifacts embedded in the markdown source.",
+    subtitle: str = Field(
+        default="",
+        description=(
+            "Optional secondary line shown below the title in document "
+            "formats and on the cover slide in decks. Empty means no "
+            "subtitle is rendered."
+        ),
     )
+    formats: list[str] = Field(
+        default_factory=lambda: ["html"],
+        description="Output formats the agent requested at publish time.",
+    )
+    live_name_pins: dict[str, ArtifactRef] = Field(
+        default_factory=dict,
+        description=(
+            "Frozen live_name → ArtifactRef map: the body's "
+            "``file://./<dir>/<live_name>.<ext>`` URIs resolve against this "
+            "snapshot-local map so old reports stay byte-stable under rename. "
+            "The single source of truth for embedded refs — :attr:`embedded_refs` "
+            "is derived from this map plus the markdown body."
+        ),
+    )
+
+    @property
+    def embedded_refs(self) -> list[ArtifactRef]:
+        """List of refs the body embeds, in body order, deduped.
+
+        Derived from :attr:`live_name_pins` and :attr:`markdown` so the
+        pin map is the only source of truth. Empty body or empty pin
+        map produces an empty list.
+        """
+        if not self.markdown or not self.live_name_pins:
+            return []
+        from parsimony_agents.refresh import embedded_refs_from_markdown
+
+        return embedded_refs_from_markdown(self.markdown, self.live_name_pins)
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
         title = self.title or "(untitled)"
@@ -338,21 +379,42 @@ class Report(_ArtifactBase):
             "logical_id": self.logical_id,
             "content_sha": self.content_sha,
             "title": self.title,
+            "subtitle": self.subtitle,
             "description": self.description,
             "tags": list(self.tags),
             "notes": list(self.notes),
             "live_name": self.live_name,
+            "formats": list(self.formats),
             "embedded_refs": [r.to_dict() for r in self.embedded_refs],
+            "live_name_pins": {ln: r.to_dict() for ln, r in self.live_name_pins.items()},
         }
 
-    def save(self, path: str | Path) -> None:
+    def snapshot_bytes(self) -> bytes:
+        """Serialize the canonical on-disk shape: YAML frontmatter + body.
+
+        Single source of truth for what hits disk and what gets hashed
+        into ``content_sha``. Validation runs on the body part upstream;
+        this composes frontmatter (title + subtitle + formats + pins)
+        with the body.
+        """
+        from parsimony_agents.report_format import compose_snapshot
+
         if not self.markdown.strip():
-            raise ValueError("Report.save: markdown is empty")
+            raise ValueError("Report.snapshot_bytes: markdown is empty")
+        return compose_snapshot(
+            self.formats,
+            self.live_name_pins,
+            self.markdown,
+            title=self.title,
+            subtitle=self.subtitle,
+        ).encode("utf-8")
+
+    def save(self, path: str | Path) -> None:
         target = Path(path)
-        if "".join(target.suffixes[-2:]) != ".report.md":
-            raise ValueError(f"Report.save: path must end in .report.md, got {path!r}")
+        if "".join(target.suffixes[-2:]) != ".qmd":
+            raise ValueError(f"Report.save: path must end in .qmd, got {path!r}")
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(self.markdown.encode("utf-8"))
+        target.write_bytes(self.snapshot_bytes())
 
 
 # ============================================================================

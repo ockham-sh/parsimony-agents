@@ -66,7 +66,7 @@ _EXT_BY_KIND: Final[dict[SnapshotKind, str]] = {
     "data_object": ".parquet",
     "dataset": ".parquet",
     "chart": ".vl.json",
-    "report": ".report.md",
+    "report": ".qmd",
 }
 
 
