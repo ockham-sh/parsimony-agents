@@ -221,12 +221,23 @@ def _persist_chart(
 def _persist_report(
     executor: _StubExecutor,
     *,
-    embedded_refs: list[ArtifactRef],
+    pin_map: dict[str, ArtifactRef],
     title: str,
     markdown: str,
 ) -> tuple[ArtifactRef, Report]:
+    """Persist a report snapshot using the new YAML-frontmatter shape.
+
+    Caller supplies ``pin_map`` (live_name → ArtifactRef); body must
+    reference each live_name via ``file://./charts/<n>.vl.json`` or
+    ``file://./data/<n>.parquet``. The pin map is the sole source of
+    truth for embeds — ``Report.embedded_refs`` derives from it.
+    """
+    from parsimony_agents.report_format import compose_snapshot
+
+    embedded_refs = list(pin_map.values())
     lid = report_logical_id(embedded_refs=embedded_refs, title=title)
-    blob = markdown.encode("utf-8")
+    snapshot_text = compose_snapshot(["html"], pin_map, markdown, title=title)
+    blob = snapshot_text.encode("utf-8")
     csha = content_sha(blob)
     ref = ArtifactRef(kind="report", logical_id=lid, content_sha=csha)
     p = Path(executor.cwd) / ref.workspace_file_path
@@ -237,8 +248,9 @@ def _persist_report(
     })
     _write_curation(executor, "report", lid, title=title)
     report = Report(
-        logical_id=lid, title=title, markdown=markdown, embedded_refs=embedded_refs,
-        content_sha=csha,
+        logical_id=lid, title=title, markdown=markdown,
+        live_name_pins=pin_map,
+        formats=["html"], content_sha=csha,
     )
     return ref, report
 
@@ -540,13 +552,17 @@ async def test_refresh_report_rewrites_markdown_with_new_content_shas(
         variable_name="fig", title="Trend", spec=_vega_spec(1),
     )
 
+    # Body addresses the embed by live_name; pin map ties live_name to
+    # the chart's frozen ArtifactRef. After refresh the body is
+    # byte-stable (same live_name), only the pin map's ref drifts.
     markdown = (
-        f"# Q1 review\n\n"
-        f"![chart](file://./{chart_ref.workspace_file_path})\n"
+        "# Q1 review\n\n"
+        "![chart](file://./charts/trend.vl.json)\n"
     )
     report_ref, _ = _persist_report(
         executor,
-        embedded_refs=[chart_ref], title="Q1 review", markdown=markdown,
+        pin_map={"trend": chart_ref},
+        title="Q1 review", markdown=markdown,
     )
 
     fresh_ds = DataFrameObject.from_pandas(
@@ -563,10 +579,14 @@ async def test_refresh_report_rewrites_markdown_with_new_content_shas(
     assert out.logical_id == report_ref.logical_id
     assert out.content_sha != report_ref.content_sha
 
-    new_md = (tmp_path / out.workspace_file_path).read_text()
-    # Old chart path replaced by new chart path.
-    assert chart_ref.workspace_file_path not in new_md
-    assert f".ockham/charts/{chart_ref.logical_id}/" in new_md  # same logical_id
+    from parsimony_agents.report_format import parse_snapshot
+    new_text = (tmp_path / out.workspace_file_path).read_text()
+    new_snap = parse_snapshot(new_text)
+    # Body is byte-stable — embed URI still names the live_name.
+    assert "file://./charts/trend.vl.json" in new_snap.body
+    # Pin map now points at the refreshed chart snapshot (same lid, new csha).
+    assert new_snap.pins["trend"].logical_id == chart_ref.logical_id
+    assert new_snap.pins["trend"].content_sha != chart_ref.content_sha
 
 
 # ---------------------------------------------------------------------------

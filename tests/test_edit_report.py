@@ -103,10 +103,16 @@ def _seed_report(
     tags: list[str] | None = None,
     notes: list[str] | None = None,
 ) -> ArtifactRef:
-    """Write a published report's snapshot + log + curation into the stub FS."""
-    blob = markdown.encode("utf-8")
+    """Write a published report's snapshot + log + curation into the stub FS.
+
+    Seeds the canonical snapshot bytes: a Quarto-style YAML frontmatter
+    block under the ``parsimony:`` namespace + body.
+    """
+    from parsimony_agents.report_format import compose_snapshot
+
+    blob = compose_snapshot(["html"], {}, markdown, title=title).encode("utf-8")
     csha = content_sha(blob)
-    snap_path = f".ockham/reports/{logical_id}/{csha}.report.md"
+    snap_path = f".ockham/reports/{logical_id}/{csha}.qmd"
     log_path = f".ockham/reports/{logical_id}/log.jsonl"
     cur_path = f".ockham/reports/{logical_id}/curation.json"
     executor.files[snap_path] = blob
@@ -253,14 +259,20 @@ async def test_edit_report_rejects_non_unique_old_str() -> None:
 @pytest.mark.asyncio
 async def test_edit_report_resolves_to_latest_snapshot() -> None:
     """The edit always targets the latest revision in log.jsonl."""
+    from parsimony_agents.report_format import compose_snapshot
+
     ex = _ReportExecutor()
-    md1 = "# Hi\n\noriginal text\n"
+    # Initial revision.
+    body1 = "Hi\n\noriginal text\n"
+    md1 = compose_snapshot(["html"], {}, body1, title="Report 4")
     csha1 = content_sha(md1.encode("utf-8"))
-    snap_path1 = f".ockham/reports/rep4/{csha1}.report.md"
+    snap_path1 = f".ockham/reports/rep4/{csha1}.qmd"
     ex.files[snap_path1] = md1.encode("utf-8")
-    md2 = "# Hi\n\nupdated text\n"
+    # Newer revision (refresh, etc.). Both entries in log.jsonl; latest wins.
+    body2 = "Hi\n\nupdated text\n"
+    md2 = compose_snapshot(["html"], {}, body2, title="Report 4")
     csha2 = content_sha(md2.encode("utf-8"))
-    snap_path2 = f".ockham/reports/rep4/{csha2}.report.md"
+    snap_path2 = f".ockham/reports/rep4/{csha2}.qmd"
     ex.files[snap_path2] = md2.encode("utf-8")
     ex.files[".ockham/reports/rep4/log.jsonl"] = (
         json.dumps({"ts": "t1", "content_sha": csha1, "inputs": {}}) + "\n"

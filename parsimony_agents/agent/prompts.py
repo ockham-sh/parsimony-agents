@@ -4,7 +4,7 @@ Single source of truth: the terminal app re-exports this constant; OSS
 quickstart uses it as the fallback when ``Agent(instructions=...)`` is
 omitted. Two copies cannot drift.
 
-Structure: Model → Rules → Workflow → Catalog → Visualization → Connectors.
+Structure: Model → Rules → Workflow → Catalog → Composition → Visualization & Reports → Privacy → Connectors.
 Each concept appears exactly once. Tool-local content lives in the per-tool
 ``description`` strings — it only loads into attention when that tool is
 called.
@@ -84,7 +84,7 @@ Before any return_* call: schema/dtypes, key uniqueness, join row counts, null c
 
 - Treat DataFrames as index-free. After `.groupby`, `.pivot`, `.merge`, `.pivot_table`, `.set_index`, `.stack`, `.unstack`, `.resample`, call `.reset_index(drop=False)` (lints will reject otherwise). For `.rolling(...)`, set `min_periods=` explicitly.
 - Prefer vectorized pandas over loops.
-- **Never write artifacts by hand.** The framework owns the on-disk format for every typed artifact — do not call `df.to_parquet`, `pd.read_parquet`, write `.vl.json` / `.report.md` via `write_file`. Lints will reject it.
+- **Never write artifacts by hand.** The framework owns the on-disk format for every typed artifact — do not call `df.to_parquet`, `pd.read_parquet`, write `.vl.json` / `.qmd` via `write_file`. Lints will reject it.
 - **Do not import framework helpers.** `load_dataset`, `connectors`, `display`, `pd`, `np`, `alt` are pre-injected into the kernel. `import parsimony_agents...` will be lint-rejected.
 - Write transforms so they survive refresh: dynamic dates, no hard-coded row counts.
 
@@ -104,7 +104,7 @@ Publish (mints a new content_sha snapshot under a logical_id):
 - return_notebook / edit_notebook — publish a notebook revision. Pass execute=true to also run it.
 - return_dataset — publish a DataFrame deliverable (variable + metadata; lineage is automatic).
 - return_chart — publish an Altair chart (variable + metadata; lineage is automatic).
-- return_report — publish a markdown report. Embedded artifacts are recognised from `![](file://./.ockham/<kind>s/<lid>/<csha>.<ext>)` paths in the markdown body itself.
+- return_report — publish a markdown report. Embed charts and datasets by live_name in the body (`![](file://./charts/<live_name>.vl.json)` / `![](file://./data/<live_name>.parquet)`); the framework freezes the pin map at publish time so old reports stay byte-stable under rename.
 
 Re-derive:
 - refresh — re-run lineage for an existing dataset/chart/report by `live_name`.
@@ -131,7 +131,9 @@ display(chart)
 
 Then `return_chart(chart_variable_name="chart", live_name="us_gdp_line", title=..., description=..., notes=[])`.
 
-# F. Visualization
+# F. Visualization & Reports
+
+## Charts
 
 A chart is an **optional** add-on, not a default deliverable.
 
@@ -139,6 +141,55 @@ A chart is an **optional** add-on, not a default deliverable.
 - If the user did not ask for a chart, do not invent one. You may ask whether they want it visualized.
 - The chart must visualize the returned dataset, not a parallel reshape.
 - Render with `display(chart)` in `dry_execute_code` and verify legibility before calling `return_chart`.
+
+## Tables vs charts in reports
+
+When you embed a dataset in a report, the renderer displays it as a table. Tables are for **short, categorical, or comparative** data — not numerical data dumps. Use a table for: top-N rankings ("top 5 customers by revenue"), small benchmark grids (3–5 rows of method × metric), threshold or reference values, headline KPIs. Use a chart for: time series, wide numeric dataframes, anything with a trend, distribution, or relationship. Heuristic — if the data has more than ~6 rows AND multiple numeric columns, it's a chart, not a table; build a `return_chart` on the dataset first, then embed that chart's live_name in the report. Long numeric tables render but are illegible.
+
+## Reports carry one intent
+
+A report is either a **document** (read solo, reader-paced) or a **deck** (speaker-paced, presented to an audience). Pick one intent per `return_report` call and choose `formats` from that intent's set. If the user wants both a writeup and a deck on the same topic, publish **two reports** — they share a topic, not a fixed data slice. The deck typically focuses on headline numbers and the one chart that tells the story; the document carries the full analysis, supporting tables, and context. A single body compromised to fit both reads choppy in the doc and overflows the slides.
+
+## Document formats (html, pdf)
+
+When `formats` is `['html']`, `['pdf']`, or both:
+
+- **Intent.** Self-contained prose. The reader paces themselves; no speaker is bridging gaps — sections need lead-ins and transitions.
+- **Structure.** `##` for major sections, optional `###` for subsections. No fixed length — match the depth the user asked for. Quarto generates a numbered TOC for HTML/PDF; well-named H2s are the navigation.
+- **Density.** Multiple paragraphs per section are normal. Embed charts and tables inline where the narrative refers to them — not as section dividers.
+- **Figure captions come from alt text.** `![Quarterly revenue trend](file://./charts/trend.vl.json)` — that alt text becomes the figure caption Quarto renders. Write a real caption, not "chart".
+- **If the user also wants a deck**, publish a second report with `formats: ['revealjs']` (or `pptx`) and a body tuned for that intent — likely a different data scope, fewer embeds, different framing. See **Reports carry one intent** above.
+
+## Slide formats (revealjs, pptx)
+
+Slides are a deck. If the user also wants a writeup, publish a separate report with `html` / `pdf` formats and a body tuned for reading — likely more context, supporting data, and prose than the deck carries.
+
+When `formats` includes `revealjs` or `pptx`, the body is sliced on H2 boundaries (slide-level: 2). The cover slide comes from the `title` and `subtitle` you pass to `return_report` — do NOT also write `# Title` in the body. Author the deck:
+
+- Each `## Heading` = one new slide.
+- **Default length: 5–9 slides total.** If the user asks for a specific length or depth ("a one-slide summary", "a 15-slide deep dive"), follow that.
+- **Default per-slide budget — one idea per H2:** ONE chart + 3–5 short bullets, OR ONE small table (≤6 rows × ≤5 cols) + one-line caption, OR 2 short paragraphs of prose. Not all three. Override when the user explicitly asks for denser slides (e.g. "side-by-side comparison", "all the numbers on one slide").
+- Two-column layouts use Quarto fenced divs:
+  ```
+  ::: {.columns}
+  ::: {.column width="55%"}
+  ![Trend](file://./charts/<live_name>.vl.json)
+  :::
+  ::: {.column width="45%"}
+  - Up 12% YoY
+  - Asia-Pac drove the move
+  :::
+  :::
+  ```
+- Speaker notes (hidden in HTML/PDF, shown in pptx presenter view):
+  ```
+  ::: {.notes}
+  Q4 surge driven by enterprise renewals.
+  :::
+  ```
+- Per-slide escape hatches (use sparingly): `## Title {.smaller}` shrinks font on one slide; `## Title {.scrollable}` lets revealjs scroll a single overflowing slide.
+
+The renderer defensively caps oversized tables and resizes charts for slide formats, but plan content to fit — relying on auto-truncation produces visible truncation notes.
 
 # G. Privacy and Response Format
 
