@@ -15,10 +15,30 @@ from pathlib import Path
 import pytest
 
 from parsimony_agents.agent.agent import Agent
-from parsimony_agents.agent.models import AgentContext
+from parsimony_agents.agent.models import AgentContext, AgentMessage
 from parsimony_agents.artifacts import Report
 from parsimony_agents.execution.outputs import KernelOutput
 from parsimony_agents.identity import ArtifactRef, content_sha
+from parsimony_agents.messages import Text
+
+
+def _ctx_with_seen(session_id: str, kind: str, live_name: str) -> AgentContext:
+    """Build an AgentContext whose seen-set already carries ``(kind, live_name)``.
+
+    Simulates a prior turn that minted or read the artifact, so the
+    cross-terminal collision gate treats this terminal as the owner.
+    """
+    return AgentContext(
+        session_id=session_id,
+        messages=[
+            AgentMessage(
+                role="assistant",
+                content=Text(
+                    content=f'<artifact_ref kind="{kind}" live_name="{live_name}"/>'
+                ),
+            )
+        ],
+    )
 
 
 class _ReportExecutor:
@@ -127,23 +147,23 @@ def _make_agent(executor: _ReportExecutor) -> Agent:
 async def test_edit_report_preserves_logical_id() -> None:
     """A surgical edit produces a new revision under the same logical_id."""
     ex = _ReportExecutor()
-    ref = _seed_report(
+    _seed_report(
         ex,
         logical_id="rep1",
         markdown="# Title\n\nThe answer is 42.\n",
         title="My Report",
     )
     agent = _make_agent(ex)
-    ctx = AgentContext(session_id="s")
+    ctx = _ctx_with_seen("s", "report", "my-report")
 
     tr = await agent.edit_report(
         context=ctx,
-        ref={"kind": "report", "logical_id": ref.logical_id, "content_sha": ref.content_sha},
+        live_name="my-report",
         old_str="The answer is 42.",
         new_str="The answer is 43.",
     )
 
-    assert tr.success
+    assert tr.success, getattr(tr, "exception_message", "")
     report = tr.data
     assert isinstance(report, Report)
     assert report.logical_id == "rep1"
@@ -152,33 +172,33 @@ async def test_edit_report_preserves_logical_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_edit_report_rejects_non_report_ref() -> None:
-    """``ref`` must be ``kind='report'``."""
+async def test_edit_report_rejects_unknown_slug() -> None:
+    """A live_name that doesn't resolve to a report errors out clearly."""
     ex = _ReportExecutor()
     agent = _make_agent(ex)
     ctx = AgentContext(session_id="s")
 
     tr = await agent.edit_report(
         context=ctx,
-        ref={"kind": "dataset", "logical_id": "d1", "content_sha": "x" * 64},
+        live_name="not-a-thing",
         old_str="a",
         new_str="b",
     )
     assert not tr.success
-    assert "kind='report'" in tr.exception_message
+    assert "live_name" in tr.exception_message or "report" in tr.exception_message
 
 
 @pytest.mark.asyncio
 async def test_edit_report_rejects_empty_old_str() -> None:
     """Full-body rewrites should go through ``return_report``, not ``edit_report``."""
     ex = _ReportExecutor()
-    ref = _seed_report(ex, logical_id="rep2", markdown="# Hi\n")
+    _seed_report(ex, logical_id="rep2", markdown="# Hi\n")
     agent = _make_agent(ex)
     ctx = AgentContext(session_id="s")
 
     tr = await agent.edit_report(
         context=ctx,
-        ref={"kind": "report", "logical_id": ref.logical_id, "content_sha": ref.content_sha},
+        live_name="my-report",
         old_str="",
         new_str="anything",
     )
@@ -188,36 +208,41 @@ async def test_edit_report_rejects_empty_old_str() -> None:
 
 @pytest.mark.asyncio
 async def test_edit_report_errors_when_log_missing() -> None:
-    """Editing a report that was never persisted → clear error."""
+    """Editing a slug that resolves to a report with no log → clear error."""
     ex = _ReportExecutor()
+    # Seed a curation but no snapshot/log files.
+    ex.files[".ockham/reports/ghost/curation.json"] = json.dumps(
+        {"kind": "report", "logical_id": "ghost", "title": "T",
+         "tags": [], "notes": [], "live_name": "ghost-slug"}
+    ).encode("utf-8")
     agent = _make_agent(ex)
-    ctx = AgentContext(session_id="s")
+    ctx = _ctx_with_seen("s", "report", "ghost-slug")
 
     tr = await agent.edit_report(
         context=ctx,
-        ref={"kind": "report", "logical_id": "ghost", "content_sha": "z" * 64},
+        live_name="ghost-slug",
         old_str="anything",
         new_str="other",
     )
     assert not tr.success
-    assert "no log.jsonl" in tr.exception_message
+    assert "log.jsonl" in tr.exception_message or "no published artifact" in tr.exception_message.lower()
 
 
 @pytest.mark.asyncio
 async def test_edit_report_rejects_non_unique_old_str() -> None:
     """``old_str`` must occur exactly once."""
     ex = _ReportExecutor()
-    ref = _seed_report(
+    _seed_report(
         ex,
         logical_id="rep3",
         markdown="# Hi\n\nfoo bar\n\nfoo baz\n",
     )
     agent = _make_agent(ex)
-    ctx = AgentContext(session_id="s")
+    ctx = _ctx_with_seen("s", "report", "my-report")
 
     tr = await agent.edit_report(
         context=ctx,
-        ref={"kind": "report", "logical_id": ref.logical_id, "content_sha": ref.content_sha},
+        live_name="my-report",
         old_str="foo",
         new_str="qux",
     )
@@ -227,14 +252,12 @@ async def test_edit_report_rejects_non_unique_old_str() -> None:
 
 @pytest.mark.asyncio
 async def test_edit_report_resolves_to_latest_snapshot() -> None:
-    """When ``ref.content_sha`` is stale, the edit applies to the latest revision."""
+    """The edit always targets the latest revision in log.jsonl."""
     ex = _ReportExecutor()
-    # Initial revision.
     md1 = "# Hi\n\noriginal text\n"
     csha1 = content_sha(md1.encode("utf-8"))
     snap_path1 = f".ockham/reports/rep4/{csha1}.report.md"
     ex.files[snap_path1] = md1.encode("utf-8")
-    # Newer revision (refresh, etc.). Both entries in log.jsonl; latest wins.
     md2 = "# Hi\n\nupdated text\n"
     csha2 = content_sha(md2.encode("utf-8"))
     snap_path2 = f".ockham/reports/rep4/{csha2}.report.md"
@@ -244,21 +267,18 @@ async def test_edit_report_resolves_to_latest_snapshot() -> None:
         + json.dumps({"ts": "t2", "content_sha": csha2, "inputs": {}}) + "\n"
     ).encode("utf-8")
     ex.files[".ockham/reports/rep4/curation.json"] = json.dumps(
-        {"kind": "report", "logical_id": "rep4", "title": "T", "tags": [], "notes": [], "live_name": "t"}
+        {"kind": "report", "logical_id": "rep4", "title": "T", "tags": [], "notes": [], "live_name": "report-4"}
     ).encode("utf-8")
 
     agent = _make_agent(ex)
-    ctx = AgentContext(session_id="s")
+    ctx = _ctx_with_seen("s", "report", "report-4")
 
-    # Caller passes a *stale* csha — the older revision.
     tr = await agent.edit_report(
         context=ctx,
-        ref={"kind": "report", "logical_id": "rep4", "content_sha": csha1},
+        live_name="report-4",
         old_str="updated text",
         new_str="patched text",
     )
-    assert tr.success
+    assert tr.success, getattr(tr, "exception_message", "")
     assert "patched text" in tr.data.markdown
-    # Original csha1 said "original text"; the stale ref didn't pin the
-    # base — edit_report worked against csha2 (latest).
     assert "original text" not in tr.data.markdown

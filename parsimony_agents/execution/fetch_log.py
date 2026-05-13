@@ -1,25 +1,18 @@
 """Fetch logging callback for connector result tracking.
 
-Captures per-fetch metadata (source, params, columns, provenance, head/tail
-samples) so the agent can reason about what data it pulled and when. The
-log is consumed by the executor to produce
-:class:`~parsimony_agents.execution.outputs.FetchLogEntry` records on each
-:class:`~parsimony_agents.execution.outputs.KernelOutput`.
+Captures per-fetch metadata (source, params, columns, provenance,
+head/tail samples) so the agent can reason about what data it pulled
+and when. The log is consumed by the executor to produce
+:class:`~parsimony_agents.execution.outputs.FetchLogEntry` records on
+each :class:`~parsimony_agents.execution.outputs.KernelOutput`.
 
-Optional persister
-------------------
-When *persist_fn* is supplied, each fetch result is also written to a
+When ``persist_fn`` is supplied, each fetch result is also written to a
 content-addressed file under
-``.ockham/data_objects/<logical_id>/<content_sha>.parquet`` (see
-:mod:`parsimony_agents.execution.data_objects`). The persister returns
-``(ref, version)`` — the typed :class:`ArtifactRef` and the 1-based
-position of this ``content_sha`` in the data_object's ``log.jsonl``.
-Both ride the entry: ``data_object_ref`` for lineage, ``version`` for
-the user-facing v{N} indicator that the connector produced
-fresh/refreshed data.
-
-When *persist_fn* is ``None`` (default), fetch logs remain observational
-metadata only — no ref, no version.
+``.ockham/data_objects/<logical_id>/<content_sha>.parquet`` and the
+returned :class:`ArtifactRef` is recorded on the active
+:class:`~parsimony_agents.execution.run_scope.RunScope` (if any), so
+the producing notebook's lineage automatically accumulates fetch edges
+— the agent never types them.
 """
 
 from __future__ import annotations
@@ -31,6 +24,7 @@ from typing import Any
 
 import pandas as pd
 
+from parsimony_agents.execution.run_scope import OriginLedger
 from parsimony_agents.identity import ArtifactRef
 
 PersistFn = Callable[
@@ -41,12 +35,18 @@ PersistFn = Callable[
 
 def make_fetch_logger(
     persist_fn: PersistFn | None = None,
+    *,
+    ledger: OriginLedger | None = None,
 ) -> tuple[list[dict[str, Any]], Callable[[Any], Awaitable[None]]]:
     """Create a fetch-log list and an async callback that appends to it.
 
     When *persist_fn* is supplied, it is invoked with each ``Result`` and
     its ``(ref, version)`` return is split onto the entry as
     ``data_object_ref`` and ``version`` respectively.
+
+    When *ledger* is supplied, the data_object ref is also recorded on
+    the ledger's current :class:`RunScope` so the producing notebook's
+    fetch lineage accumulates automatically.
     """
 
     fetch_log: list[dict[str, Any]] = []
@@ -76,6 +76,8 @@ def make_fetch_logger(
                 ref, version = value
                 entry["data_object_ref"] = ref
                 entry["version"] = version
+                if ledger is not None and ledger.current is not None:
+                    ledger.current.record_fetch(ref)
         fetch_log.append(entry)
 
     return fetch_log, _log_fetch

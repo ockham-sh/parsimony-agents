@@ -19,14 +19,55 @@ from parsimony_agents.notebook_io import serialize_notebook
 
 
 class _FakeCodeExecutor:
-    """Minimal kernel surface used by the agent in this test."""
+    """Minimal kernel surface used by the agent in this test.
 
-    def __init__(self, values: dict[str, object], *, notebook_bodies: dict[str, str] | None = None) -> None:
+    Carries an OriginLedger so the agent's return tools can derive
+    lineage from variable origins. Notebook snapshots referenced by the
+    origins are seeded with a log.jsonl so the latest-notebook lookup
+    succeeds.
+    """
+
+    def __init__(
+        self,
+        values: dict[str, object],
+        *,
+        origins: dict[str, tuple[str, list, list]] | None = None,
+        notebook_paths: list[str] | None = None,
+    ) -> None:
+        from parsimony_agents.execution.run_scope import OriginLedger, VariableOrigin
+        from parsimony_agents.identity import notebook_content_sha, notebook_logical_id
+
         self._values = values
-        self._notebook_bodies = notebook_bodies or {}
+        self.origin_ledger = OriginLedger()
+        self._files: dict[str, bytes] = {}
+
+        # Seed canonical snapshots + log.jsonl for each producing notebook
+        # so _notebook_ref_for_published_path resolves cleanly.
+        for path in notebook_paths or []:
+            code = f"# {path}\nresult = 1\n"
+            csha = notebook_content_sha(code)
+            lid = notebook_logical_id(path)
+            self._files[f".ockham/notebooks/{lid}/{csha}.py"] = (
+                serialize_notebook(Script(path=path, code=code))
+            )
+            import json as _json
+            self._files[f".ockham/notebooks/{lid}/log.jsonl"] = (
+                _json.dumps({"ts": "t1", "content_sha": csha, "inputs": {}}) + "\n"
+            ).encode("utf-8")
+
+        # Seed variable origins.
+        for var, (nb_path, loads, fetches) in (origins or {}).items():
+            self.origin_ledger._origins[var] = VariableOrigin(
+                notebook_path=nb_path,
+                load_refs=tuple(loads),
+                fetch_refs=tuple(fetches),
+            )
 
     async def get(self, variable_name: str):
         return self._values[variable_name]
+
+    async def get_origin(self, name: str):
+        return self.origin_ledger.get(name)
 
     async def clear_namespace(self) -> None:
         return None
@@ -38,7 +79,8 @@ class _FakeCodeExecutor:
         return None
 
     async def execute(  # noqa: ARG002
-        self, code: str, dry_run: bool = False, timeout_seconds: float | None = None
+        self, code: str, dry_run: bool = False, timeout_seconds: float | None = None,
+        producer_notebook_path: str | None = None,
     ) -> KernelOutput:
         return KernelOutput(outputs=[])
 
@@ -48,23 +90,22 @@ class _FakeCodeExecutor:
         return KernelOutput(outputs=[])
 
     async def read_workspace_file(self, path: str) -> bytes:
-        body = self._notebook_bodies.get(
-            path,
-            f"# {path}\n# placeholder for test\nx = 1\n",
-        )
-        return serialize_notebook(Script(path=path, code=body))
+        if path in self._files:
+            return self._files[path]
+        raise FileNotFoundError(path)
 
-    async def write_workspace_file(self, path: str, data: bytes) -> None:  # noqa: ARG002
-        return None
+    async def write_workspace_file(self, path: str, data: bytes) -> None:
+        self._files[path] = data
 
     async def delete_workspace_file(self, path: str) -> None:  # noqa: ARG002
-        return None
+        self._files.pop(path, None)
 
-    async def list_workspace_files(self, prefix: str = "") -> list[tuple[str, int]]:  # noqa: ARG002
-        return []
+    async def list_workspace_files(self, prefix: str = "") -> list[tuple[str, int]]:
+        return [(p, len(d)) for p, d in self._files.items() if p.startswith(prefix)]
 
     async def execute_workspace(  # noqa: ARG002
-        self, code: str, dry_run: bool = False, timeout_seconds: float | None = None
+        self, code: str, dry_run: bool = False, timeout_seconds: float | None = None,
+        producer_notebook_path: str | None = None,
     ) -> KernelOutput:
         return KernelOutput(outputs=[])
 
@@ -74,29 +115,21 @@ class _FakeCodeExecutor:
 
 class _DualToolLitellmMessage:
     def __init__(self) -> None:
-        # The fake executor's read_workspace_file resolves any path it
-        # doesn't know to placeholder bytes — by extension, any ref the
-        # validator checks resolves successfully. We pass content_shas
-        # that match the placeholder bytes for cleanliness.
-        nb_a = {"kind": "notebook", "logical_id": "nb-a", "content_sha": "nb-a"}
-        nb_b = {"kind": "notebook", "logical_id": "nb-b", "content_sha": "nb-b"}
-        nb_viz = {"kind": "notebook", "logical_id": "nb-viz", "content_sha": "nb-viz"}
+        # New surface: no refs at all. The framework derives lineage
+        # from the variable's origin in the executor's ledger.
         self._ds = {
             "dataset_variable_name": "result_df",
-            "notebook_refs": [nb_a, nb_b],
-            "source_refs": [],
             "title": "Result dataset",
             "description": "Result dataset.",
             "notes": ["Validated dataset."],
+            "live_name": "result_dataset",
         }
         self._ch = {
             "title": "Result chart",
             "chart_variable_name": "result_chart",
-            "notebook_ref": nb_viz,
-            "source_dataset_refs": [],
-            "source_refs": [],
             "description": "Line chart preview.",
             "notes": ["No smoothing applied."],
+            "live_name": "result_chart",
         }
 
     def model_dump(self, mode: str = "json") -> dict:
@@ -170,10 +203,13 @@ async def test_return_dataset_then_return_chart_same_response_succeeds(
         model="test-model",
         code_executor=_FakeCodeExecutor(
             {"result_df": df_out, "result_chart": fig_out},
-            notebook_bodies={
-                "notebooks/derive_dataset.py": "result_df = result_df  # use result_df",
-                "notebooks/validate_dataset.py": "assert result_df is not None",
-                "notebooks/viz_dataset.py": "result_chart = alt.Chart(result_df).mark_line()",
+            notebook_paths=[
+                "notebooks/derive_dataset.py",
+                "notebooks/viz_dataset.py",
+            ],
+            origins={
+                "result_df": ("notebooks/derive_dataset.py", [], []),
+                "result_chart": ("notebooks/viz_dataset.py", [], []),
             },
         ),
     )

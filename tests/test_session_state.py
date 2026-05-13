@@ -61,11 +61,11 @@ async def test_read_artifact_tool_invokes_injected_fn() -> None:
 
     from parsimony_agents.agent.outputs import ArtifactLlmResult
 
-    async def _fn(path: str, options: dict) -> ArtifactLlmResult:
+    async def _fn(live_name: str, kind: str, options: dict) -> ArtifactLlmResult:
         m = (options.get("view") or options.get("mode") or "summary") or "summary"
         if isinstance(m, str):
             m = m.strip().lower()
-        return ArtifactLlmResult(text=f"{path}|{m}")
+        return ArtifactLlmResult(text=f"{kind}:{live_name}|{m}")
 
     root = tempfile.mkdtemp()
     of = FrameworkOutputFactory(local_dir=root)
@@ -76,11 +76,17 @@ async def test_read_artifact_tool_invokes_injected_fn() -> None:
         output_factory=of,
         read_artifact_fn=_fn,
     )
-    out = await agent.read_artifact(path="n.py", mode="summary", context=AgentContext(session_id="s"))
+    out = await agent.read_artifact(
+        live_name="n", kind="notebook", mode="summary",
+        context=AgentContext(session_id="s"),
+    )
     assert out.data.content is not None
     assert isinstance(out.data.content, Text)
-    assert "n.py" in out.data.content.content
-    out2 = await agent.read_artifact(path="n.py", mode="full", context=AgentContext(session_id="s"))
+    assert "notebook:n" in out.data.content.content
+    out2 = await agent.read_artifact(
+        live_name="n", kind="notebook", mode="full",
+        context=AgentContext(session_id="s"),
+    )
     assert out2.data.content is not None
     assert isinstance(out2.data.content, Text)
     assert "full" in out2.data.content.content
@@ -89,28 +95,65 @@ async def test_read_artifact_tool_invokes_injected_fn() -> None:
 def test_agent_context_snapshot_includes_session_state() -> None:
     from parsimony_agents.agent.session_state import KernelVariableSummary, WorkspaceArtifactLine
 
+    # seen_live_names_pairs must include ("notebook", "my_notebook") for the
+    # cross-turn row to survive the per-terminal filter — without it, the
+    # artifact is treated as a sibling-terminal artifact and hidden.
     snap = AgentContextSnapshot(
         session_state=SessionState(
             kernel=[KernelVariableSummary(name="df", kind="dataframe", detail="1×1")],
-            workspace_artifacts=[WorkspaceArtifactLine(path="n.py", kind="notebook", summary="x")],
-        )
+            workspace_artifacts=[
+                WorkspaceArtifactLine(
+                    path="n.py", kind="notebook", summary="x", live_name="my_notebook"
+                )
+            ],
+        ),
+        seen_live_names_pairs=[("notebook", "my_notebook")],
     )
     llm = snap.to_llm()
     flat = "".join(c["text"] for c in llm if c.get("type") == "text")
     assert "<session_state>" in flat
     assert 'name="df"' in flat
-    assert "n.py" in flat
+    # The agent-facing block surfaces the workspace slug, not the on-disk path.
+    assert 'live_name="my_notebook"' in flat
 
 
-def test_workspace_artifact_xml_emits_ref_attributes_when_set() -> None:
-    """Logical/content sha attributes must round-trip into the XML the LLM sees.
+def test_agent_context_snapshot_filters_sibling_terminal_artifacts() -> None:
+    """Cross-turn rows missing from seen_live_names are dropped (sibling-owned)."""
+    from parsimony_agents.agent.session_state import WorkspaceArtifactLine
 
-    Without this, the agent has no canonical ref to copy verbatim into
-    return_dataset / return_chart / return_report and tries to recompute it
-    locally — which silently diverges from the framework's identity.
+    snap = AgentContextSnapshot(
+        session_state=SessionState(
+            kernel=[],
+            workspace_artifacts=[
+                WorkspaceArtifactLine(
+                    path="n.py",
+                    kind="notebook",
+                    summary="from sibling",
+                    live_name="sibling_nb",
+                ),
+                WorkspaceArtifactLine(
+                    path="ours.py",
+                    kind="notebook",
+                    summary="ours",
+                    live_name="ours_nb",
+                ),
+            ],
+        ),
+        seen_live_names_pairs=[("notebook", "ours_nb")],
+    )
+    llm = snap.to_llm()
+    flat = "".join(c["text"] for c in llm if c.get("type") == "text")
+    assert 'live_name="ours_nb"' in flat
+    assert 'live_name="sibling_nb"' not in flat
+
+
+def test_workspace_artifact_xml_emits_live_name_attribute() -> None:
+    """The unified <turn_artifacts> view surfaces only kind + live_name.
+
+    Refs (logical_id / content_sha) are framework-internal — the agent
+    composes by live_name, never by hash.
     """
     from parsimony_agents.agent.session_state import WorkspaceArtifactLine
-    from parsimony_agents.identity import ArtifactRef
 
     s = SessionState(
         kernel=[],
@@ -119,67 +162,37 @@ def test_workspace_artifact_xml_emits_ref_attributes_when_set() -> None:
                 path="notebooks/demo.py",
                 kind="notebook",
                 summary="x",
-                ref=ArtifactRef(kind="notebook", logical_id="abc123", content_sha="abc123"),
+                live_name="demo",
             ),
             WorkspaceArtifactLine(
                 path=".ockham/datasets/lid1/csha1.parquet",
                 kind="dataset",
                 summary="y",
-                ref=ArtifactRef(kind="dataset", logical_id="lid1", content_sha="csha1"),
+                live_name="us_gdp",
             ),
             WorkspaceArtifactLine(
                 path="data/extra.parquet",
                 kind="data_object",
-                summary="z",  # ref omitted — data_object refs come via <fetch_log>
+                summary="z",
             ),
         ],
     )
     text = s.to_llm_text()
-    assert 'logical_id="abc123" content_sha="abc123"' in text
-    assert 'logical_id="lid1" content_sha="csha1"' in text
-    # data_object entry has no canonical ref triplet (those come via fetch_log).
-    assert "logical_id" not in text.split('path="data/extra.parquet"')[1].split("</artifact>")[0]
+    assert 'kind="notebook" live_name="demo"' in text
+    assert 'kind="dataset" live_name="us_gdp"' in text
+    # data_object rows have no live_name (no human-facing slug).
+    assert 'kind="data_object"' in text
+    # Hash triplets must not appear anywhere in the agent-facing render.
+    assert "logical_id" not in text
+    assert "content_sha" not in text
 
 
-def test_kernel_output_to_llm_emits_notebook_ref_block_when_metadata_set() -> None:
-    """Code-tool kernel results must surface the notebook's canonical ref.
+def test_kernel_output_to_llm_omits_ref_blocks() -> None:
+    """KernelOutput must NOT surface notebook_ref or data_object_ref triplets.
 
-    Without this, the agent only sees the file path and prose output —
-    it has no way to learn the notebook's ``(logical_id, content_sha)``
-    pair to copy verbatim into ``return_dataset.notebook_refs``.
-    """
-    from parsimony_agents.execution.outputs import KernelOutput
-    from parsimony_agents.identity import notebook_content_sha
-
-    code = "x = 1\n"
-    csha = notebook_content_sha(code)
-    lid = "some-uuid"
-    ko = KernelOutput(
-        outputs=[],
-        metadata={
-            "notebook_ref": {
-                "kind": "notebook",
-                "logical_id": lid,
-                "content_sha": csha,
-            }
-        },
-    )
-    flat = "".join(b.get("text", "") for b in ko.to_llm())
-    assert "<notebook_ref " in flat
-    assert f'logical_id="{lid}"' in flat
-    assert f'content_sha="{csha}"' in flat
-    # Empty metadata → no block.
-    assert "<notebook_ref" not in "".join(
-        b.get("text", "") for b in KernelOutput(outputs=[]).to_llm()
-    )
-
-
-def test_kernel_output_to_llm_emits_fetch_log_block() -> None:
-    """``data_object_ref`` triplets must surface in the LLM output of a code run.
-
-    Without this block the agent would have to invent ``source_refs`` for
-    return_dataset / return_chart / return_report from prose, which is what
-    led to hallucinated hashes in earlier traces.
+    With the new model the agent never types refs; lineage is derived by
+    the framework from the producer-scoped run. Surfacing refs would just
+    tempt the LLM to re-paste them.
     """
     from parsimony.result import Provenance
     from parsimony_agents.execution.outputs import FetchLogEntry, KernelOutput
@@ -197,12 +210,24 @@ def test_kernel_output_to_llm_emits_fetch_log_block() -> None:
         columns=[],
         data_object_ref=ref,
     )
-    ko = KernelOutput(outputs=[], fetch_log=[entry])
-    blocks = ko.to_llm()
-    flat = "".join(b.get("text", "") for b in blocks)
+    ko = KernelOutput(
+        outputs=[],
+        fetch_log=[entry],
+        metadata={
+            "notebook_ref": {
+                "kind": "notebook",
+                "logical_id": "lid",
+                "content_sha": "csha",
+            }
+        },
+    )
+    flat = "".join(b.get("text", "") for b in ko.to_llm())
+    # The fetch log still surfaces (informational), but the ref triplet is gone.
     assert "<fetch_log>" in flat
-    assert 'kind="data_object"' in flat
-    assert 'logical_id="lid_a"' in flat
-    assert 'content_sha="csha_a"' in flat
+    assert 'source="fred_fetch"' in flat
+    assert 'logical_id="lid_a"' not in flat
+    assert 'content_sha="csha_a"' not in flat
+    # The notebook_ref metadata block must NOT render either.
+    assert "<notebook_ref" not in flat
     # No fetch_log → no block.
     assert KernelOutput(outputs=[]).to_llm() == [{"type": "text", "text": "Out:\n---\n"}]

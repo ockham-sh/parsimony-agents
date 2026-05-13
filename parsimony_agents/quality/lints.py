@@ -275,6 +275,47 @@ class RawParquetIOLinter(ast.NodeVisitor):
         self.generic_visit(node)
 
 
+class FrameworkImportLinter(ast.NodeVisitor):
+    """Reject ``import parsimony_agents...`` from cell code.
+
+    Framework helpers (``load_dataset``, ``connectors``, ``display``,
+    ``pd``, ``np``, ``alt``) are pre-injected into every kernel
+    namespace. Importing from ``parsimony_agents`` is both unnecessary
+    and incorrect — those modules are not user-facing API. The lint
+    fires at draft time with a message that names the right path
+    (use the pre-injected globals).
+    """
+
+    _FORBIDDEN_PREFIXES = ("parsimony_agents",)
+
+    def __init__(self) -> None:
+        self.issues: list[str] = []
+
+    def _is_forbidden(self, name: str | None) -> bool:
+        if not name:
+            return False
+        return any(
+            name == p or name.startswith(p + ".") for p in self._FORBIDDEN_PREFIXES
+        )
+
+    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+        for alias in node.names:
+            if self._is_forbidden(alias.name):
+                self.issues.append(
+                    f"Line {node.lineno}: do not import {alias.name!r} — framework "
+                    "helpers (load_dataset, connectors, display, pd/np/alt) are "
+                    "pre-injected as kernel globals. Use them directly."
+                )
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+        if self._is_forbidden(node.module):
+            self.issues.append(
+                f"Line {node.lineno}: do not import from {node.module!r} — framework "
+                "helpers (load_dataset, connectors, display, pd/np/alt) are "
+                "pre-injected as kernel globals. Use them directly."
+            )
+
+
 def check_code(code: str, type_map: dict[str, type] | None = None) -> list[str]:
     tree = ast.parse(code)
     issues: list[str] = []
@@ -289,5 +330,9 @@ def check_code(code: str, type_map: dict[str, type] | None = None) -> list[str]:
     raw_io = RawParquetIOLinter()
     raw_io.visit(tree)
     issues.extend(raw_io.issues)
+
+    framework_imports = FrameworkImportLinter()
+    framework_imports.visit(tree)
+    issues.extend(framework_imports.issues)
 
     return issues

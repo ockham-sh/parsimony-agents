@@ -57,3 +57,25 @@ def test_clean_code_has_no_io_lint() -> None:
     issues = check_code("x = 1 + 2\nprint(x)\n")
     assert not _has_issue(issues, "to_parquet")
     assert not _has_issue(issues, "Result.from_parquet")
+
+
+# ---------------------------------------------------------------------------
+# Framework import lint (brief §12 second bullet)
+# ---------------------------------------------------------------------------
+
+
+def test_import_parsimony_agents_module_is_flagged() -> None:
+    issues = check_code("import parsimony_agents\n")
+    assert _has_issue(issues, "pre-injected")
+
+
+def test_from_parsimony_agents_submodule_is_flagged() -> None:
+    issues = check_code(
+        "from parsimony_agents.execution.load import load_dataset\n"
+    )
+    assert _has_issue(issues, "pre-injected")
+
+
+def test_normal_imports_not_flagged() -> None:
+    issues = check_code("import pandas as pd\nfrom datetime import datetime\n")
+    assert not any("pre-injected" in i for i in issues)

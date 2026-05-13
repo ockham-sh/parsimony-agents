@@ -26,14 +26,20 @@ import pandas as pd
 from parsimony.connector import Connectors
 
 from parsimony_agents.execution import documents as _documents
+from parsimony_agents.execution.connector_cache import (
+    ConnectorCache,
+    MemoizingConnectorBundle,
+)
 from parsimony_agents.execution.factory import OutputFactory
 from parsimony_agents.execution.helpers import normalize_connector_bundles
+from parsimony_agents.execution.load import build_load_dataset
 from parsimony_agents.execution.outputs import (
     FetchLogEntry,
     FigureObject,
     KernelOutput,
     KernelOutputType,
 )
+from parsimony_agents.execution.run_scope import OriginLedger, VariableOrigin
 from parsimony_agents.theme import register_theme
 
 # ---------------------------------------------------------------------------
@@ -92,6 +98,64 @@ _SAFE_BUILTINS["__import__"] = builtins.__import__
 
 
 _used_ids: set[str] = set()
+
+
+def _collect_top_level_assignments(source: str) -> set[str]:
+    """Names targeted by top-level ``=`` assignments in *source*.
+
+    Used by :meth:`CodeExecutor.execute` to stamp variable origins
+    inside a :class:`RunScope`. Covers ``x = ...``, ``x, y = ...``,
+    ``x: T = ...``, and augmented assigns. ``with ... as x``,
+    ``for x in ...``, and ``def x(...)`` are intentionally included
+    because they bind names in the namespace.
+    """
+    out: set[str] = set()
+    tree = ast.parse(source)
+
+    def _walk(node: ast.AST) -> None:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                _names_in(target, out)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            _names_in(node.target, out)
+        elif isinstance(node, ast.For):
+            _names_in(node.target, out)
+        elif isinstance(node, (ast.AsyncFor,)):
+            _names_in(node.target, out)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out.add(node.name)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    _names_in(item.optional_vars, out)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                out.add((alias.asname or alias.name).split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                out.add(alias.asname or alias.name)
+        # Only walk top-level + immediate children; nested function scopes
+        # define locals, not module-level names.
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                continue
+            _walk(child)
+
+    for stmt in tree.body:
+        _walk(stmt)
+    return out
+
+
+def _names_in(target: ast.AST, out: set[str]) -> None:
+    """Collect ``Name`` identifiers from an assignment target."""
+    if isinstance(target, ast.Name):
+        out.add(target.id)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        for elt in target.elts:
+            _names_in(elt, out)
+    elif isinstance(target, ast.Starred):
+        _names_in(target.value, out)
+    # Attribute / Subscript targets bind no new name in the namespace.
 
 
 def _drain_fetch_log(exec_locals: dict[str, Any]) -> list[FetchLogEntry]:
@@ -161,13 +225,29 @@ class StructuredStreamCapturer:
 class BaseCodeExecutor(ABC):
     """Abstract base class for code execution."""
 
+    #: Per-kernel ledger of "which producing run assigned this variable".
+    #: Concrete subclasses must own one so the agent's return tools can
+    #: derive lineage without the agent typing refs. ``None`` is allowed
+    #: for legacy stub executors used only in unit tests.
+    origin_ledger: OriginLedger | None = None
+
     @abstractmethod
     async def execute(
         self,
         code: str,
         dry_run: bool = False,
         timeout_seconds: float | None = None,
+        producer_notebook_path: str | None = None,
+        seen_live_names: set[tuple[str, str]] | None = None,
     ) -> KernelOutput:
+        """Run *code* in the kernel.
+
+        ``seen_live_names`` is the calling terminal's snapshot of
+        ``(kind, live_name)`` pairs it has interacted with. ``load_dataset``
+        consults it to gate cross-terminal access; ``None`` opts out of
+        the gate (legacy callers, scratch executions outside an agent
+        flow).
+        """
         pass
 
     @abstractmethod
@@ -193,6 +273,19 @@ class BaseCodeExecutor(ABC):
 
     def get_locals(self) -> dict[str, Any]:
         return {}
+
+    async def get_origin(self, name: str) -> VariableOrigin | None:
+        """Return the producing-run origin for a kernel variable, or ``None``.
+
+        Subclasses that execute remotely override this to call across
+        the wire; in-process executors read their own
+        :attr:`origin_ledger`. Returns ``None`` if no producing notebook
+        stamped this name (e.g. assigned in dry / scratch execution, or
+        never assigned at all).
+        """
+        if self.origin_ledger is None:
+            return None
+        return self.origin_ledger.get(name)
 
     async def set_connectors(self, connectors: Any) -> None:
         """Inject connectors into the execution namespace. Override in subclasses."""
@@ -226,6 +319,8 @@ class BaseCodeExecutor(ABC):
         code: str,
         dry_run: bool = False,
         timeout_seconds: float | None = None,
+        producer_notebook_path: str | None = None,
+        seen_live_names: set[tuple[str, str]] | None = None,
     ) -> KernelOutput:
         """Execute *code* in a fresh namespace (workspace IDE mode)."""
 
@@ -251,6 +346,15 @@ class CodeExecutor(BaseCodeExecutor):
         self.cwd = cwd
         self._output_factory = output_factory
         self._file_session_materializer = file_session_materializer
+        # Producer-scoped attribution + connector memo cache are kernel-scoped.
+        # Both clear on ``clear_namespace`` / ``set_cwd``.
+        self.origin_ledger: OriginLedger = OriginLedger()
+        self._connector_cache = ConnectorCache()
+        # Per-execute snapshot of the calling terminal's seen-set, consulted
+        # by ``load_dataset`` to gate cross-terminal slug resolution. Set
+        # transiently at the top of each ``execute`` call and cleared at the
+        # end so concurrent / nested kernel reads cannot leak.
+        self._current_seen_live_names: set[tuple[str, str]] | None = None
         self.locals: dict[str, Any] = self._base_locals()
         self.capturer = StructuredStreamCapturer(output_factory)
         self._setup_snippets: list[str] = []
@@ -270,6 +374,11 @@ class CodeExecutor(BaseCodeExecutor):
             "read_pdf_text": _documents.read_pdf_text,
             "read_excel": _documents.read_excel,
             "read_pptx_text": _documents.read_pptx_text,
+            "load_dataset": build_load_dataset(
+                workspace_root_provider=lambda: Path(self.cwd),
+                ledger=self.origin_ledger,
+                seen_live_names_provider=lambda: self._current_seen_live_names,
+            ),
             "__builtins__": _SAFE_BUILTINS,
         }
 
@@ -286,22 +395,22 @@ class CodeExecutor(BaseCodeExecutor):
             self._apply_connectors()
 
     def _apply_connectors(self) -> None:
-        """Wire connector bundles + a shared fetch logger into locals.
+        """Wire connector bundles + persister + fetch logger into locals.
 
-        Must be called with :attr:`_exec_lock` held; does not take the lock itself.
+        Must be called with :attr:`_exec_lock` held; does not take the
+        lock itself.
 
-        The fetch logger captures observational metadata (source, params,
-        provenance, head/tail samples) for each connector call so the
-        agent can reason about its own data lineage. Each fetch is also
-        mirrored to a content-addressed file under
-        ``<cwd>/.ockham/data_objects/<logical_id>/<content_sha>.parquet``
-        (with a sibling ``log.jsonl`` recording each refresh). The
-        persister returns an :class:`ArtifactRef` (kind ``"data_object"``)
-        which is stamped on the entry as ``data_object_ref`` and
-        surfaces as a clickable artifact in the notebook viewer.
-        Curated outputs of the ``return_dataset`` / ``return_chart``
-        tools live under ``.ockham/<kind>s/<logical_id>/<content_sha>.<ext>``
-        with their own curation sidecars and snapshot logs.
+        Each bundle is wrapped by :class:`MemoizingConnectorBundle` so
+        identical-arg calls within one kernel lifetime do not re-hit the
+        network (brief §10 — within-notebook P1). The post-fetch hooks
+        run on every call, cached or not:
+
+        - ``persister`` writes the canonical
+          ``.ockham/data_objects/<lid>/<csha>.parquet`` file and returns
+          an :class:`ArtifactRef`.
+        - ``fetch_logger`` produces the :class:`FetchLogEntry` for the
+          kernel output and records the data_object ref on the current
+          :class:`RunScope` (if any).
         """
         if not self._connectors:
             return
@@ -309,9 +418,16 @@ class CodeExecutor(BaseCodeExecutor):
         from parsimony_agents.execution.fetch_log import make_fetch_logger
 
         persist_fn = make_data_object_persister(Path(self.cwd))
-        fetch_log, log_fetch = make_fetch_logger(persist_fn)
+        fetch_log, log_fetch = make_fetch_logger(
+            persist_fn, ledger=self.origin_ledger
+        )
+        # Re-use the kernel's connector cache across re-applies so refresh
+        # / set_cwd doesn't lose memo state mid-turn unless the namespace
+        # was actually cleared.
         for name, bundle in self._connectors.items():
-            self.locals[name] = bundle.with_callback(log_fetch)
+            self.locals[name] = MemoizingConnectorBundle(
+                bundle, self._connector_cache, post_hooks=(log_fetch,)
+            )
         self.locals["_fetch_log"] = fetch_log
 
     def _workspace_resolved_path(self, path: str) -> Path:
@@ -355,6 +471,12 @@ class CodeExecutor(BaseCodeExecutor):
         await asyncio.to_thread(_unlink)
 
     async def list_workspace_files(self, prefix: str = "") -> list[tuple[str, int]]:
+        # When the caller asks for a dotpath subtree (e.g. ``.ockham/reports``)
+        # they have opted in — keep dotted parts. Otherwise hide hidden dirs
+        # (``.git``, ``.venv``, ``.ockham``) from the user-facing ``list_files``
+        # tool which calls with prefix=""/"data/" etc.
+        keep_hidden = prefix.startswith(".")
+
         def _scan(cwd: str, pfx: str) -> list[tuple[str, int]]:
             root = Path(cwd).resolve()
             base = (root / pfx) if pfx else root
@@ -365,7 +487,7 @@ class CodeExecutor(BaseCodeExecutor):
                 if not p.is_file():
                     continue
                 rel = p.relative_to(root)
-                if any(part.startswith(".") for part in rel.parts):
+                if not keep_hidden and any(part.startswith(".") for part in rel.parts):
                     continue
                 out.append((str(rel).replace(os.sep, "/"), p.stat().st_size))
             return sorted(out, key=lambda x: x[0])
@@ -379,9 +501,15 @@ class CodeExecutor(BaseCodeExecutor):
         code: str,
         dry_run: bool = False,
         timeout_seconds: float | None = None,
+        producer_notebook_path: str | None = None,
+        seen_live_names: set[tuple[str, str]] | None = None,
     ) -> KernelOutput:
         """Run *code* in a fresh namespace."""
+        _ = producer_notebook_path  # workspace mode runs do not produce lineage
+        self._current_seen_live_names = seen_live_names
         async with self._exec_lock:
+            self.origin_ledger.clear()
+            self._connector_cache.clear()
             self.locals = self._base_locals()
             self.capturer = StructuredStreamCapturer(self._output_factory)
             if self._connectors is not None:
@@ -423,6 +551,11 @@ class CodeExecutor(BaseCodeExecutor):
     async def set_cwd(self, cwd: str, session_id: str | None = None) -> None:
         async with self._exec_lock:
             self.cwd = cwd
+            # Switching workspaces invalidates any cached upstream data
+            # — both the connector memo cache and the producer attribution
+            # ledger are kernel-scoped to the workspace we were just in.
+            self._connector_cache.clear()
+            self.origin_ledger.clear()
         if session_id and self._file_session_materializer is not None:
             await self._file_session_materializer(session_id)
         # Connectors carry a fetch-logger bound to the cwd (for the
@@ -446,6 +579,8 @@ class CodeExecutor(BaseCodeExecutor):
 
     async def clear_namespace(self) -> None:
         async with self._exec_lock:
+            self.origin_ledger.clear()
+            self._connector_cache.clear()
             self.locals = self._base_locals()
             self.capturer = StructuredStreamCapturer(self._output_factory)
             if self._connectors is not None:
@@ -464,7 +599,30 @@ class CodeExecutor(BaseCodeExecutor):
         code: str,
         dry_run: bool = False,
         timeout_seconds: float | None = None,
+        producer_notebook_path: str | None = None,
+        seen_live_names: set[tuple[str, str]] | None = None,
     ) -> KernelOutput:
+        """Run *code* in the persistent kernel namespace.
+
+        When ``producer_notebook_path`` is set, a :class:`RunScope` is
+        opened around the execution and every kernel name assigned
+        during the run gets a :class:`VariableOrigin` stamped with this
+        notebook path plus the run's observed load/fetch events. Scratch
+        executions (``producer_notebook_path is None``) do not produce
+        lineage edges; they may still read load/fetch events but those
+        do not advance any variable's origin.
+
+        ``dry_run=True`` copies the namespace and discards mutations —
+        used for verification cells. Origin attribution is skipped in
+        dry-run mode (no producing run took place).
+
+        ``seen_live_names`` is stashed on the executor so the
+        ``load_dataset`` primitive (run inside the kernel) can gate
+        cross-terminal slug resolution. The next execute call overwrites
+        it; between calls the value is harmless because ``load_dataset``
+        is only invoked while a kernel ``execute`` is in progress.
+        """
+        self._current_seen_live_names = seen_live_names
         async with self._exec_lock:
             exec_locals = self.locals.copy() if dry_run else self.locals
             self.capturer.flush()
@@ -474,14 +632,57 @@ class CodeExecutor(BaseCodeExecutor):
                     "print": self.capturer.print,
                 }
             )
-            try:
+
+            def _run_in_scope() -> Any:
                 with self._working_directory(self.cwd):
-                    compiled = compile(code, "cell.py", "exec", ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+                    compiled = compile(
+                        code,
+                        "cell.py",
+                        "exec",
+                        ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
+                    )
                     # eval() is used intentionally: for exec-mode code compiled with
                     # PyCF_ALLOW_TOP_LEVEL_AWAIT it returns a coroutine when top-level
                     # await is present, allowing us to drive it here.  The namespace is
                     # restricted to _SAFE_BUILTINS to limit available attack surface.
-                    result = eval(compiled, exec_locals)  # noqa: S307
+                    return eval(compiled, exec_locals)  # noqa: S307
+
+            try:
+                if producer_notebook_path is not None and not dry_run:
+                    # Snapshot the names that exist before the run so we
+                    # can stamp the delta with the producing origin.
+                    pre = set(self.locals.keys())
+                    with self.origin_ledger.scope(producer_notebook_path) as scope:
+                        result = _run_in_scope()
+                        if inspect.iscoroutine(result):
+                            await result
+                        post = set(self.locals.keys())
+                        # Stamp = (set-diff) ∪ (AST top-level assignments).
+                        # Both are necessary and the union is sound:
+                        #   - set-diff catches new names + names bound via
+                        #     mechanisms not visible at the AST top level
+                        #     (``import x``, ``with ... as`` targets, etc.).
+                        #   - AST catches same-name rebinds like
+                        #     ``df = df.dropna()`` — set-diff misses these
+                        #     because the name is in both pre and post.
+                        # Value-identity (``id()`` before/after) is NOT a
+                        # substitute for AST here: pandas in-place ops
+                        # (``df.fillna(..., inplace=True)``, ``df["c"]=...``)
+                        # leave ``id(df)`` unchanged, so it would miss the
+                        # rebind case too.
+                        # Over-stamping is bounded: if the run raised, we
+                        # jump to the ``except`` clause below and never
+                        # reach ``stamp``, so AST never claims a name an
+                        # aborted statement didn't bind.
+                        new_or_changed = sorted(post - pre)
+                        try:
+                            assigned = _collect_top_level_assignments(code)
+                        except SyntaxError:
+                            assigned = set()
+                        stamp_targets = sorted(set(new_or_changed) | assigned)
+                        self.origin_ledger.stamp(stamp_targets, scope)
+                else:
+                    result = _run_in_scope()
                     if inspect.iscoroutine(result):
                         await result
                 fetch_log = _drain_fetch_log(exec_locals)
