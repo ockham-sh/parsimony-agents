@@ -37,6 +37,7 @@ from __future__ import annotations
 
 __all__ = [
     "ArtifactRef",
+    "LiveNameCollisionError",
     "SNAPSHOT_KINDS",
     "SnapshotKind",
     "chart_logical_id",
@@ -67,6 +68,47 @@ _EXT_BY_KIND: Final[dict[SnapshotKind, str]] = {
     "chart": ".vl.json",
     "report": ".report.md",
 }
+
+
+class LiveNameCollisionError(Exception):
+    """A ``live_name`` already belongs to a sibling terminal's artifact.
+
+    Raised by resolvers when a write or refresh would silently coalesce with
+    an artifact this terminal has never interacted with. The recovery loop is
+    encoded in the message itself: read the existing artifact first to bring
+    it into this terminal's seen-set, then re-issue the write — or pick a
+    different ``live_name``.
+
+    Three parameters are loadbearing for callers:
+    - ``live_name``: the slug both halves of the agent surface share — the
+      argument the agent typed and the argument it must use to read.
+    - ``existing_logical_id``: the colliding artifact's ``logical_id``. If
+      the agent retries with the same ``live_name`` after reading the
+      artifact, the resolver returns this value (continuation), not a
+      fresh slug.
+    - ``kind``: which artifact kind collided. The seen-set is keyed on
+      ``(kind, live_name)``, so the error names both halves for the caller.
+    """
+
+    def __init__(
+        self,
+        *,
+        live_name: str,
+        existing_logical_id: str,
+        kind: SnapshotKind = "notebook",
+    ) -> None:
+        self.live_name = live_name
+        self.existing_logical_id = existing_logical_id
+        self.kind = kind
+        super().__init__(
+            f"{kind} live_name {live_name!r} is already in use by another "
+            f"terminal in this workspace (existing logical_id={existing_logical_id!r}). "
+            f"To continue working on the existing artifact, call "
+            f"read_artifact(live_name={live_name!r}, kind={kind!r}) first — "
+            f"this adds it to your context and your next return_* call will "
+            f"publish a revision. To start a separate artifact, pick a "
+            f"different live_name."
+        )
 
 
 @dataclass(frozen=True)

@@ -59,17 +59,11 @@ class TestSnapshotEmitsAvailableConnectorsBlock:
         return "".join(chunk["text"] for chunk in snapshot.to_llm())
 
     def test_empty_catalog_omits_block(self) -> None:
-        snap = AgentContextSnapshot(
-            files_list=[],
-            connectors_catalog="",
-        )
+        snap = AgentContextSnapshot(connectors_catalog="")
         assert "<available_connectors>" not in self._to_text(snap)
 
     def test_catalog_text_appears_inside_xml_tags(self) -> None:
-        snap = AgentContextSnapshot(
-            files_list=[],
-            connectors_catalog="## `fetch` (1)\n\n### fred",
-        )
+        snap = AgentContextSnapshot(connectors_catalog="## `fetch` (1)\n\n### fred")
         text = self._to_text(snap)
         block = text.split("<available_connectors>", 1)[1].split("</available_connectors>", 1)[0]
         assert "## `fetch` (1)" in block

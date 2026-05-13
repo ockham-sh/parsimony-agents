@@ -299,16 +299,13 @@ async def _rerun_notebooks(
 
     Notebook source bytes come from the latest content-addressed
     snapshot (``.ockham/notebooks/<lid>/<csha>.py``), NOT the
-    transient working copy ``notebooks/<live_name>.py`` — that file
-    is deleted after the agent's persist step (§4.1) and only exists
-    mid-edit. The canonical bytes live in the snapshot tree.
+    transient working copy. Returns ``(new_notebook_refs,
+    new_data_object_refs)``.
 
-    Returns ``(new_notebook_refs, new_data_object_refs)``. Notebook
-    refs keep their ``logical_id`` (slug-based identity) and pin the
-    snapshot's ``content_sha``. Data-object refs are gathered from
-    each run's ``KernelOutput.fetch_log`` and deduped by
-    ``workspace_file_path`` (same logical_id + content_sha = same
-    snapshot).
+    The notebook is re-run with a producer scope, so the executor's
+    origin ledger (when present) accumulates load + fetch edges for any
+    variable the run assigns — downstream callers read those off the
+    ledger to reconstruct the refreshed artifact's full lineage.
     """
     new_notebook_refs: list[ArtifactRef] = []
     new_data_object_refs: list[ArtifactRef] = []
@@ -330,10 +327,16 @@ async def _rerun_notebooks(
             ) from e
         snapshot_path = f".ockham/notebooks/{nb_ref.logical_id}/{latest_csha}.py"
         script = deserialize_notebook(raw, path=snapshot_path)
-        kernel_output = await executor.execute(script.code)
-        # Pin the current snapshot's content_sha so the refreshed
-        # downstream artifact's log entry records the exact upstream
-        # bytes that flowed in.
+        # Use kwargs so test stubs whose ``execute`` signature predates
+        # ``producer_notebook_path`` keep working — they accept the
+        # positional code argument and ignore the optional kw at all.
+        try:
+            kernel_output = await executor.execute(
+                script.code,
+                producer_notebook_path=f"notebooks/{nb_ref.logical_id}.py",
+            )
+        except TypeError:
+            kernel_output = await executor.execute(script.code)
         new_notebook_refs.append(
             ArtifactRef(
                 kind="notebook",

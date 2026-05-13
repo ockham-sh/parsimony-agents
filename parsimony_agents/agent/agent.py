@@ -68,12 +68,14 @@ from parsimony_agents.agent.tracing import trace_tool_execution
 from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.identity import (
     ArtifactRef,
+    LiveNameCollisionError,
     chart_logical_id,
     dataset_logical_id,
     notebook_content_sha,
     notebook_logical_id,
     report_logical_id,
 )
+from parsimony_agents.agent.seen_refs import extract_seen_live_names
 from parsimony_agents.refresh import embedded_refs_from_markdown, refresh_artifact
 from parsimony_agents.agent.xml_render import escape_attr, escape_text
 from parsimony_agents.execution import (
@@ -121,25 +123,6 @@ _TOOL_NAMES_SAFE_CONCURRENT: frozenset[str] = frozenset(
 )
 
 
-# JSON schema for an :class:`ArtifactRef` parameter on agent tool calls.
-# Refs are the single currency for lineage; the agent copies these
-# objects verbatim from ``session_state.workspace_artifacts`` and
-# ``KernelOutput.fetch_log[*].data_object_ref`` (see §5.7).
-_ARTIFACT_REF_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "kind": {
-            "type": "string",
-            "enum": ["notebook", "data_object", "dataset", "chart", "report"],
-        },
-        "logical_id": {"type": "string", "minLength": 1},
-        "content_sha": {"type": "string", "minLength": 1},
-    },
-    "required": ["kind", "logical_id", "content_sha"],
-    "additionalProperties": False,
-}
-
-
 def _tool_batch_allows_concurrent(
     tool_names: list[str],
     tools: Tools,
@@ -154,34 +137,44 @@ def _tool_batch_allows_concurrent(
     return all(n in _TOOL_NAMES_SAFE_CONCURRENT for n in tool_names)
 
 
+def _format_list_artifacts(
+    items: list[dict[str, Any]],
+    *,
+    query: str | None,
+    kind: str | None,
+) -> str:
+    """Render the ``list_artifacts`` result as a compact text block.
+
+    Empty result: friendly message including the filter that was tried,
+    so the agent can tell "nothing matched my topic" apart from "the
+    workspace is empty". Non-empty: one line per artifact, ``[kind]
+    live_name — title/summary``, ordered most-recent-first. The
+    live_name is what the agent feeds into ``read_artifact(live_name=…,
+    kind=…)``.
+    """
+    if not items:
+        parts: list[str] = []
+        if query:
+            parts.append(f"query={query!r}")
+        if kind:
+            parts.append(f"kind={kind!r}")
+        scope = (" matching " + ", ".join(parts)) if parts else ""
+        return f"No artifacts found in this workspace{scope}."
+    lines = [
+        f"{len(items)} artifact(s) (most recent first). "
+        "Inspect with read_artifact(live_name=…, kind=…):"
+    ]
+    for item in items:
+        kind_label = item.get("kind", "?")
+        live_name = item.get("live_name", "?")
+        summary = (item.get("summary") or "").strip()
+        suffix = f" — {summary}" if summary else ""
+        lines.append(f"  [{kind_label}] {live_name}{suffix}")
+    return "\n".join(lines)
+
+
 def _serialize_and_hash_object(obj: Any) -> int:
     return hash(json.dumps(obj, sort_keys=True))
-
-
-def _parse_artifact_refs(raw: list[Any] | None, *, parameter_name: str) -> list[ArtifactRef]:
-    """Validate a list of dict-encoded ArtifactRefs from a tool call.
-
-    Tool inputs arrive as JSON-decoded dicts; this turns each into a
-    typed :class:`ArtifactRef`, raising a clear error for malformed
-    entries (missing fields, unknown kinds, notebook refs whose
-    logical_id != content_sha).
-    """
-    if raw is None:
-        return []
-    if not isinstance(raw, list):
-        raise ValueError(f"{parameter_name} must be a list of refs, got {type(raw).__name__}.")
-    out: list[ArtifactRef] = []
-    for i, entry in enumerate(raw):
-        if not isinstance(entry, dict):
-            raise ValueError(
-                f"{parameter_name}[{i}] must be an object with kind/logical_id/content_sha, "
-                f"got {type(entry).__name__}."
-            )
-        try:
-            out.append(ArtifactRef.from_dict(entry))
-        except (KeyError, ValueError) as exc:
-            raise ValueError(f"{parameter_name}[{i}]: {exc}") from exc
-    return out
 
 
 @dataclass
@@ -272,7 +265,12 @@ class Agent:
         guardrails: AgentGuardrails = AgentGuardrails(),
         session_id: str | None = None,
         file_store: FileStore | None = None,
-        read_artifact_fn: Callable[[str, dict[str, Any]], Awaitable[ArtifactLlmResult]] | None = None,
+        read_artifact_fn: Callable[
+            [str, str, dict[str, Any]], Awaitable[ArtifactLlmResult]
+        ] | None = None,
+        list_artifacts_fn: Callable[
+            [str | None, str | None, int], Awaitable[list[dict[str, Any]]]
+        ] | None = None,
     ):
         from parsimony_agents.agent.prompts import DEFAULT_DATA_ANALYSIS_PROMPT
         from parsimony_agents.execution.executor import CodeExecutor as _LocalExecutor
@@ -320,6 +318,7 @@ class Agent:
 
         self.figures = []
         self._read_artifact_fn = read_artifact_fn
+        self._list_artifacts_fn = list_artifacts_fn
 
         _system_tool_methods: list[ToolMethod] = [
             self.return_notebook,
@@ -332,6 +331,8 @@ class Agent:
         ]
         if read_artifact_fn is not None:
             _system_tool_methods.append(self.read_artifact)
+        if list_artifacts_fn is not None:
+            _system_tool_methods.append(self.list_artifacts)
         _system_tool_methods.extend(
             [
                 self.list_files,
@@ -684,6 +685,7 @@ class Agent:
             iter_snapshot = await ctx.to_snapshot(
                 connectors=self._connectors,
                 minted_refs=turn_state.minted_refs,
+                minted_live_names=turn_state.minted_live_names,
             )
             ctx.messages = [
                 m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False
@@ -1200,6 +1202,18 @@ class Agent:
                                                 content_sha=tool_call_output.content_sha,
                                             )
                                         )
+                                        # Carry the agent-typed slug forward so the
+                                        # next iteration's <turn_artifacts> row carries
+                                        # live_name=... — that attribute is what the
+                                        # seen-set extractor keys on. Without it, the
+                                        # very next return_* (e.g. return_chart after
+                                        # return_dataset) raises LiveNameCollisionError
+                                        # against our own iter-just-finished mint.
+                                        ln = getattr(tool_call_output, "live_name", None)
+                                        if ln:
+                                            turn_state.minted_live_names[
+                                                f"{tool_call_output.type}:{tool_call_output.logical_id}"
+                                            ] = ln
                             else:
                                 tool_call_output = tool_result.exception_message
 
@@ -1257,10 +1271,46 @@ class Agent:
                                 # synchronously from the script bytes; no
                                 # streaming-layer wait needed.
                                 if tool_name in ("return_notebook", "edit_notebook"):
-                                    nb_ref = await self._notebook_ref_for(
-                                        script.code, notebook_path, ctx
-                                    )
+                                    try:
+                                        nb_ref = await self._notebook_ref_for(
+                                            script.code, notebook_path, ctx
+                                        )
+                                    except LiveNameCollisionError as exc:
+                                        # Post-success mint: the host resolver
+                                        # scans curations including the one
+                                        # we just wrote. Its live_name
+                                        # matches our path but the seen-set
+                                        # — derived from messages — does not
+                                        # yet carry the freshly-minted pair.
+                                        # The early-validation already
+                                        # cleared cross-terminal collisions,
+                                        # so trust the resolver's
+                                        # ``existing_logical_id`` here.
+                                        nb_ref = ArtifactRef(
+                                            kind="notebook",
+                                            logical_id=exc.existing_logical_id,
+                                            content_sha=notebook_content_sha(
+                                                script.code
+                                            ),
+                                        )
                                     turn_state.minted_refs.append(nb_ref)
+                                    # The agent-typed slug is the path basename
+                                    # (``notebooks/<slug>.py``). That is what
+                                    # the next iteration's seen-set extractor
+                                    # must see — otherwise the post-mint
+                                    # ``return_dataset`` / ``return_chart``
+                                    # call that resolves the producing
+                                    # notebook via the host resolver raises
+                                    # ``LiveNameCollisionError`` against this
+                                    # terminal's own write.
+                                    try:
+                                        nb_live_name = notebook_logical_id(notebook_path)
+                                    except ValueError:
+                                        nb_live_name = None
+                                    if nb_live_name:
+                                        turn_state.minted_live_names[
+                                            f"notebook:{nb_ref.logical_id}"
+                                        ] = nb_live_name
 
                         case "system":
                             tool_call_output = tool_result.data
@@ -1661,11 +1711,14 @@ class Agent:
 
         # No need to manually copy locals - the executor handles the authoritative
         # push automatically.
-        # Use dry_run=True to ensure code execution is sandboxed within the actor
+        # Use dry_run=True to ensure code execution is sandboxed within the actor.
+        # ``seen_live_names`` flows through so ``load_dataset`` inside the cell
+        # honours the calling terminal's gate.
         kernel_output = await self.code_executor.execute(
             code,
             dry_run=True,
             timeout_seconds=effective_timeout,
+            seen_live_names=extract_seen_live_names(context.messages),
         )
 
         # Attach lightweight metadata to the kernel output
@@ -1801,14 +1854,31 @@ class Agent:
     @toolmethod(
         name="read_artifact",
         description=(
-            "Principal read for typed workspace files (.py / .parquet / .vl.json / .report.md / images). "
-            "view=summary (default) | outline | page | full. page requires locator (e.g. {kind: rows, "
-            "offset, limit} for Parquet, {kind: section, section_index} for .py). full renders charts as images."
+            "Read a typed workspace artifact (notebook / dataset / chart / report) "
+            "by its live_name. Use this after list_artifacts surfaces a sibling-"
+            "terminal artifact you want to compose with — the read brings it into "
+            "your context, after which return_* / load_dataset / refresh / "
+            "edit_report against the same live_name + kind no longer raises "
+            "LiveNameCollisionError. view=summary (default) | outline | page | "
+            "full. page requires locator (e.g. {kind: rows, offset, limit} for "
+            "datasets, {kind: section, section_index} for notebooks). full renders "
+            "charts as images."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path."},
+                "live_name": {
+                    "type": "string",
+                    "description": (
+                        "Workspace slug, exactly as it appears in "
+                        "<turn_artifacts> or in a list_artifacts row."
+                    ),
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["notebook", "dataset", "chart", "report"],
+                    "description": "Artifact kind.",
+                },
                 "view": {
                     "type": "string",
                     "description": "summary | outline | page | full",
@@ -1824,7 +1894,7 @@ class Agent:
                     "description": "Pagination locator, required for view=page.",
                 },
             },
-            "required": ["path"],
+            "required": ["live_name", "kind"],
             "additionalProperties": False,
         },
         tool_type="system",
@@ -1834,23 +1904,84 @@ class Agent:
     async def read_artifact(
         self,
         *,
-        path: str,
+        live_name: str,
+        kind: str,
         view: str | None = None,
         mode: str | None = None,
         locator: dict | None = None,
-        context: AgentContext,
+        context: AgentContext,  # noqa: ARG002
     ) -> SystemToolOutput:
         if self._read_artifact_fn is None:
-            raise RuntimeError("read_artifact is not enabled for this agent configuration")
+            raise RuntimeError(
+                "read_artifact is not enabled for this agent configuration"
+            )
         options: dict[str, Any] = {
             "view": view,
             "mode": mode,
             "locator": locator,
         }
-        result = await self._read_artifact_fn(path, options)
+        result = await self._read_artifact_fn(live_name, kind, options)
         if result.kernel_output is not None:
             return SystemToolOutput(content=result.kernel_output)
         return SystemToolOutput(content=Text(content=result.text))
+
+    @toolmethod(
+        name="list_artifacts",
+        description=(
+            "Discover artifacts already in this workspace by topical keyword. "
+            "Use this BEFORE fetching data from any external source (connector, "
+            "web search, API) when the user references a topic you have not yet "
+            "worked with in this conversation. Cross-terminal: this lists "
+            "artifacts produced by sibling terminal sessions too. Returns up to "
+            "`limit` matches ordered by recency, each as "
+            "{live_name, kind, title, summary}. Inspect one with "
+            "read_artifact(live_name=..., kind=...)."
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": (
+                        "Topical keyword drawn from the user's request "
+                        "(case-insensitive substring on name/title/description/tags). "
+                        "Empty or missing returns all artifacts."
+                    ),
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["notebook", "dataset", "chart", "report", "data_object"],
+                    "description": "Optional filter to a single artifact kind.",
+                },
+                "limit": {
+                    "type": "integer",
+                    "default": 20,
+                    "description": "Max items to return (1-100).",
+                },
+            },
+            "required": [],
+            "additionalProperties": False,
+        },
+        tool_type="system",
+        ui_message="Listing artifacts",
+        ui_message_completed="Listed artifacts",
+    )
+    async def list_artifacts(
+        self,
+        *,
+        query: str | None = None,
+        kind: str | None = None,
+        limit: int = 20,
+        context: AgentContext,  # noqa: ARG002
+    ) -> SystemToolOutput:
+        if self._list_artifacts_fn is None:
+            raise RuntimeError(
+                "list_artifacts is not enabled for this agent configuration"
+            )
+        bounded_limit = max(1, min(100, int(limit)))
+        items = await self._list_artifacts_fn(query, kind, bounded_limit)
+        text = _format_list_artifacts(items, query=query, kind=kind)
+        return SystemToolOutput(content=Text(content=text))
 
     @toolmethod(
         name="list_files",
@@ -1940,6 +2071,17 @@ class Agent:
         normalized = path.strip()
         if not normalized:
             raise ValueError("path must be a non-empty string.")
+        # Early-validation: surface cross-terminal collisions BEFORE any
+        # kernel side effect. The host-bound resolver compares the path's
+        # live_name to existing curations and raises
+        # :class:`LiveNameCollisionError` when the artifact belongs to a
+        # sibling terminal the agent has never read. ``ValueError`` from
+        # path-shape edge cases (standalone tests, legacy flat paths) is
+        # swallowed — there is nothing to gate against.
+        try:
+            await self._resolve_notebook_logical_id(normalized, context)
+        except ValueError:
+            pass
         # Canonicalize newlines via in-memory round-trip — same shape the
         # snapshot store will write, so ``content_sha`` matches what the
         # streaming layer's persist step computes from the ScriptPreview.
@@ -1947,11 +2089,17 @@ class Agent:
             serialize_notebook(Script(path=normalized, code=code)), path=normalized
         ).code
         if execute:
-            ko = await self.code_executor.execute(canonical)
+            # The notebook is the producer for every kernel variable it
+            # assigns — open a producer-scoped run so the variable origin
+            # ledger gets populated. This is what makes "publish a
+            # dataset" automatic-lineage: the agent never types refs.
+            ko = await self.code_executor.execute(
+                canonical,
+                producer_notebook_path=normalized,
+                seen_live_names=extract_seen_live_names(context.messages),
+            )
             return await self._stamp_notebook_ref(ko, canonical, normalized, context)
-        ref = await self._notebook_ref_for(canonical, normalized, context)
-        ref_tag = ref.to_self_closing_tag("notebook_ref")
-        return f"Published {normalized} (not executed; pass execute=true to run).\n{ref_tag}"
+        return f"Published {normalized} (not executed; pass execute=true to run)."
 
     @toolmethod(
         name="edit_notebook",
@@ -2009,11 +2157,13 @@ class Agent:
             raise ValueError("old_str occurs multiple times; provide a more specific target.")
         script.code = script.code.replace(old_str, new_str, 1)
         if execute:
-            ko = await self.code_executor.execute(script.code)
+            ko = await self.code_executor.execute(
+                script.code,
+                producer_notebook_path=path,
+                seen_live_names=extract_seen_live_names(context.messages),
+            )
             return await self._stamp_notebook_ref(ko, script.code, path, context)
-        ref = await self._notebook_ref_for(script.code, path, context)
-        ref_tag = ref.to_self_closing_tag("notebook_ref")
-        return f"Modified {path} (not executed; pass execute=true to run).\n{ref_tag}"
+        return f"Modified {path} (not executed; pass execute=true to run)."
 
     async def _notebook_script_after_tool(
         self,
@@ -2126,9 +2276,9 @@ class Agent:
     @toolmethod(
         name="return_dataset",
         description=(
-            "Publish a DataFrame deliverable. dataset_variable_name is the kernel variable. "
-            "notebook_refs and source_refs are lineage triplets — see prompt rule 5 (refs are atomic) "
-            "and the catalog for where to copy them from."
+            "Publish a DataFrame deliverable. Pass the kernel variable name + human "
+            "metadata; the framework derives lineage from the variable's producing "
+            "notebook run (no ref triplets, no source arrays — those are inferred)."
         ),
         parameters_schema={
             "type": "object",
@@ -2137,16 +2287,6 @@ class Agent:
                     "type": "string",
                     "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
                     "description": "Plain variable name of the final DataFrame.",
-                },
-                "notebook_refs": {
-                    "type": "array",
-                    "description": "ArtifactRefs (kind='notebook') for the producing notebooks, in execution order.",
-                    "items": _ARTIFACT_REF_SCHEMA,
-                },
-                "source_refs": {
-                    "type": "array",
-                    "description": "ArtifactRefs for upstream data_objects or composing datasets. [] for purely-computed.",
-                    "items": _ARTIFACT_REF_SCHEMA,
                 },
                 "title": {"type": "string", "description": "Short display title."},
                 "description": {"type": "string", "description": "One sentence on contents."},
@@ -2162,16 +2302,15 @@ class Agent:
                 },
                 "live_name": {
                     "type": "string",
-                    "description": "File-tree name (no extension); '' hides from live tree.",
+                    "description": "File-tree slug (no extension); the handle other notebooks load by.",
                 },
             },
             "required": [
                 "dataset_variable_name",
-                "notebook_refs",
-                "source_refs",
                 "title",
                 "description",
                 "notes",
+                "live_name",
             ],
             "additionalProperties": False,
         },
@@ -2181,15 +2320,13 @@ class Agent:
     async def return_dataset(
         self,
         *,
-        context: AgentContext,  # noqa: ARG002 — kept for tool signature symmetry
+        context: AgentContext,
         dataset_variable_name: str,
-        notebook_refs: list[Any],
-        source_refs: list[Any],
         title: str,
         description: str,
         notes: list[str],
+        live_name: str,
         tags: list[str] | None = None,
-        live_name: str | None = None,
     ) -> Dataset:
         dataset_variable_name = self._require_plain_variable_name(
             value=dataset_variable_name, parameter_name="dataset_variable_name"
@@ -2197,12 +2334,13 @@ class Agent:
         title = title.strip()
         if not title:
             raise ValueError("title must be a non-empty string.")
+        live_name = (live_name or "").strip()
+        if not live_name:
+            raise ValueError(
+                "live_name must be a non-empty workspace slug. It is the handle "
+                "other notebooks will load this dataset by via load_dataset('<slug>')."
+            )
         notes = TypeAdapter(list[str]).validate_python(notes)
-        nb_refs = _parse_artifact_refs(notebook_refs, parameter_name="notebook_refs")
-        if not all(r.kind == "notebook" for r in nb_refs):
-            raise ValueError("notebook_refs must all have kind='notebook'.")
-        src_refs = _parse_artifact_refs(source_refs, parameter_name="source_refs")
-        await self._validate_refs_resolve(nb_refs + src_refs)
 
         out_obj = await self.code_executor.get(dataset_variable_name)
         if out_obj is None:
@@ -2217,6 +2355,10 @@ class Agent:
                 f"got {type(out_obj).__name__}."
             )
 
+        nb_refs, src_refs = await self._lineage_for_variable(
+            dataset_variable_name, context=context
+        )
+
         final_tags: list[str] = []
         for t in TypeAdapter(list[str]).validate_python(tags or []):
             s = str(t).strip()
@@ -2228,15 +2370,6 @@ class Agent:
             variable_name=dataset_variable_name,
             source_refs=src_refs,
         )
-        # ``live_name`` semantics: None → auto-derive at persist time;
-        # explicit empty string → hidden from live tree.
-        ln: str | None
-        if live_name is None:
-            ln = None
-        elif live_name == "":
-            ln = None
-        else:
-            ln = live_name
         dataset = Dataset(
             logical_id=lid,
             title=title,
@@ -2246,20 +2379,20 @@ class Agent:
             notebook_refs=nb_refs,
             source_refs=src_refs,
             variable_name=dataset_variable_name,
-            live_name=ln,
+            live_name=live_name,
         )
         return dataset.with_payload(out_obj)
 
     @toolmethod(
         name="return_chart",
         description=(
-            "Publish an Altair chart deliverable. chart_variable_name is the kernel variable. "
-            "notebook_ref (singular) and source_dataset_refs are lineage triplets — see prompt "
-            "rule 5 (refs are atomic). Visual contract: no title/subtitle in the chart spec "
-            "(use the title parameter); legend orient='top|bottom|left|right'; size 640x400 "
-            "fixed; explicit altair encodings (:Q :N :O :T); aggregate to ≤5000 points; tooltips "
-            "yes, zoom/pan no; dark theme background #0d0d0d, primary text #f1f5f9, accent "
-            "#3b82f6; positive/negative pair #10b981/#f87171."
+            "Publish an Altair chart deliverable. Pass the kernel variable name + human "
+            "metadata; the framework derives lineage from the variable's producing run. "
+            "Visual contract: no title/subtitle in the chart spec (use the title "
+            "parameter); legend orient='top|bottom|left|right'; size 640x400 fixed; "
+            "explicit altair encodings (:Q :N :O :T); aggregate to ≤5000 points; "
+            "tooltips yes, zoom/pan no; dark theme background #0d0d0d, primary text "
+            "#f1f5f9, accent #3b82f6; positive/negative pair #10b981/#f87171."
         ),
         parameters_schema={
             "type": "object",
@@ -2269,20 +2402,6 @@ class Agent:
                     "type": "string",
                     "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
                     "description": "Plain variable name resolving to an Altair chart.",
-                },
-                "notebook_ref": {
-                    **_ARTIFACT_REF_SCHEMA,
-                    "description": "ArtifactRef (kind='notebook') for the rendering notebook (singular).",
-                },
-                "source_dataset_refs": {
-                    "type": "array",
-                    "items": _ARTIFACT_REF_SCHEMA,
-                    "description": "ArtifactRefs (kind='dataset') for source datasets.",
-                },
-                "source_refs": {
-                    "type": "array",
-                    "items": _ARTIFACT_REF_SCHEMA,
-                    "description": "Optional data_object refs when the chart bypasses return_dataset; usually [].",
                 },
                 "description": {"type": "string", "description": "One sentence on what the chart shows."},
                 "notes": {
@@ -2297,17 +2416,15 @@ class Agent:
                 },
                 "live_name": {
                     "type": "string",
-                    "description": "File-tree name (no extension); '' hides from live tree.",
+                    "description": "File-tree slug (no extension).",
                 },
             },
             "required": [
                 "title",
                 "chart_variable_name",
-                "notebook_ref",
-                "source_dataset_refs",
-                "source_refs",
                 "description",
                 "notes",
+                "live_name",
             ],
             "additionalProperties": False,
         },
@@ -2317,16 +2434,13 @@ class Agent:
     async def return_chart(
         self,
         *,
-        context: AgentContext,  # noqa: ARG002 — kept for tool signature symmetry
+        context: AgentContext,
         title: str,
         chart_variable_name: str,
-        notebook_ref: dict[str, Any],
-        source_dataset_refs: list[Any],
-        source_refs: list[Any],
         description: str,
         notes: list[str],
+        live_name: str,
         tags: list[str] | None = None,
-        live_name: str | None = None,
     ) -> Chart:
         title = title.strip()
         if not title:
@@ -2334,20 +2448,10 @@ class Agent:
         chart_variable_name = self._require_plain_variable_name(
             value=chart_variable_name, parameter_name="chart_variable_name"
         )
+        live_name = (live_name or "").strip()
+        if not live_name:
+            raise ValueError("live_name must be a non-empty workspace slug.")
         notes = TypeAdapter(list[str]).validate_python(notes)
-        nb_refs = _parse_artifact_refs([notebook_ref], parameter_name="notebook_ref")
-        if not nb_refs:
-            raise ValueError("notebook_ref must be present.")
-        nb_ref = nb_refs[0]
-        if nb_ref.kind != "notebook":
-            raise ValueError(
-                f"notebook_ref must have kind='notebook', got {nb_ref.kind!r}."
-            )
-        ds_refs = _parse_artifact_refs(source_dataset_refs, parameter_name="source_dataset_refs")
-        if not all(r.kind == "dataset" for r in ds_refs):
-            raise ValueError("source_dataset_refs must all have kind='dataset'.")
-        src_refs = _parse_artifact_refs(source_refs, parameter_name="source_refs")
-        await self._validate_refs_resolve([nb_ref, *ds_refs, *src_refs])
 
         fig_obj = await self.code_executor.get(chart_variable_name)
         if fig_obj is None:
@@ -2363,6 +2467,17 @@ class Agent:
         if fig_obj.name is None:
             fig_obj.name = chart_variable_name
 
+        nb_refs, src_refs, ds_refs = await self._chart_lineage_for_variable(
+            chart_variable_name, context=context
+        )
+        if not nb_refs:
+            raise ValueError(
+                f"Chart variable {chart_variable_name!r} has no producing notebook "
+                "in this kernel. Publish a notebook that assigns it via "
+                "return_notebook(execute=true) first."
+            )
+        nb_ref = nb_refs[0]
+
         final_tags: list[str] = []
         for t in TypeAdapter(list[str]).validate_python(tags or []):
             s = str(t).strip()
@@ -2375,11 +2490,6 @@ class Agent:
             source_dataset_refs=ds_refs,
             source_refs=src_refs,
         )
-        ln: str | None
-        if live_name is None or live_name == "":
-            ln = None if live_name == "" else None
-        else:
-            ln = live_name
         chart = Chart(
             logical_id=lid,
             title=title,
@@ -2390,28 +2500,24 @@ class Agent:
             source_dataset_refs=ds_refs,
             source_refs=src_refs,
             variable_name=chart_variable_name,
-            live_name=ln,
+            live_name=live_name,
         )
         return chart.with_payload(fig_obj)
 
     @toolmethod(
         name="return_report",
         description=(
-            "Publish a markdown report. markdown is the full body — leading '# Title', prose, and "
-            "embedded refs as ![](file://./.ockham/<kind>s/<logical_id>/<content_sha>.<ext>). "
-            "Each embedded path is the workspace_file_path of an existing snapshot (see prompt rule 5). "
-            "Pass every embedded artifact's triplet in embedded_refs for lineage."
+            "Publish a markdown report. ``markdown`` is the full body — leading "
+            "'# Title', prose, and embedded artifacts as "
+            "``![](file://./.ockham/<kind>s/<logical_id>/<content_sha>.<ext>)``. "
+            "The framework parses those paths and treats them as the report's "
+            "embedded_refs; you do not pass a separate lineage list."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "title": {"type": "string", "description": "Display title (matches leading '# Title')."},
                 "markdown": {"type": "string", "description": "Full markdown body with embedded refs."},
-                "embedded_refs": {
-                    "type": "array",
-                    "items": _ARTIFACT_REF_SCHEMA,
-                    "description": "ArtifactRefs for every artifact embedded in markdown.",
-                },
                 "description": {"type": "string", "description": "One sentence on what the report covers."},
                 "notes": {
                     "type": "array",
@@ -2425,10 +2531,10 @@ class Agent:
                 },
                 "live_name": {
                     "type": "string",
-                    "description": "File-tree name (no extension); '' hides from live tree.",
+                    "description": "File-tree slug (no extension).",
                 },
             },
-            "required": ["title", "markdown", "embedded_refs", "description", "notes"],
+            "required": ["title", "markdown", "description", "notes", "live_name"],
             "additionalProperties": False,
         },
         tool_type="return",
@@ -2437,33 +2543,43 @@ class Agent:
     async def return_report(
         self,
         *,
-        context: AgentContext,  # noqa: ARG002 — kept for tool signature symmetry
+        context: AgentContext,  # noqa: ARG002
         title: str,
         markdown: str,
-        embedded_refs: list[Any],
         description: str,
         notes: list[str],
+        live_name: str,
         tags: list[str] | None = None,
-        live_name: str | None = None,
     ) -> Report:
         title = title.strip()
         if not title:
             raise ValueError("title must be a non-empty string.")
         if not markdown.strip():
             raise ValueError("markdown must be a non-empty string.")
+        live_name = (live_name or "").strip()
+        if not live_name:
+            raise ValueError("live_name must be a non-empty workspace slug.")
         notes = TypeAdapter(list[str]).validate_python(notes)
-        emb = _parse_artifact_refs(embedded_refs, parameter_name="embedded_refs")
+        # Parse the embedded refs from the markdown body — the path IS the ref.
+        # Reject the report if any reference does not resolve on disk.
+        #
+        # TODO(report-embed-by-live_name): swap this surface to live_name —
+        # the lid/csha in the path is the last hash leak in the agent surface,
+        # and the agent has been observed typing `latest` here in the hope it
+        # would resolve (it does not). Keep snapshots reproducible by
+        # persisting a frozen live_name → ArtifactRef pin map alongside the
+        # report curation (analogue of dataset/chart source_refs); the
+        # renderer resolves embeds against that pin map, so refresh produces a
+        # new report snapshot pointing at the new version while old snapshots
+        # stay byte-stable. Also update ``embedded_refs_from_markdown`` and
+        # ``_validate_refs_resolve`` once the surface flips.
+        emb = embedded_refs_from_markdown(markdown)
         await self._validate_refs_resolve(emb)
         final_tags: list[str] = []
         for t in TypeAdapter(list[str]).validate_python(tags or []):
             s = str(t).strip()
             if s and s not in final_tags:
                 final_tags.append(s)
-        ln: str | None
-        if live_name is None or live_name == "":
-            ln = None if live_name == "" else None
-        else:
-            ln = live_name
         return Report(
             logical_id=report_logical_id(embedded_refs=emb, title=title),
             title=title,
@@ -2472,22 +2588,23 @@ class Agent:
             tags=final_tags,
             markdown=markdown,
             embedded_refs=emb,
-            live_name=ln,
+            live_name=live_name,
         )
 
     @toolmethod(
         name="edit_report",
         description=(
-            "Surgical edit of an existing report: replace one occurrence of old_str with new_str against "
-            "the latest snapshot. logical_id is preserved; embedded_refs are re-extracted from the new "
-            "markdown."
+            "Surgical edit of an existing report: replace one occurrence of old_str "
+            "with new_str against the latest snapshot. Identify the report by its "
+            "workspace slug (live_name). logical_id is preserved; embedded refs "
+            "are re-extracted from the new markdown body."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
-                "ref": {
-                    **_ARTIFACT_REF_SCHEMA,
-                    "description": "ArtifactRef of the report to edit (kind='report').",
+                "live_name": {
+                    "type": "string",
+                    "description": "The report's workspace slug (live_name).",
                 },
                 "old_str": {
                     "type": "string",
@@ -2495,7 +2612,7 @@ class Agent:
                 },
                 "new_str": {"type": "string", "description": "Replacement text."},
             },
-            "required": ["ref", "old_str", "new_str"],
+            "required": ["live_name", "old_str", "new_str"],
             "additionalProperties": False,
         },
         tool_type="return",
@@ -2504,41 +2621,40 @@ class Agent:
     async def edit_report(
         self,
         *,
-        context: AgentContext,  # noqa: ARG002 — kept for tool signature symmetry
-        ref: dict[str, Any],
+        context: AgentContext,
+        live_name: str,
         old_str: str,
         new_str: str,
     ) -> Report:
-        target = _parse_artifact_refs([ref], parameter_name="ref")[0]
-        if target.kind != "report":
-            raise ValueError(
-                f"edit_report: ref must be kind='report', got {target.kind!r}."
-            )
+        live_name = (live_name or "").strip()
+        if not live_name:
+            raise ValueError("edit_report: live_name must be non-empty.")
         if old_str == "":
             raise ValueError(
                 "edit_report: old_str must be a non-empty substring; full-body "
                 "rewrites should go through return_report."
             )
 
-        # Resolve to the report's latest snapshot via log.jsonl — the
-        # caller's ``ref.content_sha`` may be stale (e.g. another turn
-        # refreshed the report mid-conversation). Editing always targets
-        # the latest revision.
-        log_path = f".ockham/reports/{target.logical_id}/log.jsonl"
+        seen = extract_seen_live_names(context.messages)
+        target_lid = await self._resolve_artifact_slug(
+            live_name, kind="report", seen_live_names=seen
+        )
+
+        log_path = f".ockham/reports/{target_lid}/log.jsonl"
         try:
             raw_log = await self.code_executor.read_workspace_file(log_path)
         except FileNotFoundError as e:
             raise ValueError(
-                f"edit_report: report {target.logical_id!r} has no log.jsonl "
+                f"edit_report: report {live_name!r} has no log.jsonl "
                 "— it has not been published yet."
             ) from e
         last_csha = last_content_sha_from_log(raw_log)
         if last_csha is None:
             raise ValueError(
-                f"edit_report: report {target.logical_id!r} log.jsonl has no usable entries."
+                f"edit_report: report {live_name!r} log.jsonl has no usable entries."
             )
 
-        snapshot_path = f".ockham/reports/{target.logical_id}/{last_csha}.report.md"
+        snapshot_path = f".ockham/reports/{target_lid}/{last_csha}.report.md"
         raw = await self.code_executor.read_workspace_file(snapshot_path)
         markdown = raw.decode("utf-8")
         n = markdown.count(old_str)
@@ -2550,16 +2666,10 @@ class Agent:
             )
         new_markdown = markdown.replace(old_str, new_str, 1)
 
-        # Re-extract embedded refs so any newly-introduced
-        # ``.ockham/...`` paths participate in this snapshot's lineage.
         new_embedded = embedded_refs_from_markdown(new_markdown)
         await self._validate_refs_resolve(new_embedded)
 
-        # Pull title / description / tags / notes / live_name from the
-        # current curation. These are editable via PATCH /curation but
-        # ARE NOT part of edit_report's surface — this tool only edits
-        # the markdown body.
-        cur_path = f".ockham/reports/{target.logical_id}/curation.json"
+        cur_path = f".ockham/reports/{target_lid}/curation.json"
         try:
             raw_cur = await self.code_executor.read_workspace_file(cur_path)
             curation = json.loads(raw_cur.decode("utf-8"))
@@ -2567,36 +2677,33 @@ class Agent:
             curation = {}
 
         return Report(
-            logical_id=target.logical_id,  # preserve identity — this is a revision
+            logical_id=target_lid,
             title=str(curation.get("title", "") or ""),
             description=str(curation.get("description", "") or ""),
             notes=list(curation.get("notes") or []),
             tags=list(curation.get("tags") or []),
             markdown=new_markdown,
             embedded_refs=new_embedded,
-            live_name=curation.get("live_name") if isinstance(curation.get("live_name"), str) else None,
+            live_name=curation.get("live_name") if isinstance(curation.get("live_name"), str) else live_name,
         )
 
     @toolmethod(
         name="refresh",
         description=(
-            "Re-derive an existing dataset / chart / report from latest upstream. Walks lineage, "
-            "re-runs producing notebooks, appends a new content_sha under the same logical_id. "
-            "Idempotent when no upstream byte changed. Use this for 'update with latest data' — "
-            "see prompt rule 4."
+            "Re-derive an existing dataset / chart / report from latest upstream. "
+            "Identify the target by its workspace slug (live_name). Walks lineage, "
+            "re-runs producing notebooks, appends a new content_sha under the same "
+            "logical_id. Idempotent when no upstream byte changed."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
-                "ref": {
-                    **_ARTIFACT_REF_SCHEMA,
-                    "description": (
-                        "ArtifactRef to refresh (kind='dataset' | 'chart' | 'report'). "
-                        "For notebook re-runs, use return_notebook(execute=true)."
-                    ),
+                "live_name": {
+                    "type": "string",
+                    "description": "The artifact's workspace slug (live_name).",
                 },
             },
-            "required": ["ref"],
+            "required": ["live_name"],
             "additionalProperties": False,
         },
         tool_type="return",
@@ -2605,13 +2712,16 @@ class Agent:
     async def refresh(
         self,
         *,
-        context: AgentContext,  # noqa: ARG002 — kept for tool signature symmetry
-        ref: dict[str, Any],
+        context: AgentContext,
+        live_name: str,
     ) -> Dataset | Chart | Report:
-        try:
-            target_ref = ArtifactRef.from_dict(ref)
-        except (KeyError, ValueError) as e:
-            raise ValueError(f"refresh: malformed ref ({e}).") from e
+        live_name = (live_name or "").strip()
+        if not live_name:
+            raise ValueError("refresh: live_name must be non-empty.")
+        seen = extract_seen_live_names(context.messages)
+        target_ref = await self._resolve_slug_to_latest_ref(
+            live_name, seen_live_names=seen
+        )
 
         new_ref = await refresh_artifact(target_ref, executor=self.code_executor)
 
@@ -2695,17 +2805,214 @@ class Agent:
     async def _validate_refs_resolve(self, refs: list[ArtifactRef]) -> None:
         """Each ref must resolve to bytes on disk.
 
-        Replaces the legacy substring-matching ``_validate_return_chart_refs``
-        with a single existence check at the snapshot store layer (§5.8 D).
+        Used for ``return_report``: every embedded ``.ockham/...`` path
+        in the markdown body must point at a real snapshot. Refresh and
+        return_dataset/chart derive their refs from the framework (the
+        run scope and the snapshot store), so they never hit this path.
         """
         for ref in refs:
             try:
                 await self.code_executor.read_workspace_file(ref.workspace_file_path)
-            except FileNotFoundError as e:  # pragma: no cover
+            except FileNotFoundError as e:
                 raise ValueError(
-                    f"Ref {ref.kind}:{ref.logical_id}:{ref.content_sha} does not resolve "
-                    f"({ref.workspace_file_path!r} not found). Copy each {{kind, logical_id, "
-                    "content_sha}} field verbatim from <notebook_ref/> in the most recent tool "
-                    "result, <data_object_ref/> in <fetch_log>, or <artifact/> in "
-                    "session_state.workspace_artifacts."
+                    f"Embedded ref {ref.kind}:{ref.logical_id}:{ref.content_sha} does not "
+                    f"resolve ({ref.workspace_file_path!r} not found). Reports embed "
+                    "artifacts via ![](file://./.ockham/<kind>s/<lid>/<csha>.<ext>) — "
+                    "the path must be one of the rows in <turn_artifacts>."
                 ) from e
+
+    async def _lineage_for_variable(
+        self,
+        variable_name: str,
+        *,
+        context: AgentContext,
+    ) -> tuple[list[ArtifactRef], list[ArtifactRef]]:
+        """Return ``(notebook_refs, source_refs)`` for a dataset variable.
+
+        Pulls the variable's :class:`VariableOrigin` from the kernel's
+        :class:`OriginLedger`. The producing notebook is the singular
+        ``notebook_refs`` entry; ``source_refs`` is the union of the
+        run's observed connector fetches and load_dataset events.
+
+        The producing notebook must have a persisted snapshot (i.e. it
+        was published via ``return_notebook``) — otherwise this is the
+        "published artifact must come from a published recipe" rule
+        firing as a hard error rather than soft prose.
+        """
+        origin = await self.code_executor.get_origin(variable_name)
+        if origin is None:
+            raise ValueError(
+                f"Variable '{variable_name}' has no producing notebook on record. "
+                "It was likely assigned in dry_execute_code or before any notebook ran. "
+                "Publish a notebook that assigns it via return_notebook(execute=true) "
+                "first."
+            )
+        notebook_ref = await self._notebook_ref_for_published_path(
+            origin.notebook_path, context=context
+        )
+        source_refs = list(origin.load_refs) + list(origin.fetch_refs)
+        return [notebook_ref], source_refs
+
+    async def _chart_lineage_for_variable(
+        self,
+        variable_name: str,
+        *,
+        context: AgentContext,
+    ) -> tuple[list[ArtifactRef], list[ArtifactRef], list[ArtifactRef]]:
+        """Return ``(notebook_refs, source_refs, source_dataset_refs)`` for a chart variable.
+
+        Same model as :meth:`_lineage_for_variable` but partitions
+        ``source_refs`` into dataset (load) edges and data_object (fetch)
+        edges — charts carry them on separate fields.
+        """
+        origin = await self.code_executor.get_origin(variable_name)
+        if origin is None:
+            raise ValueError(
+                f"Variable '{variable_name}' has no producing notebook on record."
+            )
+        notebook_ref = await self._notebook_ref_for_published_path(
+            origin.notebook_path, context=context
+        )
+        return [notebook_ref], list(origin.fetch_refs), list(origin.load_refs)
+
+    async def _notebook_ref_for_published_path(
+        self, working_copy_path: str, *, context: AgentContext
+    ) -> ArtifactRef:
+        """Resolve a notebook path to its latest persisted :class:`ArtifactRef`.
+
+        The notebook MUST have a ``log.jsonl`` — i.e. the agent must
+        have published it via ``return_notebook`` at least once. Without
+        that, this is the "published artifact must come from a published
+        recipe" check failing loud: scratch-cell or unpublished notebook
+        bytes cannot be cited as the producer of a published deliverable.
+        """
+        logical_id = await Agent._resolve_notebook_logical_id(working_copy_path, context)
+        try:
+            _raw, latest_csha = await read_latest_notebook(
+                self.code_executor, logical_id=logical_id
+            )
+        except FileNotFoundError as e:
+            raise ValueError(
+                f"Notebook {working_copy_path!r} has not been published yet. "
+                "Published deliverables (datasets/charts) must come from a "
+                "published recipe — call return_notebook on this path first."
+            ) from e
+        return ArtifactRef(kind="notebook", logical_id=logical_id, content_sha=latest_csha)
+
+    async def _resolve_artifact_slug(
+        self,
+        live_name: str,
+        *,
+        kind: str | None = None,
+        seen_live_names: set[tuple[str, str]] | None = None,
+    ) -> str:
+        """Resolve a workspace slug to a typed artifact's ``logical_id``.
+
+        Scans ``.ockham/<kind>s/*/curation.json`` for a unique
+        ``live_name`` match. When ``kind`` is given, only that kind is
+        searched. Raises :class:`ValueError` on miss or ambiguity with a
+        message that names the right discovery surface.
+
+        Cross-terminal gate: when ``seen_live_names`` is provided and the
+        match's ``(kind, live_name)`` pair is not in it, raise
+        :class:`LiveNameCollisionError` — the artifact belongs to a
+        sibling terminal and the agent must ``read_artifact`` it first.
+        Passing ``None`` skips the gate for programmatic callers.
+        """
+        kinds = (kind,) if kind else ("dataset", "chart", "report")
+        matches: list[tuple[str, str]] = []  # (kind, logical_id)
+        for k in kinds:
+            try:
+                _ = await self.code_executor.list_workspace_files(f".ockham/{k}s")
+            except FileNotFoundError:
+                continue
+            entries = await self.code_executor.list_workspace_files(f".ockham/{k}s")
+            seen: set[str] = set()
+            for rel, _size in entries:
+                # ``rel`` ≈ ``.ockham/datasets/<lid>/curation.json`` or snapshot.
+                parts = rel.split("/")
+                if len(parts) < 4 or parts[-1] != "curation.json":
+                    continue
+                lid = parts[2]
+                if lid in seen:
+                    continue
+                seen.add(lid)
+                try:
+                    raw = await self.code_executor.read_workspace_file(rel)
+                except FileNotFoundError:
+                    continue
+                try:
+                    data = json.loads(raw.decode("utf-8"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if not isinstance(data, dict):
+                    continue
+                if data.get("kind") != k:
+                    continue
+                if data.get("live_name") == live_name:
+                    matches.append((k, lid))
+        if not matches:
+            kind_label = kind or "dataset/chart/report"
+            raise ValueError(
+                f"No {kind_label} has live_name {live_name!r}. Use the slug "
+                "shown in <turn_artifacts>."
+            )
+        if len(matches) > 1:
+            raise ValueError(
+                f"Slug {live_name!r} matches multiple artifacts. Rename one "
+                "via curation before referring to it."
+            )
+        matched_kind, matched_lid = matches[0]
+        if (
+            seen_live_names is not None
+            and (matched_kind, live_name) not in seen_live_names
+        ):
+            raise LiveNameCollisionError(
+                live_name=live_name,
+                existing_logical_id=matched_lid,
+                kind=matched_kind,
+            )
+        return matched_lid
+
+    async def _resolve_slug_to_latest_ref(
+        self,
+        live_name: str,
+        *,
+        seen_live_names: set[tuple[str, str]] | None = None,
+    ) -> ArtifactRef:
+        """Resolve a slug to the latest :class:`ArtifactRef` across kinds.
+
+        Used by :meth:`refresh`. Determines the kind from the curation
+        match, then walks ``log.jsonl`` for the latest ``content_sha``.
+
+        ``seen_live_names`` is forwarded to :meth:`_resolve_artifact_slug`;
+        a :class:`LiveNameCollisionError` from that call propagates
+        unchanged (the caller catches it and surfaces the recovery
+        instruction to the LLM).
+        """
+        kinds = ("dataset", "chart", "report")
+        for k in kinds:
+            try:
+                lid = await self._resolve_artifact_slug(
+                    live_name, kind=k, seen_live_names=seen_live_names
+                )
+            except ValueError:
+                continue
+            # LiveNameCollisionError NOT swallowed here — surface the
+            # cross-terminal failure to the agent's tool framework.
+            log_path = f".ockham/{k}s/{lid}/log.jsonl"
+            try:
+                raw_log = await self.code_executor.read_workspace_file(log_path)
+            except FileNotFoundError as e:
+                raise ValueError(
+                    f"Artifact {live_name!r} has no log.jsonl."
+                ) from e
+            last_csha = last_content_sha_from_log(raw_log)
+            if not last_csha:
+                raise ValueError(
+                    f"Artifact {live_name!r} log.jsonl is empty."
+                )
+            return ArtifactRef(kind=k, logical_id=lid, content_sha=last_csha)
+        raise ValueError(
+            f"No published artifact has live_name {live_name!r}."
+        )

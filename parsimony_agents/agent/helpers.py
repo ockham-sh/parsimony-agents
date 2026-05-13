@@ -47,6 +47,15 @@ class TurnState(BaseModel):
     #: block — so the agent never has to scan back through tool-message
     #: history to find a freshly-published ref. Bounded by ``max_iterations``.
     minted_refs: list[ArtifactRef] = Field(default_factory=list)
+    #: ``f"{kind}:{logical_id}"`` → ``live_name`` for the same refs in
+    #: :attr:`minted_refs`. Populated alongside ``minted_refs.append`` at
+    #: every callsite; the rendering chain reads it to emit
+    #: ``<artifact ... live_name="..."/>`` in the next iteration's
+    #: ``<turn_artifacts>`` — without that attribute, the seen-set
+    #: extractor cannot recognise this terminal's own writes and the
+    #: very next ``return_*`` raises ``LiveNameCollisionError`` against
+    #: the iteration-just-finished mint.
+    minted_live_names: dict[str, str] = Field(default_factory=dict)
 
     model_config = {"arbitrary_types_allowed": True}
 

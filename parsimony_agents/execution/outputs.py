@@ -376,45 +376,18 @@ class KernelOutput(MessageContent):
                     "text": "\n---\n",
                 }
             )
-        nb_block = self._notebook_ref_to_llm()
-        if nb_block:
-            blocks.append({"type": "text", "text": nb_block})
         fetch_block = self._fetch_log_to_llm()
         if fetch_block:
             blocks.append({"type": "text", "text": fetch_block})
         return blocks
 
-    def _notebook_ref_to_llm(self) -> str:
-        """Render ``metadata['notebook_ref']`` as a copy-pasteable XML block.
-
-        Set by code tools (``return_notebook`` / ``edit_notebook`` with
-        ``execute=True``) so the agent has the canonical
-        ``(kind, logical_id, content_sha)`` triplet for the notebook the
-        kernel just ran. The agent's ``return_dataset`` /
-        ``return_chart`` / ``return_report`` calls require this triplet
-        verbatim — without it the agent has to recompute the hash, which
-        diverges from the framework's whitespace-stripped canonical form.
-        """
-
-        from parsimony_agents.identity import ArtifactRef
-
-        raw = (self.metadata or {}).get("notebook_ref")
-        if not isinstance(raw, dict):
-            return ""
-        try:
-            ref = ArtifactRef.from_dict(raw)
-        except (KeyError, ValueError):
-            return ""
-        return ref.to_self_closing_tag("notebook_ref") + "\n"
-
     def _fetch_log_to_llm(self) -> str:
-        """Render persisted fetches as a copy-pasteable ``<fetch_log>`` block.
+        """Render the fetches this execution observed.
 
-        Each entry surfaces its ``data_object_ref`` triplet
-        ``(kind, logical_id, content_sha)`` so the agent can pass it
-        directly as a ``source_ref`` in ``return_dataset`` /
-        ``return_chart`` / ``return_report`` without inventing or
-        recomputing hashes.
+        The block is informational: source + params + row count so the
+        agent can see what data flowed through. Lineage is derived by
+        the framework from the run scope — no triplets appear here, no
+        ref-shaped fields the agent might be tempted to copy.
         """
 
         if not self.fetch_log:
@@ -426,21 +399,10 @@ class KernelOutput(MessageContent):
             )
             v_attr = f' version="{escape_attr(entry.version)}"' if entry.version is not None else ""
             lines.append(
-                f'  <entry source="{escape_attr(entry.source)}" params="{params_inline}"{v_attr}>'
+                f'  <entry source="{escape_attr(entry.source)}" '
+                f'params="{params_inline}" rows="{entry.row_count}"{v_attr}/>'
             )
-            if entry.data_object_ref is not None:
-                lines.append(
-                    "    " + entry.data_object_ref.to_self_closing_tag("data_object_ref")
-                )
-            lines.append("  </entry>")
         lines.append("</fetch_log>")
-        lines.append(
-            "<note>Each &lt;data_object_ref&gt; above is the typed ArtifactRef "
-            "for the persisted fetch. To use one as a source_ref in "
-            "return_dataset / return_chart / return_report, copy "
-            "{kind, logical_id, content_sha} verbatim — do not invent "
-            "or recompute hashes.</note>"
-        )
         return "\n".join(lines) + "\n"
 
     def to_frontend_dict(self):

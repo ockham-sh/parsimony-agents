@@ -30,68 +30,8 @@ from parsimony_agents.notebook import Script
 from parsimony_agents.agent.session_state import SessionState
 
 
-def _build_workspace_tree(files: list[tuple[str, int]]) -> str:
-    """Render a sorted (path, size_bytes) list as an indented directory tree.
-
-    Example output::
-
-        notebooks/
-        ├── gdp_retrieval.py   4.2 KB
-        └── inflation.py       2.1 KB
-        data/
-        └── raw.csv           12.0 KB
-    """
-    from collections import defaultdict
-
-    def _fmt_size(n: int) -> str:
-        if n >= 1024 * 1024:
-            return f"{n / (1024 * 1024):.1f} MB"
-        if n >= 1024:
-            return f"{n / 1024:.1f} KB"
-        return f"{n} B"
-
-    # Build a nested dict tree: {dir: {subdir: {...}, filename: size_bytes}}
-    tree: dict = {}
-    for path, size in sorted(files):
-        parts = path.replace("\\", "/").split("/")
-        node = tree
-        for part in parts[:-1]:
-            node = node.setdefault(part, {})
-        node[parts[-1]] = size
-
-    lines: list[str] = []
-
-    def _render(node: dict, prefix: str) -> None:
-        entries = sorted(node.items())
-        for idx, (name, value) in enumerate(entries):
-            is_last = idx == len(entries) - 1
-            connector = "└── " if is_last else "├── "
-            if isinstance(value, dict):
-                lines.append(f"{prefix}{connector}{name}/")
-                extension = "    " if is_last else "│   "
-                _render(value, prefix + extension)
-            else:
-                size_str = _fmt_size(value)
-                lines.append(f"{prefix}{connector}{name}   {size_str}")
-
-    # Top-level entries: dirs get their name + "/" on their own line, then recurse
-    top_entries = sorted(tree.items())
-    for idx, (name, value) in enumerate(top_entries):
-        if isinstance(value, dict):
-            lines.append(f"{name}/")
-            _render(value, "")
-        else:
-            size_str = _fmt_size(value)
-            lines.append(f"{name}   {size_str}")
-
-    return "\n".join(lines)
-
-
 class AgentContextSnapshot(MessageContent):
     type: Literal["agent_context_snapshot"] = "agent_context_snapshot"
-    #: Workspace files as (relative_path, size_bytes) pairs, sorted alphabetically.
-    #: Populated from the materialized workspace directory before each turn.
-    files_list: list[tuple[str, int]] = Field(default_factory=list)
     #: Pre-rendered catalog of connectors bound into the executor this turn,
     #: as produced by :func:`parsimony_agents.agent.helpers.render_connector_catalog`.
     #: Empty string means no connectors are bound and the corresponding XML
@@ -104,6 +44,20 @@ class AgentContextSnapshot(MessageContent):
     #: Fused with ``session_state.workspace_artifacts`` to render a single
     #: always-current ``<turn_artifacts>`` block.
     minted_refs: list[ArtifactRef] = Field(default_factory=list)
+    #: ``f"{kind}:{logical_id}"`` → ``live_name`` for the same refs in
+    #: :attr:`minted_refs`. Carries the agent-typed workspace slug so the
+    #: rendered ``<artifact ... live_name="..."/>`` row appears in the next
+    #: iteration's prompt, letting the seen-set extractor recognise this
+    #: terminal's own writes (otherwise a freshly-minted artifact reads as
+    #: a sibling-terminal collision on the very next ``return_*`` call).
+    minted_live_names: dict[str, str] = Field(default_factory=dict)
+    #: ``(kind, live_name)`` pairs the calling terminal has interacted with
+    #: in the current conversation. Used by :meth:`SessionState.to_llm_text`
+    #: to filter cross-turn workspace artifacts to this terminal's seen-set
+    #: — sibling-terminal artifacts are hidden until the agent calls
+    #: ``list_artifacts`` / ``read_artifact``. Serialised as a list of
+    #: two-element lists for JSON compatibility; rehydrated on use.
+    seen_live_names_pairs: list[tuple[str, str]] = Field(default_factory=list)
 
     def to_llm(self, mode: str = "default") -> list[dict[str, Any]]:
         chunks: list[dict[str, Any]] = []
@@ -123,15 +77,6 @@ class AgentContextSnapshot(MessageContent):
                 }
             ]
         )
-
-        if self.files_list:
-            tree_str = _build_workspace_tree(self.files_list)
-            chunks.append(
-                {
-                    "type": "text",
-                    "text": f"<workspace>\n{tree_str}\n</workspace>\n",
-                }
-            )
 
         _parts = [
             "\n"
@@ -169,10 +114,15 @@ class AgentContextSnapshot(MessageContent):
             )
 
         if self.session_state is not None and mode != "minimal":
+            seen = {tuple(p) for p in self.seen_live_names_pairs if len(p) == 2}
             chunks.append(
                 {
                     "type": "text",
-                    "text": self.session_state.to_llm_text(minted_refs=self.minted_refs or None),
+                    "text": self.session_state.to_llm_text(
+                        minted_refs=self.minted_refs or None,
+                        minted_live_names=self.minted_live_names or None,
+                        seen_live_names=seen,
+                    ),
                 }
             )
 
@@ -205,8 +155,6 @@ class AgentContext(MessageContent):
     vector_store: Any | None = Field(default=None, exclude=True)
     keyword_store: Any | None = Field(default=None, exclude=True)
 
-    #: Workspace files as (relative_path, size_bytes) pairs, injected by router before each turn.
-    files_list: list[tuple[str, int]] = Field(default_factory=list)
     #: Filled by the host before :meth:`to_snapshot` in workspace mode.
     session_state: SessionState | None = None
     #: Resolves a notebook working-copy path → its current ``logical_id``.
@@ -226,24 +174,22 @@ class AgentContext(MessageContent):
         *,
         connectors: Any = None,
         minted_refs: list[ArtifactRef] | None = None,
+        minted_live_names: dict[str, str] | None = None,
     ) -> AgentContextSnapshot:
         from parsimony_agents.agent.helpers import render_connector_catalog
+        from parsimony_agents.agent.seen_refs import extract_seen_live_names
 
-        # Prefer the injected file list (workspace mode); fall back to FileStore for
-        # session-mode agents that still use file_store.
-        if self.files_list:
-            files_list: list[tuple[str, int]] = list(self.files_list)
-        elif self.files is not None:
-            raw: list[str] = await self.files.list_files()
-            files_list = [(p, 0) for p in raw]
-        else:
-            files_list = []
-
+        # Compute the calling terminal's seen-set from the live message
+        # graph. The snapshot stores it as a JSON-friendly list of pairs;
+        # :meth:`AgentContextSnapshot.to_llm` rehydrates it back into a
+        # set before passing to the session_state renderer.
+        seen_pairs = sorted(extract_seen_live_names(self.messages))
         return AgentContextSnapshot(
-            files_list=files_list,
             connectors_catalog=render_connector_catalog(connectors),
             session_state=self.session_state,
             minted_refs=list(minted_refs or []),
+            minted_live_names=dict(minted_live_names or {}),
+            seen_live_names_pairs=list(seen_pairs),
         )
 
     def _get_ref_name(self, key: str = str(uuid4())[:8], subdir: str = "artifacts") -> str:

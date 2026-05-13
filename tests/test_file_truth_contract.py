@@ -49,8 +49,9 @@ def test_return_notebook_does_not_call_execute() -> None:
         assert r.success
         ex.execute.assert_not_awaited()
         ex.write_workspace_file.assert_not_awaited()
-        # The returned message round-trips the canonical notebook ref tag.
-        assert "<notebook_ref " in r.data  # type: ignore[arg-type]
+        # The returned message confirms publication without exposing a ref.
+        assert "Published n.py" in r.data  # type: ignore[arg-type]
+        assert "<notebook_ref" not in r.data  # type: ignore[arg-type]
 
     asyncio.run(_run())
 
@@ -89,19 +90,12 @@ def test_to_snapshot_default_has_empty_connectors_catalog() -> None:
     assert isinstance(snap, AgentContextSnapshot)
 
 
-def test_return_notebook_no_exec_returns_notebook_ref_in_string() -> None:
-    """The return_notebook tool result must include the canonical notebook ref.
+def test_return_notebook_no_exec_returns_publication_confirmation() -> None:
+    """The no-exec ``return_notebook`` returns a publication confirmation.
 
-    Without this the agent has no way to learn the notebook's
-    ``logical_id``/``content_sha`` short of recomputing the hash by hand
-    (which diverges from ``notebook_content_sha``'s whitespace-stripped
-    canonical form). Surfaced inline so the agent sees it the moment it
-    writes the notebook, not after a session_state rebuild that never
-    happens mid-turn.
+    Refs are framework-internal under the new model; the agent only
+    needs to know the notebook landed.
     """
-
-    from parsimony_agents.identity import notebook_content_sha
-
     written: list[bytes] = []
     ex = MagicMock()
     ex.write_workspace_file = AsyncMock(side_effect=lambda _p, d: written.append(d))
@@ -118,32 +112,26 @@ def test_return_notebook_no_exec_returns_notebook_ref_in_string() -> None:
     ex.get_locals = MagicMock(return_value={})
 
     agent = Agent(model="m", code_executor=ex)  # type: ignore[arg-type]
-    # ``path="n.py"`` is outside the canonical ``notebooks/`` prefix, so
-    # ``notebook_logical_id`` raises and the agent falls back to using
-    # ``content_sha`` as logical_id (standalone parsimony-agents usage).
     ctx = AgentContext(session_id="sid")
-    code = "x = 1\n"
-    expected_sha = notebook_content_sha(code)
 
     async def _run() -> str:
-        r = await agent.return_notebook(context=ctx, path="n.py", code=code)
+        r = await agent.return_notebook(context=ctx, path="n.py", code="x = 1\n")
         return r.data  # type: ignore[no-any-return]
 
     body = asyncio.run(_run())
-    assert "<notebook_ref " in body
-    assert f'logical_id="{expected_sha}"' in body
-    assert f'content_sha="{expected_sha}"' in body
+    assert "Published n.py" in body
+    assert "<notebook_ref" not in body
+    assert "logical_id" not in body
+    assert "content_sha" not in body
 
 
-def test_return_notebook_with_execute_stamps_notebook_ref_metadata() -> None:
-    """When ``execute=True`` the KernelOutput carries the notebook ref in metadata.
+def test_return_notebook_with_execute_does_not_surface_ref_to_llm() -> None:
+    """When ``execute=True`` the KernelOutput must NOT surface a notebook_ref.
 
-    ``KernelOutput.to_llm`` reads it from there to emit the same
-    ``<notebook_ref/>`` block the no-exec path appends to its string.
+    Under the new model, refs are framework-internal — the agent never
+    consumes a hash. The metadata may still carry the ref (used by the
+    streaming layer's ref ledger) but ``to_llm`` must hide it.
     """
-
-    from parsimony_agents.identity import notebook_content_sha
-
     written: list[bytes] = []
     ex = MagicMock()
     ex.write_workspace_file = AsyncMock(side_effect=lambda _p, d: written.append(d))
@@ -162,19 +150,13 @@ def test_return_notebook_with_execute_stamps_notebook_ref_metadata() -> None:
     agent = Agent(model="m", code_executor=ex)  # type: ignore[arg-type]
     ctx = AgentContext(session_id="sid")
     code = "y = 2\n"
-    expected_sha = notebook_content_sha(code)
 
     async def _run() -> KernelOutput:
         r = await agent.return_notebook(context=ctx, path="n.py", code=code, execute=True)
         return r.data  # type: ignore[no-any-return]
 
     ko = asyncio.run(_run())
-    assert ko.metadata is not None
-    nb_ref = ko.metadata.get("notebook_ref")
-    assert nb_ref == {
-        "kind": "notebook",
-        "logical_id": expected_sha,
-        "content_sha": expected_sha,
-    }
     flat = "".join(b.get("text", "") for b in ko.to_llm())
-    assert f'logical_id="{expected_sha}"' in flat
+    assert "logical_id" not in flat
+    assert "content_sha" not in flat
+    assert "<notebook_ref" not in flat

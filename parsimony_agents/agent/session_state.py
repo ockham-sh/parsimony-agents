@@ -140,23 +140,26 @@ def kernel_summaries_from_locals_map(locals_map: dict[str, Any]) -> list[KernelV
 class WorkspaceArtifactLine(BaseModel):
     """One file-backed row in the session summary.
 
-    ``ref`` is the typed :class:`~parsimony_agents.identity.ArtifactRef`
-    the agent must copy verbatim into ``return_dataset`` /
-    ``return_chart`` / ``return_report`` lineage fields. It is populated
-    for every kind the agent can ref (``notebook``, ``dataset``,
-    ``chart``, ``report``) and ``None`` for everything else (e.g. raw
-    ``data_objects`` whose refs only flow through ``<fetch_log>``, or
-    user data files that aren't part of the lineage graph).
+    ``live_name`` is the workspace-visible slug — the *only* identifier
+    the agent ever types. For datasets it is the argument to
+    ``load_dataset("<live_name>")``; for any kind it is the argument to
+    ``refresh`` / ``edit_report``. ``None`` for kinds that have no
+    user-facing slug (raw ``data_objects``, unregistered user files).
 
-    ``new`` is set when the ref was minted or advanced *during the
-    current turn* (Task 15). It surfaces as ``new="true"`` in the
-    rendered ``<turn_artifacts>`` block so the agent can distinguish
-    just-published refs from cross-turn ones at a glance.
+    ``ref`` carries the typed ArtifactRef internally for renderer use
+    (the framework still pin-points on disk via logical_id +
+    content_sha). The agent does NOT consume ``ref`` directly — the
+    rendered XML exposes ``live_name``, not the hash triplet.
+
+    ``new`` is set when the artifact was minted or advanced during the
+    current turn. Surfaces as ``new="true"`` in the rendered
+    ``<turn_artifacts>`` block.
     """
 
     path: str
     kind: str
     summary: str = ""
+    live_name: str | None = None
     ref: ArtifactRef | None = None
     new: bool = False
 
@@ -164,6 +167,9 @@ class WorkspaceArtifactLine(BaseModel):
 def fuse_workspace_artifacts(
     cross_turn: list[WorkspaceArtifactLine],
     minted: list[ArtifactRef],
+    *,
+    minted_live_names: dict[str, str] | None = None,
+    seen_live_names: set[tuple[str, str]] | None = None,
 ) -> list[WorkspaceArtifactLine]:
     """Merge turn-start workspace_artifacts with this-turn's minted refs.
 
@@ -177,9 +183,42 @@ def fuse_workspace_artifacts(
     Order: existing lines keep their slot; brand-new minted lines are
     appended at the end. Preserves the agent's mental model of "what was
     here before, then what just got added".
+
+    Cross-terminal filter
+    ---------------------
+    When ``seen_live_names`` is provided, cross-turn rows whose
+    ``(kind, live_name)`` pair is NOT in the set are dropped from the
+    output — they belong to sibling terminals and should not appear in
+    this terminal's prompt. Minted rows are kept unconditionally (this
+    turn's writes are always the caller's). Rows whose ``live_name`` is
+    ``None`` (kinds with no user-facing slug, e.g. raw ``data_object``)
+    pass through the filter, since the agent has no way to interact
+    with them by name in the first place.
+
+    Passing ``None`` disables the filter (legacy / single-terminal mode).
+
+    Minted live_name carrier
+    ------------------------
+    ``minted_live_names`` maps ``f"{kind}:{logical_id}"`` to the
+    artifact's ``live_name`` (the workspace slug typed by the agent at
+    publish time). Brand-new minted rows (no cross-turn match) pick up
+    their ``live_name`` from this map. Without it, the rendered
+    ``<artifact>`` tag would lack ``live_name="..."`` and the seen-set
+    extractor would not pick the artifact up next iteration, causing the
+    calling terminal to collide with its own prior writes.
     """
+    if seen_live_names is not None:
+        cross_turn = [
+            row
+            for row in cross_turn
+            if row.live_name is None
+            or (row.kind, row.live_name) in seen_live_names
+        ]
+
     if not minted:
         return list(cross_turn)
+
+    live_names = minted_live_names or {}
 
     out: list[WorkspaceArtifactLine] = []
     minted_by_key: dict[tuple[str, str], ArtifactRef] = {
@@ -208,6 +247,7 @@ def fuse_workspace_artifacts(
                 path=ref.workspace_file_path,
                 kind=ref.kind,
                 summary="",
+                live_name=live_names.get(f"{ref.kind}:{ref.logical_id}"),
                 ref=ref,
                 new=True,
             )
@@ -222,7 +262,13 @@ class SessionState(BaseModel):
     kernel: list[KernelVariableSummary] = Field(default_factory=list)
     workspace_artifacts: list[WorkspaceArtifactLine] = Field(default_factory=list)
 
-    def to_llm_text(self, *, minted_refs: list[ArtifactRef] | None = None) -> str:
+    def to_llm_text(
+        self,
+        *,
+        minted_refs: list[ArtifactRef] | None = None,
+        minted_live_names: dict[str, str] | None = None,
+        seen_live_names: set[tuple[str, str]] | None = None,
+    ) -> str:
         """Bounded XML for injection into the agent context.
 
         When ``minted_refs`` is provided (set by the agent loop each
@@ -230,9 +276,23 @@ class SessionState(BaseModel):
         ``workspace_artifacts`` with this-turn's minted refs into a
         single ``<turn_artifacts>`` view — the agent's canonical surface
         for "what artifacts exist right now, with their latest refs".
+
+        ``minted_live_names`` maps ``f"{kind}:{logical_id}"`` to the
+        agent-typed slug for each minted artifact. Required for the next
+        iteration's seen-set extractor to recognise the artifact as
+        belonging to this terminal.
+
+        ``seen_live_names`` filters the cross-turn portion to artifacts
+        this terminal has interacted with. ``None`` disables the filter
+        (legacy / single-terminal mode); ``set()`` shows only this turn's
+        mints (fresh terminal); a populated set shows the agent's prior
+        work plus this turn's additions.
         """
         artifacts = fuse_workspace_artifacts(
-            self.workspace_artifacts, minted_refs or []
+            self.workspace_artifacts,
+            minted_refs or [],
+            minted_live_names=minted_live_names,
+            seen_live_names=seen_live_names,
         )
 
         lines: list[str] = ["<session_state>"]
@@ -248,24 +308,28 @@ class SessionState(BaseModel):
         if artifacts:
             lines.append("  <turn_artifacts>")
             for a in artifacts:
-                # When the path is content-addressed, surface the typed
-                # ref's full ``kind/logical_id/content_sha`` triplet so the
-                # agent can copy it verbatim. Otherwise fall back to just
-                # the bare ``kind`` (data_objects, user data files).
-                attrs = a.ref.to_xml_attrs() if a.ref else f'kind="{escape_attr(a.kind)}"'
+                # Agent-facing attrs: kind + live_name (the workspace
+                # slug). The hash triplet is intentionally hidden — the
+                # framework derives lineage from kernel state, the agent
+                # never types refs. ``new="true"`` marks this turn's
+                # mints.
+                attrs = f'kind="{escape_attr(a.kind)}"'
+                if a.live_name:
+                    attrs = f'{attrs} live_name="{escape_attr(a.live_name)}"'
                 if a.new:
                     attrs = f'{attrs} new="true"'
                 lines.append(
-                    f'    <artifact path="{escape_attr(a.path)}" {attrs}>'
+                    f"    <artifact {attrs}>"
                     f"{escape_text(a.summary)}</artifact>"
                 )
             lines.append("  </turn_artifacts>")
         lines.append(
             "  <note>Kernel variables clear on kernel restart. "
             "&lt;turn_artifacts&gt; is the single canonical view of the workspace's "
-            "current artifacts: cross-turn entries plus this turn's minted refs "
-            '(marked new="true"). Copy {kind, logical_id, content_sha} verbatim from '
-            "the matching &lt;artifact&gt; — do not invent or recompute hashes.</note>"
+            "current typed artifacts. Compose with a dataset via "
+            "load_dataset(&quot;&lt;live_name&gt;&quot;); refresh / edit_report "
+            "take live_name too. The framework derives lineage automatically — "
+            "you never type a ref.</note>"
         )
         lines.append("</session_state>")
         return "\n".join(lines) + "\n"
