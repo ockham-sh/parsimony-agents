@@ -70,4 +70,50 @@ class RunCancelled(AgentEvent):
     reason: Literal["user_request", "client_disconnect"] = "user_request"
 
 
-AgentEventUnion = TextDelta | ReasoningDelta | ToolEvent | StateSnapshot | AgentError | RunCancelled
+class LLMCallCompleted(AgentEvent):
+    """Emitted once per LLM call after streamed chunks are assembled.
+
+    Carries the full assembled response, decoded tool calls, usage stats, and
+    latency. Used by eval recorders / inspectors that want one record per
+    iteration without re-parsing the LiteLLM stream.
+    """
+
+    type: Literal["llm_call_completed"] = "llm_call_completed"
+    iteration: int
+    response_text: str
+    reasoning_text: str | None = None
+    tool_calls: list[dict[str, Any]]  # each: {"id": str, "name": str, "args": dict}
+    usage: dict[str, Any] | None = None  # litellm usage.model_dump() or None
+    latency_ms: int
+
+
+class ToolResultObserved(AgentEvent):
+    """Emitted right after a tool result is appended to the conversation.
+
+    Carries the exact content the LLM will read as the tool result on its
+    next iteration. ``ToolEvent.result`` is the raw Python object the
+    framework produced; ``ToolResultObserved.llm_content`` is what the
+    model actually saw. Internal event; not part of the SSE wire contract.
+
+    ``llm_content`` is a flat string when every block in
+    ``AgentMessage.to_llm()["content"]`` is plain text (the common case).
+    For multi-modal results (image blocks etc.) it stays as the original
+    list-of-blocks so structure is preserved.
+    """
+
+    type: Literal["tool_result_observed"] = "tool_result_observed"
+    tool_call_id: str
+    tool_name: str
+    llm_content: str | list[dict[str, Any]]
+
+
+AgentEventUnion = (
+    TextDelta
+    | ReasoningDelta
+    | ToolEvent
+    | StateSnapshot
+    | AgentError
+    | RunCancelled
+    | LLMCallCompleted
+    | ToolResultObserved
+)

@@ -40,6 +40,12 @@ from parsimony_agents.agent.events import (
     ToolEvent,
 )
 from parsimony_agents.agent.events import (
+    LLMCallCompleted as LLMCallCompletedEvent,
+)
+from parsimony_agents.agent.events import (
+    ToolResultObserved as ToolResultObservedEvent,
+)
+from parsimony_agents.agent.events import (
     ReasoningDelta as ReasoningDeltaEvent,
 )
 from parsimony_agents.agent.events import (
@@ -112,6 +118,40 @@ from parsimony_agents.views import get_llm_view_defaults
 
 logger = logging.getLogger("parsimony_agents")
 error_logger = logging.getLogger("parsimony_agents.errors")
+
+
+def _append_tool_msg_and_observe(
+    ctx: AgentContext,
+    *,
+    content: Any,
+    name: str,
+    tool_call_id: str,
+) -> ToolResultObservedEvent:
+    """Append a role='tool' AgentMessage to ``ctx.messages`` and return the
+    ``ToolResultObserved`` event carrying the exact content the LLM will
+    read on its next iteration (the output of
+    ``AgentMessage.to_llm()["content"]``).
+
+    When every block is plain text — the common case — the blocks are
+    concatenated into a single string for storage. Multi-modal results
+    (e.g. image blocks) are kept as the original list-of-blocks form so
+    structure isn't lost.
+
+    Caller is expected to ``yield`` the returned event into the agent's
+    event stream so the eval recorder can attach it to the turn record.
+    """
+    msg = AgentMessage(role="tool", content=content, name=name, tool_call_id=tool_call_id)
+    ctx.messages.append(msg)
+    blocks = msg.to_llm().get("content", [])
+    if blocks and all(isinstance(b, dict) and b.get("type") == "text" for b in blocks):
+        llm_content: list[dict[str, Any]] | str = "".join(b.get("text", "") for b in blocks)
+    else:
+        llm_content = blocks
+    return ToolResultObservedEvent(
+        tool_call_id=tool_call_id,
+        tool_name=name,
+        llm_content=llm_content,
+    )
 
 litellm.REPEATED_STREAMING_CHUNK_LIMIT = 100  # TODO: Monitor how many repeated chunks appear naturally before hitting the limit
 
@@ -728,6 +768,10 @@ class Agent:
                     request_model_config = dict(self.model_config)
 
                     logger.info("Agent thinking", extra={"iteration": iteration_count, "attempt": attempt + 1})
+                    # Per-iteration timing for LLMCallCompleted. Covers
+                    # acompletion + chunk consumption + assembly — that's
+                    # where wall-clock time actually lives for a streamed call.
+                    t0 = time.perf_counter()
                     response = await litellm.acompletion(
                         messages=llm_messages,
                         tools=tools.to_llm(),
@@ -762,12 +806,15 @@ class Agent:
 
                             if not (name := tool_call_chunk.function.name):
                                 continue
-                            
+
                             tool_call_id = tool_call_chunk.id
 
                             if name not in tools:
-                                ctx.messages.append(
-                                    AgentMessage(role="tool", content=f"Unknown tool: {name}", name=name, tool_call_id=tool_call_id)
+                                yield _append_tool_msg_and_observe(
+                                    ctx,
+                                    content=f"Unknown tool: {name}",
+                                    name=name,
+                                    tool_call_id=tool_call_id,
                                 )
                                 continue
 
@@ -798,6 +845,44 @@ class Agent:
                         break
 
                     response = litellm.stream_chunk_builder(chunks, messages=llm_messages)
+
+                    # Assemble per-iteration payload for LLMCallCompleted.
+                    # Best-effort: missing usage / tool-arg JSON must not
+                    # break the stream.
+                    _assembled_message = response.choices[0].message if response and response.choices else None
+                    _usage_obj = getattr(response, "usage", None) if response else None
+                    _usage_dict: dict[str, Any] | None = None
+                    if _usage_obj is not None and hasattr(_usage_obj, "model_dump"):
+                        try:
+                            _usage_dict = _usage_obj.model_dump()
+                        except Exception:
+                            _usage_dict = None
+
+                    _tool_calls_payload: list[dict[str, Any]] = []
+                    for _tc in (getattr(_assembled_message, "tool_calls", None) or []):
+                        _raw_args = _tc.function.arguments or "{}"
+                        try:
+                            _args = json.loads(_raw_args)
+                        except json.JSONDecodeError as _exc:
+                            _args = {"_raw": _raw_args, "_decode_error": str(_exc)}
+                        _tool_calls_payload.append(
+                            {"id": _tc.id, "name": _tc.function.name, "args": _args}
+                        )
+
+                    _latency_ms = int((time.perf_counter() - t0) * 1000)
+
+                    yield LLMCallCompletedEvent(
+                        iteration=iteration_count,
+                        response_text=(getattr(_assembled_message, "content", None) or "") if _assembled_message else "",
+                        reasoning_text=(
+                            getattr(_assembled_message, "reasoning_content", None)
+                            if _assembled_message
+                            else None
+                        ),
+                        tool_calls=_tool_calls_payload,
+                        usage=_usage_dict,
+                        latency_ms=_latency_ms,
+                    )
 
                     last_exception = None
                     break
@@ -924,8 +1009,11 @@ class Agent:
                     tool_name = tool_call.function.name
 
                     if tool_name not in tools:
-                        ctx.messages.append(
-                            AgentMessage(role="tool", content=f"Unknown tool: {tool_name}", name=tool_name, tool_call_id=tool_call.id)
+                        yield _append_tool_msg_and_observe(
+                            ctx,
+                            content=f"Unknown tool: {tool_name}",
+                            name=tool_name,
+                            tool_call_id=tool_call.id,
                         )
                         continue
 
@@ -937,16 +1025,14 @@ class Agent:
                     if tool_name == "dry_execute_code" and not (
                         isinstance(llm_ui_message, str) and llm_ui_message.strip()
                     ):
-                        ctx.messages.append(
-                            AgentMessage(
-                                role="tool",
-                                content=(
-                                    "dry_execute_code requires a non-empty _ui_message: one short, plain-language, "
-                                    "past-tense line describing what this run does for the user (e.g. 'Previewed a rolling mean')."
-                                ),
-                                name=tool_name,
-                                tool_call_id=tool_call.id,
-                            )
+                        yield _append_tool_msg_and_observe(
+                            ctx,
+                            content=(
+                                "dry_execute_code requires a non-empty _ui_message: one short, plain-language, "
+                                "past-tense line describing what this run does for the user (e.g. 'Previewed a rolling mean')."
+                            ),
+                            name=tool_name,
+                            tool_call_id=tool_call.id,
                         )
                         continue
 
@@ -966,8 +1052,11 @@ class Agent:
                             recoverable=False,
                             error_type="loop_detection",
                         )
-                        ctx.messages.append(
-                            AgentMessage(role="tool", content="Loop detected: You have called the same tool with the same arguments multiple times. Consider trying a different approach.", name=tool_name, tool_call_id=tool_call.id)
+                        yield _append_tool_msg_and_observe(
+                            ctx,
+                            content="Loop detected: You have called the same tool with the same arguments multiple times. Consider trying a different approach.",
+                            name=tool_name,
+                            tool_call_id=tool_call.id,
                         )
                         turn_state.stopped = True
                         continue
@@ -982,13 +1071,11 @@ class Agent:
                     if tool_type == "code":
                         notebook_path = self._resolve_code_tool_path(tool_args)
                         if notebook_path is None:
-                            ctx.messages.append(
-                                AgentMessage(
-                                    role="tool",
-                                    content="return_notebook and edit_notebook require a non-empty 'path'. The path is the notebook's identity address (e.g. 'notebooks/inflation_analysis.py' → slug 'inflation_analysis'); reuse to add a revision, or pick a fresh path under 'notebooks/' to create one.",
-                                    name=tool_name,
-                                    tool_call_id=tool_call.id,
-                                )
+                            yield _append_tool_msg_and_observe(
+                                ctx,
+                                content="return_notebook and edit_notebook require a non-empty 'path'. The path is the notebook's identity address (e.g. 'notebooks/inflation_analysis.py' → slug 'inflation_analysis'); reuse to add a revision, or pick a fresh path under 'notebooks/' to create one.",
+                                name=tool_name,
+                                tool_call_id=tool_call.id,
                             )
                             continue
 
@@ -1060,13 +1147,11 @@ class Agent:
                             tools, tool_name, tool_args, tool_call
                         ):
                             yield tev
-                        ctx.messages.append(
-                            AgentMessage(
-                                role="tool",
-                                content=CANCELLED_TOOL_TEXT,
-                                name=tool_name,
-                                tool_call_id=tool_call.id,
-                            )
+                        yield _append_tool_msg_and_observe(
+                            ctx,
+                            content=CANCELLED_TOOL_TEXT,
+                            name=tool_name,
+                            tool_call_id=tool_call.id,
                         )
                         tool_call_history.append(call_signature)
                     yield RunCancelled(
@@ -1105,20 +1190,21 @@ class Agent:
                             tools, tool_name, tool_args, tool_call
                         ):
                             yield tev
-                        ctx.messages.append(
-                            AgentMessage(
-                                role="tool",
-                                content=CANCELLED_TOOL_TEXT,
-                                name=tool_name,
-                                tool_call_id=tool_call.id,
-                            )
+                        yield _append_tool_msg_and_observe(
+                            ctx,
+                            content=CANCELLED_TOOL_TEXT,
+                            name=tool_name,
+                            tool_call_id=tool_call.id,
                         )
                         tool_call_history.append(call_signature)
                         continue
 
                     if isinstance(raw_result, Exception):
-                        ctx.messages.append(
-                            AgentMessage(role="tool", content=str(raw_result), name=tool_name, tool_call_id=tool_call.id)
+                        yield _append_tool_msg_and_observe(
+                            ctx,
+                            content=str(raw_result),
+                            name=tool_name,
+                            tool_call_id=tool_call.id,
                         )
                         continue
 
@@ -1342,8 +1428,11 @@ class Agent:
                             *Message._normalize_content(tool_call_output),
                         ]
 
-                    ctx.messages.append(
-                        AgentMessage(role="tool", content=tool_call_output, name=tool_name, tool_call_id=tool_call.id)
+                    yield _append_tool_msg_and_observe(
+                        ctx,
+                        content=tool_call_output,
+                        name=tool_name,
+                        tool_call_id=tool_call.id,
                     )
                     tool_call_history.append(call_signature)
 
