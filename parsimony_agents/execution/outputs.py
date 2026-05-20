@@ -376,22 +376,29 @@ class KernelOutput(MessageContent):
                     "text": "\n---\n",
                 }
             )
-        fetch_block = self._fetch_log_to_llm()
+        fetch_block = self._fetch_log_to_llm(mode=mode)
         if fetch_block:
             blocks.append({"type": "text", "text": fetch_block})
         return blocks
 
-    def _fetch_log_to_llm(self) -> str:
+    def _fetch_log_to_llm(self, mode: str = "default") -> str:
         """Render the fetches this execution observed.
 
         The block is informational: source + params + row count so the
         agent can see what data flowed through. Lineage is derived by
         the framework from the run scope — no triplets appear here, no
         ref-shaped fields the agent might be tempted to copy.
+
+        In ``minimal`` mode (used for prior-turn tool results during
+        context compaction), the per-entry detail is dropped and only a
+        one-line summary remains. Replays a fixed shape so the cached
+        prefix stays byte-stable.
         """
 
         if not self.fetch_log:
             return ""
+        if mode == "minimal":
+            return f'<fetch_log entries="{len(self.fetch_log)}"/>\n'
         lines: list[str] = ["<fetch_log>"]
         for entry in self.fetch_log:
             params_inline = escape_attr(

@@ -80,7 +80,14 @@ def render_connector_catalog(
         return ""
 
     sections: list[str] = []
-    for binding, bundle in bundles.items():
+    # Sort by binding name so the rendered catalog is byte-stable across
+    # iterations of the same session — prompt caching on every provider
+    # (OpenAI / Anthropic / Gemini / DeepSeek) only fires when the prefix
+    # matches exactly, and the connector catalog sits inside the cached
+    # prefix. Insertion-order of the bundles dict reflects whatever the
+    # caller passed, which we don't want to depend on.
+    for binding in sorted(bundles):
+        bundle = bundles[binding]
         body = bundle.to_llm().rstrip()
         if not body:
             continue

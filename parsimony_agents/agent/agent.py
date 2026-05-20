@@ -32,6 +32,7 @@ from parsimony.result import Provenance, Result
 from pydantic import TypeAdapter
 
 from parsimony_agents.agent.cancellation import CancellationRequest
+from parsimony_agents.agent.caching import apply_anthropic_cache_markers
 from parsimony_agents.agent.config import AgentGuardrails, FileStore
 from parsimony_agents.agent.events import (
     AgentError,
@@ -56,6 +57,9 @@ from parsimony_agents.agent.helpers import (
 )
 from parsimony_agents.agent.helpers import (
     parse_cell_ref as _parse_cell_ref,
+)
+from parsimony_agents.agent.helpers import (
+    render_connector_catalog,
 )
 from parsimony_agents.agent.helpers import (
     system_error as _system_error,
@@ -117,6 +121,15 @@ from parsimony_agents.tools import ToolMethod, Tools, toolmethod
 from parsimony_agents.views import get_llm_view_defaults
 
 logger = logging.getLogger("parsimony_agents")
+
+# Context compaction: how many of the most recent agent iterations keep
+# their tool results (observations) at full "default" fidelity. Earlier
+# observations render at "minimal" (structure preserved, bulk dropped).
+# Small by design — the agent's own reasoning messages are never
+# compacted, so they carry the durable thread; a raw observation is
+# largely redundant once reasoned past. 2 covers the common
+# produce -> inspect -> act pattern across two iterations.
+RECENT_ITERATIONS_DEFAULT = 2
 error_logger = logging.getLogger("parsimony_agents.errors")
 
 
@@ -647,6 +660,36 @@ class Agent:
 
         await self._setup_connectors()
 
+        # Hoist the connector catalog into its own stable message right
+        # after the system prompt.
+        #
+        # The catalog is static for the whole session. Rendering it into
+        # the per-iteration <session_state> snapshot — which sits at the
+        # tail of the message list, past every prompt-cache breakpoint —
+        # meant its ~15-20k tokens were re-sent uncached on every single
+        # iteration. As a standalone message at index 1 it lands inside
+        # the cached prefix, so it is billed once per session (Anthropic
+        # via cache_control; OpenAI / Gemini / DeepSeek automatically).
+        #
+        # Filtered-and-reinserted so a connector rebind between turns
+        # refreshes it; the content is otherwise byte-identical, which is
+        # what keeps the cached prefix stable.
+        ctx.messages = [
+            m for m in ctx.messages if not m.metadata.get("connectors_catalog", False)
+        ]
+        _connectors_catalog = render_connector_catalog(self._connectors)
+        if _connectors_catalog:
+            ctx.messages.insert(
+                1,
+                Message(
+                    role="user",
+                    content=Text(
+                        content=f"<available_connectors>\n{_connectors_catalog}\n</available_connectors>"
+                    ),
+                    metadata={"connectors_catalog": True},
+                ),
+            )
+
         turn_state = TurnState()
 
         iteration_count = 0
@@ -681,7 +724,10 @@ class Agent:
         # the loop body) so the rendered ``<turn_artifacts>`` block always
         # reflects this turn's freshly-minted refs. We seed an initial snapshot
         # here so the message list has one before iteration begins.
-        context_snapshot = await ctx.to_snapshot(connectors=self._connectors)
+        #
+        # No ``connectors=`` — the catalog is now its own stable message
+        # (see above); the per-iter snapshot carries only volatile state.
+        context_snapshot = await ctx.to_snapshot()
 
         # filter previous context snapshots
         ctx.messages = [m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False]
@@ -723,12 +769,13 @@ class Agent:
 
             # Rebuild the context snapshot every iteration so the rendered
             # <turn_artifacts> block reflects this turn's latest minted refs.
-            # Cheap: to_snapshot just lists files and renders the connector
-            # catalog. Replacing the previous snapshot keeps message history
-            # bounded; the LLM only ever sees the current state, never a
-            # mid-turn-stale view.
+            # Cheap: to_snapshot just lists files. Replacing the previous
+            # snapshot keeps message history bounded; the LLM only ever sees
+            # the current state, never a mid-turn-stale view.
+            #
+            # No ``connectors=`` — the catalog is a separate stable message
+            # (see the hoist above the loop), kept out of this volatile tail.
             iter_snapshot = await ctx.to_snapshot(
-                connectors=self._connectors,
                 minted_refs=turn_state.minted_refs,
                 minted_live_names=turn_state.minted_live_names,
             )
@@ -744,11 +791,38 @@ class Agent:
             )
 
 
-            # Most recent tool result uses "default" mode, older ones use "minimal" #TODO: REVISE THIS LOGIC
-
-            last_tool_idx = next((i for i in range(len(ctx.messages) - 1, -1, -1) if ctx.messages[i].role == "tool"), -1)
+            # Last-N-iterations compaction. Tool results (observations)
+            # from the most recent RECENT_ITERATIONS_DEFAULT agent
+            # iterations render at "default" (full fidelity); every
+            # earlier observation collapses to "minimal".
+            #
+            # Why not keep the whole turn at "default": the agent's own
+            # assistant messages — reasoning + tool-call args — are never
+            # compacted, so the durable thread of what it learned stays
+            # intact. A raw observation is largely redundant once the
+            # agent has reasoned past it, and "minimal" still preserves
+            # structure (shape, columns, a sample). Keeping the prompt
+            # physically small this way wins on every provider — those
+            # that cache AND those where caching doesn't engage (e.g.
+            # Gemini) — and bounds runaway long turns.
+            #
+            # Iterations are delimited by assistant messages: each agent
+            # iteration emits one assistant message followed by its tool
+            # results. The cutoff is the N-th-from-last assistant index;
+            # tool messages after it belong to the last N iterations.
+            assistant_indices = [
+                i for i, m in enumerate(ctx.messages) if m.role == "assistant"
+            ]
+            if len(assistant_indices) <= RECENT_ITERATIONS_DEFAULT:
+                default_cutoff = -1  # too few iterations — keep all at default
+            else:
+                default_cutoff = assistant_indices[-RECENT_ITERATIONS_DEFAULT]
             llm_messages = [
-                m.to_llm(mode="default" if (i >= (len(ctx.messages) - 4) or i == last_tool_idx) else "minimal")
+                m.to_llm(
+                    mode="minimal"
+                    if (m.role == "tool" and i < default_cutoff)
+                    else "default"
+                )
                 for i, m in enumerate(ctx.messages)
             ]
 
@@ -772,9 +846,23 @@ class Agent:
                     # acompletion + chunk consumption + assembly — that's
                     # where wall-clock time actually lives for a streamed call.
                     t0 = time.perf_counter()
+
+                    # Anthropic-only: inject up to 3 cache_control breakpoints
+                    # (system / tools / stable history) so the active session's
+                    # cached prefix is reused across iterations. No-op for any
+                    # other provider — OpenAI / Gemini / DeepSeek cache
+                    # automatically from a stable prefix; the marker has no
+                    # meaning on their schemas. See agent/caching.py.
+                    _llm_tools = tools.to_llm()
+                    llm_messages, _llm_tools = apply_anthropic_cache_markers(
+                        request_model_config.get("model"),
+                        llm_messages,
+                        _llm_tools,
+                    )
+
                     response = await litellm.acompletion(
                         messages=llm_messages,
-                        tools=tools.to_llm(),
+                        tools=_llm_tools,
                         tool_choice=tool_choice,
                         request_timeout=self.guardrails.llm_timeout_s,
                         stream=True,
@@ -857,6 +945,38 @@ class Agent:
                             _usage_dict = _usage_obj.model_dump()
                         except Exception:
                             _usage_dict = None
+
+                    # Best-effort USD cost extraction. Fallback chain:
+                    #   1. response._hidden_params["response_cost"] — LiteLLM's
+                    #      native field, populated inline on most OpenRouter
+                    #      routes when the provider returned billed cost.
+                    #   2. litellm.completion_cost(...) — computes from
+                    #      LiteLLM's static price table using model_id +
+                    #      token counts. Works for known models; raises or
+                    #      returns 0.0 for unknown ones, both treated as None.
+                    #   3. usage.cost — some providers attach cost to usage.
+                    # Stored on the usage dict so the recorder can pick it up
+                    # without a separate event-payload field.
+                    _cost_usd: float | None = None
+                    try:
+                        _hidden = getattr(response, "_hidden_params", None) or {}
+                        if isinstance(_hidden, dict):
+                            _cost_usd = _hidden.get("response_cost")
+                        if _cost_usd is None:
+                            try:
+                                _cost_candidate = litellm.completion_cost(completion_response=response)
+                                _cost_usd = float(_cost_candidate) if _cost_candidate else None
+                            except Exception:
+                                _cost_usd = None
+                        if _cost_usd is None and _usage_dict and "cost" in _usage_dict:
+                            _candidate = _usage_dict.get("cost")
+                            _cost_usd = float(_candidate) if _candidate is not None else None
+                    except Exception:
+                        _cost_usd = None
+                    if _cost_usd is not None:
+                        if _usage_dict is None:
+                            _usage_dict = {}
+                        _usage_dict["cost_usd"] = _cost_usd
 
                     _tool_calls_payload: list[dict[str, Any]] = []
                     for _tc in (getattr(_assembled_message, "tool_calls", None) or []):
