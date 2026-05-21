@@ -41,9 +41,7 @@ _CLEAR_LINE = "\033[A\033[2K"
 
 
 async def main() -> None:
-    connectors = discover.load_all().bind_env()
-    for name in connectors.unbound:
-        print(f"Warning: connector {name!r} is unbound (missing environment variable)")
+    connectors = discover.load_all()
 
     agent = Agent(
         model="gemini/gemini-3-flash-preview",

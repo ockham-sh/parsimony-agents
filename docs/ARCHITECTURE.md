@@ -118,7 +118,7 @@ AgentResult (text, datasets, charts, code)
 
 ### 1. Composable Data Sources with Tool-Tag Bridging
 
-Data sources are plugged in via `parsimony` connectors. Use `discover.load_all()` to autoload every installed connector plugin and `bind_env()` to inject any required credentials from environment variables:
+Data sources are plugged in via `parsimony` connectors. Use `discover.load_all()` to autoload every installed connector plugin; connector implementations own any environment-variable fallback they support:
 
 ```python
 from parsimony import Connectors, discover
@@ -126,8 +126,8 @@ from parsimony_fred import CONNECTORS as FRED
 from parsimony_sdmx import CONNECTORS as SDMX
 from parsimony_fmp import CONNECTORS as FMP
 
-# Autoload + env-bind (recommended)
-connectors = discover.load_all().bind_env()
+# Autoload installed connector plugins
+connectors = discover.load_all()
 
 # Or compose explicitly
 connectors = Connectors.merge(

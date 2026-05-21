@@ -17,7 +17,7 @@ LLM frameworks are generic by design. `parsimony-agents` is purpose-built for da
 from parsimony_agents import Agent
 from parsimony import discover
 
-connectors = discover.load_all().bind_env()
+connectors = discover.load_all()
 
 agent = Agent(
     model="claude-sonnet-4-6",
@@ -69,7 +69,7 @@ connectors = Connectors.merge(
 )
 
 # ...or autodiscover everything installed and bind from env vars.
-connectors = discover.load_all().bind_env()
+connectors = discover.load_all()
 
 agent = Agent(
     model="claude-sonnet-4-6",

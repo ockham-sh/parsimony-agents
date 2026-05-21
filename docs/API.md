@@ -12,7 +12,7 @@ from parsimony import discover
 
 agent = Agent(
     model="claude-sonnet-4-6",
-    connectors=discover.load_all().bind_env(),
+    connectors=discover.load_all(),
 )
 ```
 
