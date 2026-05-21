@@ -113,7 +113,21 @@ class _FakeCodeExecutor:
         return {}
 
 
+def _tc_namespace(tc_id: str, name: str, arguments: str) -> SimpleNamespace:
+    """Build a tool-call object exposing ``id`` / ``type`` / ``function`` as
+    attributes — matching a real litellm assembled message."""
+    return SimpleNamespace(
+        id=tc_id,
+        type="function",
+        function=SimpleNamespace(name=name, arguments=arguments),
+    )
+
+
 class _DualToolLitellmMessage:
+    """Assembled-message mock exposing ``content`` / ``reasoning_content`` /
+    ``tool_calls`` as attributes (the spine ``LLMResponse`` reads them via
+    ``getattr``) plus ``model_dump`` (used by ``Message.from_litellm``)."""
+
     def __init__(self) -> None:
         # New surface: no refs at all. The framework derives lineage
         # from the variable's origin in the executor's ledger.
@@ -131,37 +145,36 @@ class _DualToolLitellmMessage:
             "notes": ["No smoothing applied."],
             "live_name": "result_chart",
         }
+        self.role = "assistant"
+        self.content = None
+        self.reasoning_content = None
+        self.tool_calls = [
+            _tc_namespace("call-ds", "return_dataset", json.dumps(self._ds)),
+            _tc_namespace("call-ch", "return_chart", json.dumps(self._ch)),
+        ]
 
     def model_dump(self, mode: str = "json") -> dict:
         return {
-            "role": "assistant",
-            "content": None,
+            "role": self.role,
+            "content": self.content,
             "tool_calls": [
                 {
-                    "id": "call-ds",
-                    "type": "function",
+                    "id": tc.id,
+                    "type": tc.type,
                     "function": {
-                        "name": "return_dataset",
-                        "arguments": json.dumps(self._ds),
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
                     },
-                },
-                {
-                    "id": "call-ch",
-                    "type": "function",
-                    "function": {
-                        "name": "return_chart",
-                        "arguments": json.dumps(self._ch),
-                    },
-                },
+                }
+                for tc in self.tool_calls
             ],
         }
 
 
 class _FakeStream:
-    """Stateful stream: yields the dual tool-call delta on the first iteration,
-    then a content-only delta on subsequent iterations to signal natural
-    termination (the LLM has nothing more to call). Required because return_*
-    no longer terminates the run on its own (Task 13)."""
+    """Stateful stream: yields the dual tool-call delta on iteration 1, then a
+    ``return_done`` tool-call delta on iteration 2 (explicit termination —
+    text-only is no longer a natural stop)."""
 
     _state = {"used": False}
 
@@ -176,8 +189,16 @@ class _FakeStream:
                 ],
             )
         else:
-            # No tool_calls on later iterations → natural termination at agent.py:892.
-            delta = SimpleNamespace(content="done", reasoning_content=None, tool_calls=None)
+            delta = SimpleNamespace(
+                content=None,
+                reasoning_content=None,
+                tool_calls=[
+                    SimpleNamespace(
+                        id="tool-call-done",
+                        function=SimpleNamespace(name="return_done"),
+                    ),
+                ],
+            )
         chunk = SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
 
         async def _gen():
@@ -231,14 +252,34 @@ async def test_return_dataset_then_return_chart_same_response_succeeds(
         if not builder_state["used"]:
             builder_state["used"] = True
             return SimpleNamespace(choices=[SimpleNamespace(message=_DualToolLitellmMessage())])
-        # Subsequent iterations: empty tool_calls → loop terminates naturally.
-        empty = SimpleNamespace()
-        empty.model_dump = lambda mode="json": {  # noqa: ARG005
+        # Explicit termination via return_done.
+        done_msg = SimpleNamespace(
+            role="assistant",
+            content=None,
+            reasoning_content=None,
+            tool_calls=[
+                _tc_namespace(
+                    "tool-call-done",
+                    "return_done",
+                    '{"summary": "Published dataset and chart."}',
+                )
+            ],
+        )
+        done_msg.model_dump = lambda mode="json": {  # noqa: ARG005
             "role": "assistant",
-            "content": "done",
-            "tool_calls": None,
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "tool-call-done",
+                    "type": "function",
+                    "function": {
+                        "name": "return_done",
+                        "arguments": '{"summary": "Published dataset and chart."}',
+                    },
+                }
+            ],
         }
-        return SimpleNamespace(choices=[SimpleNamespace(message=empty)])
+        return SimpleNamespace(choices=[SimpleNamespace(message=done_msg)])
 
     import parsimony_agents.agent.agent as agent_module
 
@@ -255,7 +296,6 @@ async def test_return_dataset_then_return_chart_same_response_succeeds(
     assert len(return_events) == 2, f"expected two successful return tool events, got {return_events!r}"
     names = [e.tool_name for e in return_events]
     assert names == ["return_dataset", "return_chart"]
-    # Two iterations: first emits the dual return; second emits text-only and
-    # naturally terminates. (Pre-Task-13 this was 1 iteration because the first
-    # successful return_* hard-stopped the loop.)
+    # Two iterations: first emits the dual return; second emits return_done to
+    # signal explicit termination (text-only is no longer a stop).
     assert calls["n"] == 2

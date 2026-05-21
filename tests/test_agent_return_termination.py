@@ -6,9 +6,11 @@ agent loop. The agent may legitimately need to publish more deliverables
 ``return_chart`` and ``return_report``, and they may not all fit in one
 LLM response.
 
-Termination is the natural agent-loop signal: the LLM emits a response
-with no ``tool_calls``, the loop breaks. Republish under
-content-addressing is idempotent, so removing the early stop is safe.
+Termination is the explicit agent signal: the LLM emits
+``return_done(summary=...)`` once it has finished publishing every
+deliverable. A text-only response with no tool calls is treated as
+``no_progress`` by the failure-handling spine and routed through
+``handle_failure`` (narrow_scope → handoff on second strike).
 """
 
 from __future__ import annotations
@@ -22,31 +24,61 @@ from parsimony_agents.artifacts import Chart, Dataset
 
 
 class _FakeLitellmMessage:
-    """Two-state mock: first call emits the return_* tool, second emits no tool_calls."""
+    """Two-state mock: first call emits the return_* tool, second emits return_done.
+
+    Exposes ``content`` / ``reasoning_content`` / ``tool_calls`` as attributes
+    (matching a real litellm assembled ``Message``) in addition to
+    ``model_dump`` — the spine ``LLMResponse`` reads them via ``getattr``.
+    """
 
     def __init__(self, *, tool_name: str, builder_state: dict) -> None:
         self._tool_name = tool_name
         self._builder_state = builder_state
+        self.role = "assistant"
+        self.content = None
+        self.reasoning_content = None
+        if builder_state["used"]:
+            # Iteration 2: explicit termination via return_done.
+            self.tool_calls = [
+                SimpleNamespace(
+                    id="tool-call-done",
+                    type="function",
+                    function=SimpleNamespace(
+                        name="return_done",
+                        arguments='{"summary": "Published the requested artifact."}',
+                    ),
+                )
+            ]
+        else:
+            builder_state["used"] = True
+            self.tool_calls = [
+                SimpleNamespace(
+                    id="tool-call-1",
+                    type="function",
+                    function=SimpleNamespace(name=tool_name, arguments="{}"),
+                )
+            ]
 
     def model_dump(self, mode: str = "json") -> dict:
-        if self._builder_state["used"]:
-            return {"role": "assistant", "content": "done", "tool_calls": None}
-        self._builder_state["used"] = True
         return {
-            "role": "assistant",
-            "content": None,
+            "role": self.role,
+            "content": self.content,
             "tool_calls": [
                 {
-                    "id": "tool-call-1",
-                    "type": "function",
-                    "function": {"name": self._tool_name, "arguments": "{}"},
+                    "id": tc.id,
+                    "type": tc.type,
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
                 }
+                for tc in self.tool_calls
             ],
         }
 
 
 class _FakeStream:
-    """Mirrors the message mock — returns a tool_call delta once, then content."""
+    """Mirrors the message mock — returns return tool on iter 1, return_done on iter 2."""
 
     def __init__(self, *, tool_name: str, stream_state: dict) -> None:
         self._tool_name = tool_name
@@ -54,7 +86,16 @@ class _FakeStream:
 
     def __aiter__(self):
         if self._stream_state["used"]:
-            delta = SimpleNamespace(content="done", reasoning_content=None, tool_calls=None)
+            delta = SimpleNamespace(
+                content=None,
+                reasoning_content=None,
+                tool_calls=[
+                    SimpleNamespace(
+                        id="tool-call-done",
+                        function=SimpleNamespace(name="return_done"),
+                    ),
+                ],
+            )
         else:
             self._stream_state["used"] = True
             delta = SimpleNamespace(
@@ -87,10 +128,10 @@ async def test_return_tools_do_not_hard_stop_the_run(
 ) -> None:
     """A successful return_* yields a tool event but lets the loop continue.
 
-    Termination happens on the next iteration when the mock LLM emits no
-    further tool_calls. We expect exactly TWO LLM calls: iteration 1
-    emits the return tool, iteration 2 emits text-only and the loop
-    breaks naturally.
+    Termination happens on the next iteration when the mock LLM
+    emits ``return_done``. We expect exactly TWO LLM calls: iteration 1
+    emits the return tool, iteration 2 emits return_done and the loop
+    ends after that batch's StateSnapshot.
     """
     calls = {"count": 0}
     stream_state = {"used": False}

@@ -1,10 +1,26 @@
-"""Framework-level agent events (transport-agnostic)."""
+"""Framework-level agent events (transport-agnostic).
+
+Event taxonomy for the failure-handling system (BRIEF §1.A, §4):
+
+- :class:`TextDelta`, :class:`ReasoningDelta`, :class:`ToolEvent`, :class:`StateSnapshot`,
+  :class:`RunCancelled` — turn-shape events.
+- :class:`AgentError` — carries a structured :class:`Failure`. The ``error_type`` /
+  ``recoverable`` string fields are retained for display/transport consumers; new
+  call-sites should set ``failure`` rather than the string ``error_type``.
+- :class:`UserInputRequested` — the agent is suspended pending a user reply
+  (raised by the ``ask_user`` tool or synthesized by the recovery funnel).
+- :class:`Handoff` — agent cannot finish; surfaces structured blockers.
+- :class:`PartialRunSummary` — agent stopped early; carries an outcome summary
+  (separate from :class:`Handoff` because handoff implies user action is required).
+"""
 
 from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
+
+from parsimony_agents.agent.failure.kinds import Failure
 
 
 class AgentEvent(BaseModel):
@@ -54,10 +70,26 @@ class StateSnapshot(AgentEvent):
 
 
 class AgentError(AgentEvent):
-    """Fatal or recoverable error encountered during the agent run."""
+    """Error emitted during the agent run.
+
+    Canonical form: ``AgentError(message=..., failure=Failure(...))``. The
+    :attr:`failure` field carries the structured classification consumed by the
+    recovery funnel.
+
+    The :attr:`error_type` / :attr:`recoverable` string fields are kept for
+    display and transport consumers that have not migrated to reading
+    :attr:`failure`. **Do not add new call-sites that set them** — set
+    :attr:`failure` instead.
+    """
+
+    # Pydantic v2: allow non-Pydantic types in fields (Failure is a frozen dataclass).
+    model_config = ConfigDict(arbitrary_types_allowed=True)
 
     type: Literal["error"] = "error"
     message: str
+    failure: Failure | None = None
+    # String classification fields, retained for display/transport consumers
+    # that have not migrated to reading ``failure``.
     recoverable: bool = False
     error_type: str | None = None
 
@@ -107,6 +139,61 @@ class ToolResultObserved(AgentEvent):
     llm_content: str | list[dict[str, Any]]
 
 
+class UserInputRequested(AgentEvent):
+    """The agent has suspended pending a user reply.
+
+    Carries the question + optional context shown to the user, plus the
+    :class:`~parsimony_agents.agent.state.SuspensionRecord` needed to resume the run
+    (token-validated, JSON-serializable). Hosts persist the record and call
+    :meth:`Agent.resume` once the user replies.
+
+    ``choices`` (when set) is a fixed list of pre-canned replies the UI may render
+    as buttons; the user is still free to type a free-form reply.
+
+    ``originating_failure_kind`` is set to the originating :class:`FailureKind` when
+    the recovery funnel synthesized this suspension (e.g. ``ambiguous_input``,
+    ``loop_detected``). It is ``None`` when the suspension was triggered by the
+    agent directly calling ``ask_user``. The UI may use it to vary copy (e.g. a
+    different chip colour for loop-recovery questions).
+    """
+
+    type: Literal["user_input_requested"] = "user_input_requested"
+    question: str
+    context: str | None = None
+    choices: list[str] | None = None
+    suspension_record: Any  # SuspensionRecord (typed as Any to avoid circular import)
+    originating_failure_kind: str | None = None
+
+
+class Handoff(AgentEvent):
+    """The agent cannot finish the task; surfaces structured blockers.
+
+    Distinct from :class:`UserInputRequested` because a handoff is terminal:
+    the agent has decided it cannot resolve the situation by asking a question.
+    The host surfaces the blockers and offers actions the agent cannot take
+    itself (escalate, hand to another agent, abandon, etc.).
+    """
+
+    type: Literal["handoff"] = "handoff"
+    rationale: str
+    blockers: list[str] = Field(default_factory=list)
+    suggested_next_steps: list[str] = Field(default_factory=list)
+
+
+class PartialRunSummary(AgentEvent):
+    """The run stopped before completion; carries a structured summary.
+
+    Emitted on terminal failures that do *not* request user action — e.g. budget
+    exhaustion with the policy set to ``stop``. Companion to :class:`Handoff`;
+    a run may emit one or the other (never both) before terminating.
+    """
+
+    type: Literal["partial_run_summary"] = "partial_run_summary"
+    missing: list[str] = Field(default_factory=list)
+    learned_facts: list[str] = Field(default_factory=list)
+    next_step_plan: str | None = None
+
+
 AgentEventUnion = (
     TextDelta
     | ReasoningDelta
@@ -116,4 +203,24 @@ AgentEventUnion = (
     | RunCancelled
     | LLMCallCompleted
     | ToolResultObserved
+    | UserInputRequested
+    | Handoff
+    | PartialRunSummary
 )
+
+
+__all__ = [
+    "AgentError",
+    "AgentEvent",
+    "AgentEventUnion",
+    "Handoff",
+    "LLMCallCompleted",
+    "PartialRunSummary",
+    "ReasoningDelta",
+    "RunCancelled",
+    "StateSnapshot",
+    "TextDelta",
+    "ToolEvent",
+    "ToolResultObserved",
+    "UserInputRequested",
+]

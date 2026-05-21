@@ -7,7 +7,7 @@ import logging
 import re
 import tempfile
 import time
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,51 +15,23 @@ from uuid import uuid4
 
 import litellm
 import pandas as pd
-from litellm.exceptions import (
-    APIConnectionError,
-    APIError,
-    AuthenticationError,
-    BadRequestError,
-    InternalServerError,
-    NotFoundError,
-    RateLimitError,
-    ServiceUnavailableError,
-    Timeout,
-)
 from opentelemetry import trace
 from parsimony.connector import Connectors
-from parsimony.result import Provenance, Result
+from parsimony.result import Result
 from pydantic import TypeAdapter
 
 from parsimony_agents.agent.cancellation import CancellationRequest
-from parsimony_agents.agent.caching import apply_anthropic_cache_markers
 from parsimony_agents.agent.config import AgentGuardrails, FileStore
 from parsimony_agents.agent.events import (
-    AgentError,
-    RunCancelled,
     StateSnapshot,
     ToolEvent,
 )
-from parsimony_agents.agent.events import (
-    LLMCallCompleted as LLMCallCompletedEvent,
-)
-from parsimony_agents.agent.events import (
-    ToolResultObserved as ToolResultObservedEvent,
-)
-from parsimony_agents.agent.events import (
-    ReasoningDelta as ReasoningDeltaEvent,
-)
-from parsimony_agents.agent.events import (
-    TextDelta as TextDeltaEvent,
-)
 from parsimony_agents.agent.helpers import (
     TurnState,
+    render_connector_catalog,
 )
 from parsimony_agents.agent.helpers import (
     parse_cell_ref as _parse_cell_ref,
-)
-from parsimony_agents.agent.helpers import (
-    render_connector_catalog,
 )
 from parsimony_agents.agent.helpers import (
     system_error as _system_error,
@@ -74,7 +46,6 @@ from parsimony_agents.agent.outputs import (
     SystemToolOutput,
     UtilityToolOutput,
 )
-from parsimony_agents.agent.tracing import trace_tool_execution
 from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.identity import (
     ArtifactRef,
@@ -107,8 +78,11 @@ from parsimony_agents.execution.parquet_helpers import parquet_summary
 from parsimony_agents.messages import Message, Text, blocks_to_text
 
 # Tool message for cooperative cancellation; keeps one tool output per tool call id.
+# Used by ``_emit_cancelled_tool_events`` below; the loop body that also referenced
+# it moved to ``workspace_hooks.py`` (which keeps its own copy).
 CANCELLED_TOOL_TEXT = "Cancelled by user before the tool completed."
-from parsimony_agents.notebook import Script, ScriptPreview, stamp_fetch_log_to_script
+
+from parsimony_agents.notebook import Script
 from parsimony_agents.notebook_io import (
     deserialize_notebook,
     last_content_sha_from_log,
@@ -121,78 +95,10 @@ from parsimony_agents.tools import ToolMethod, Tools, toolmethod
 from parsimony_agents.views import get_llm_view_defaults
 
 logger = logging.getLogger("parsimony_agents")
-
-# Context compaction: how many of the most recent agent iterations keep
-# their tool results (observations) at full "default" fidelity. Earlier
-# observations render at "minimal" (structure preserved, bulk dropped).
-# Small by design — the agent's own reasoning messages are never
-# compacted, so they carry the durable thread; a raw observation is
-# largely redundant once reasoned past. 2 covers the common
-# produce -> inspect -> act pattern across two iterations.
-RECENT_ITERATIONS_DEFAULT = 2
 error_logger = logging.getLogger("parsimony_agents.errors")
 
 
-def _append_tool_msg_and_observe(
-    ctx: AgentContext,
-    *,
-    content: Any,
-    name: str,
-    tool_call_id: str,
-) -> ToolResultObservedEvent:
-    """Append a role='tool' AgentMessage to ``ctx.messages`` and return the
-    ``ToolResultObserved`` event carrying the exact content the LLM will
-    read on its next iteration (the output of
-    ``AgentMessage.to_llm()["content"]``).
-
-    When every block is plain text — the common case — the blocks are
-    concatenated into a single string for storage. Multi-modal results
-    (e.g. image blocks) are kept as the original list-of-blocks form so
-    structure isn't lost.
-
-    Caller is expected to ``yield`` the returned event into the agent's
-    event stream so the eval recorder can attach it to the turn record.
-    """
-    msg = AgentMessage(role="tool", content=content, name=name, tool_call_id=tool_call_id)
-    ctx.messages.append(msg)
-    blocks = msg.to_llm().get("content", [])
-    if blocks and all(isinstance(b, dict) and b.get("type") == "text" for b in blocks):
-        llm_content: list[dict[str, Any]] | str = "".join(b.get("text", "") for b in blocks)
-    else:
-        llm_content = blocks
-    return ToolResultObservedEvent(
-        tool_call_id=tool_call_id,
-        tool_name=name,
-        llm_content=llm_content,
-    )
-
 litellm.REPEATED_STREAMING_CHUNK_LIMIT = 100  # TODO: Monitor how many repeated chunks appear naturally before hitting the limit
-
-# Read-only system tools that never touch the CodeExecutor; safe to run concurrently.
-# All other tool names require sequential execution in one batch to avoid re-entrant
-# kernel or workspace races (see ``_tool_batch_allows_concurrent``).
-_TOOL_NAMES_SAFE_CONCURRENT: frozenset[str] = frozenset(
-    {
-        "list_files",
-        "read_artifact",
-        "read_data",
-        "read_file",
-    }
-)
-
-
-def _tool_batch_allows_concurrent(
-    tool_names: list[str],
-    tools: Tools,
-) -> bool:
-    if not tool_names:
-        return True
-    for name in tool_names:
-        if name not in tools:
-            return False
-        if tools[name].tool_type == "return":
-            return False
-    return all(n in _TOOL_NAMES_SAFE_CONCURRENT for n in tool_names)
 
 
 def _format_list_artifacts(
@@ -229,10 +135,6 @@ def _format_list_artifacts(
         suffix = f" — {summary}" if summary else ""
         lines.append(f"  [{kind_label}] {live_name}{suffix}")
     return "\n".join(lines)
-
-
-def _serialize_and_hash_object(obj: Any) -> int:
-    return hash(json.dumps(obj, sort_keys=True))
 
 
 @dataclass
@@ -285,6 +187,33 @@ class AgentResult:
                 self.charts[result.logical_id] = result
 
 
+def _inject_connector_catalog(ctx: AgentContext, connectors: Any) -> None:
+    """Place the connector catalog as a stable ``role="user"`` message at ``ctx.messages[1]``.
+
+    The catalog is static for the whole session. As a fixed message right after
+    the system prompt it sits inside the provider's cached prefix — billed once
+    per session — instead of riding the volatile per-iteration ``<session_state>``
+    snapshot, where its ~15-20k tokens would be re-sent uncached every iteration.
+
+    Filtered-then-reinserted so a connector rebind between turns refreshes it; the
+    content is otherwise byte-identical, which is what keeps the cached prefix
+    stable. No-op when there are no connectors.
+    """
+    ctx.messages = [
+        m for m in ctx.messages if not m.metadata.get("connectors_catalog", False)
+    ]
+    catalog = render_connector_catalog(connectors)
+    if catalog:
+        ctx.messages.insert(
+            1,
+            Message(
+                role="user",
+                content=Text(content=f"<available_connectors>\n{catalog}\n</available_connectors>"),
+                metadata={"connectors_catalog": True},
+            ),
+        )
+
+
 class Agent:
     """Data analysis agent: LLM loop, tools, and code execution (yields AgentEvent).
 
@@ -323,6 +252,18 @@ class Agent:
         guardrails: AgentGuardrails = AgentGuardrails(),
         session_id: str | None = None,
         file_store: FileStore | None = None,
+        # Opaque host model identifier (product "tier"). Not interpreted by the
+        # agent — carried into SuspensionRecord so Agent.resume can rebuild on the
+        # same model. The host resolves tier → model_config separately.
+        model_tier: str | None = None,
+        # --- Failure-handling spine ---
+        # ``policy`` drives :func:`handle_failure` retry/backoff/handoff decisions
+        # (see :class:`DefaultPolicy`). ``suspension_secret`` is the HMAC key
+        # used to sign :class:`SuspensionRecord` tokens — when omitted, the
+        # session_id is reused (acceptable for in-process v1; v2 cross-process
+        # resume will require a real shared secret).
+        policy: Any | None = None,
+        suspension_secret: str | None = None,
         read_artifact_fn: Callable[
             [str, str, dict[str, Any]], Awaitable[ArtifactLlmResult]
         ] | None = None,
@@ -369,6 +310,7 @@ class Agent:
 
         self.instructions = resolved_instructions
         self.session_id = session_id or str(uuid4())
+        self.model_tier = model_tier
         self.file_store = file_store
         self._connectors = connectors
         self.code_executor = resolved_executor
@@ -404,11 +346,29 @@ class Agent:
                 self.output_search,
             ]
         )
-        self.system_tools = Tools(_system_tool_methods)
+
+        # Explicit-termination tools. ``ask_user`` lets the agent pause for
+        # clarification; ``return_done`` / ``return_unable`` are the explicit
+        # end-of-run signals — a text-only response is not a valid stop.
+        # Imported lazily so the spine stays out of the module-load cycle.
+        from parsimony_agents.agent.termination_tools import TERMINATION_TOOLS
+
+        self.system_tools = Tools(list(_system_tool_methods) + list(TERMINATION_TOOLS))
 
         self.model_config = resolved_config
 
         self.guardrails = guardrails
+
+        # Failure-handling spine attributes; resolved lazily to avoid importing
+        # the spine at module load time (recovery transitively imports events,
+        # which imports Failure from this package).
+        from parsimony_agents.agent.failure import DefaultPolicy as _DefaultPolicy
+
+        self.policy = policy if policy is not None else _DefaultPolicy()
+        self.suspension_secret = suspension_secret if suspension_secret is not None else self.session_id
+        # AgentLike protocol completeness: ``run_loop`` reads ``agent.tools``
+        # while the workspace code reads ``agent.system_tools`` — alias the two.
+        self.tools = self.system_tools
 
         self._CODE_EDIT_TOOL_NAMES = {"return_notebook", "edit_notebook"}
 
@@ -457,141 +417,6 @@ class Agent:
             return raw_path.strip()
         return None
 
-    async def _handle_llm_error(
-        self,
-        last_exception: Exception,
-        text_message_id: str,
-        agent_span: Any,
-    ) -> AsyncIterator[AgentError | TextDeltaEvent]:
-        """Classify an LLM exception into a typed ``AgentError`` plus a
-        user-facing ``TextDeltaEvent``, and record it on the active span.
-
-        The branches are exhaustive — the trailing ``else`` is the catch-all
-        for unexpected provider errors. Each branch emits exactly the same
-        two-event shape so the caller always yields a uniform error frame.
-        """
-        model_name = self.model_config.get("model", "the configured model")
-
-        if isinstance(last_exception, RateLimitError):
-            error_logger.error("Rate limit exceeded: %s", last_exception, exc_info=True)
-            yield AgentError(
-                message="Rate limit exceeded",
-                recoverable=False,
-                error_type="rate_limit",
-            )
-            yield TextDeltaEvent(
-                content=(
-                    "We're currently in beta and experiencing high demand. "
-                    "The AI model has hit its rate limit, please wait a moment and try again. "
-                    "This is expected during peak usage and will be resolved as we scale."
-                ),
-                message_id=text_message_id,
-                delta=False,
-            )
-        elif isinstance(last_exception, Timeout):
-            error_logger.error("Request timeout: %s", last_exception, exc_info=True)
-            yield AgentError(
-                message="Request timeout",
-                recoverable=False,
-                error_type="timeout",
-            )
-            yield TextDeltaEvent(
-                content=(
-                    "The AI model took too long to respond, please wait a moment and try again. "
-                    "We're currently in beta and this will be resolved as we improve the service."
-                ),
-                message_id=text_message_id,
-                delta=False,
-            )
-        elif isinstance(last_exception, ServiceUnavailableError) or (
-            isinstance(last_exception, APIError) and "unavailable" in str(last_exception).lower()
-        ):
-            error_logger.error("Model unavailable: %s", last_exception, exc_info=True)
-            yield AgentError(
-                message="Model unavailable",
-                recoverable=False,
-                error_type="unavailable",
-            )
-            yield TextDeltaEvent(
-                content=(
-                    "The selected AI model is currently unavailable. "
-                    "Please try again in a moment or select a different model."
-                ),
-                message_id=text_message_id,
-                delta=False,
-            )
-        elif isinstance(last_exception, AuthenticationError):
-            error_logger.error("LLM authentication failed: %s", last_exception, exc_info=True)
-            detail = str(last_exception).splitlines()[0] if str(last_exception) else ""
-            yield AgentError(
-                message=f"Authentication failed for {model_name}: {detail}",
-                recoverable=False,
-                error_type="authentication",
-            )
-            yield TextDeltaEvent(
-                content=(
-                    f"Authentication failed for `{model_name}`. "
-                    "Check that the required API key environment variable is set "
-                    "(e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`) "
-                    "and is valid for the selected model provider."
-                ),
-                message_id=text_message_id,
-                delta=False,
-            )
-        elif isinstance(last_exception, (BadRequestError, NotFoundError)):
-            error_logger.error("LLM bad request: %s", last_exception, exc_info=True)
-            detail = str(last_exception).splitlines()[0] if str(last_exception) else ""
-            yield AgentError(
-                message=f"Invalid request to {model_name}: {detail}",
-                recoverable=False,
-                error_type="bad_request",
-            )
-            yield TextDeltaEvent(
-                content=(
-                    f"The request to `{model_name}` was rejected by the provider. "
-                    "This usually means the model name is invalid, unavailable in your region, "
-                    f"or the request payload is malformed. Provider said: {detail}"
-                ),
-                message_id=text_message_id,
-                delta=False,
-            )
-        elif isinstance(last_exception, APIConnectionError):
-            error_logger.error("LLM connection error: %s", last_exception, exc_info=True)
-            yield AgentError(
-                message=f"Could not reach the model provider: {last_exception}",
-                recoverable=False,
-                error_type="connection",
-            )
-            yield TextDeltaEvent(
-                content=(
-                    "Could not connect to the AI model provider. "
-                    "Check your network connection and try again."
-                ),
-                message_id=text_message_id,
-                delta=False,
-            )
-        else:
-            error_logger.error(
-                "LLM error (%s): %s", type(last_exception).__name__, last_exception, exc_info=True
-            )
-            detail = str(last_exception).splitlines()[0] if str(last_exception) else type(last_exception).__name__
-            yield AgentError(
-                message=f"LLM call failed ({type(last_exception).__name__}): {detail}",
-                recoverable=False,
-                error_type="llm_error",
-            )
-            yield TextDeltaEvent(
-                content=(
-                    f"An error occurred while communicating with the AI model "
-                    f"({type(last_exception).__name__}): {detail}"
-                ),
-                message_id=text_message_id,
-                delta=False,
-            )
-
-        if agent_span and agent_span.is_recording():
-            agent_span.record_exception(last_exception)
-
     async def ask(
         self,
         message: str | Text,
@@ -632,14 +457,23 @@ class Agent:
         tool_choice: str = "auto",
         cancellation: CancellationRequest | None = None,
     ) -> AsyncGenerator[Any, None]:
+        # Lazy imports for the failure-handling spine: keeps the Agent module
+        # cheap to import and breaks the cycle between recovery (which imports
+        # events) and this module (which exports the Agent).
+        from datetime import datetime, timezone
+
+        from parsimony_agents.agent.loop import run_loop
+        from parsimony_agents.agent.state import RunState
+        from parsimony_agents.agent.workspace_hooks import WorkspaceRunHooks
+
         if isinstance(user_message, str):
             user_message = Text(content=user_message)
 
         agent_span = trace.get_current_span()
-
         logger.info("Agent run started", extra={"prompt_preview": user_message.content[:1000]})
         start_time = time.time()
 
+        # --- System prompt + workspace ctx setup (unchanged) ----------------
         if isinstance(self.instructions, str):
             system_message = AgentMessage(role="system", content=Text(content=self.instructions.rstrip()))
         else:
@@ -655,949 +489,181 @@ class Agent:
             ctx.files = self.file_store
             ctx.vector_store = get_or_create_session_vector_store(self.session_id)
             ctx.keyword_store = get_or_create_session_keyword_store(self.session_id)
-
-            await self.code_executor.set_cwd(str(ctx.files.get_files_dir()), session_id=self.session_id)
+            await self.code_executor.set_cwd(
+                str(ctx.files.get_files_dir()), session_id=self.session_id
+            )
 
         await self._setup_connectors()
 
-        # Hoist the connector catalog into its own stable message right
-        # after the system prompt.
-        #
-        # The catalog is static for the whole session. Rendering it into
-        # the per-iteration <session_state> snapshot — which sits at the
-        # tail of the message list, past every prompt-cache breakpoint —
-        # meant its ~15-20k tokens were re-sent uncached on every single
-        # iteration. As a standalone message at index 1 it lands inside
-        # the cached prefix, so it is billed once per session (Anthropic
-        # via cache_control; OpenAI / Gemini / DeepSeek automatically).
-        #
-        # Filtered-and-reinserted so a connector rebind between turns
-        # refreshes it; the content is otherwise byte-identical, which is
-        # what keeps the cached prefix stable.
-        ctx.messages = [
-            m for m in ctx.messages if not m.metadata.get("connectors_catalog", False)
-        ]
-        _connectors_catalog = render_connector_catalog(self._connectors)
-        if _connectors_catalog:
-            ctx.messages.insert(
-                1,
-                Message(
-                    role="user",
-                    content=Text(
-                        content=f"<available_connectors>\n{_connectors_catalog}\n</available_connectors>"
-                    ),
-                    metadata={"connectors_catalog": True},
-                ),
-            )
+        # Connector catalog → stable cached-prefix message (see helper docstring).
+        _inject_connector_catalog(ctx, self._connectors)
 
+        # --- Legacy workspace turn state (still drives ref minting) --------
         turn_state = TurnState()
 
-        iteration_count = 0
-        tool_call_history = []
-        last_tool_internal_error = None  # Track last tool internalerror to report at end if agent gives up
-        
-        # Check if this is a continuation request
+        # --- Failure-handling spine state (mirrors ctx.messages 1:1) -------
+        # ``state.messages`` is what pre_step / post_llm / render_for_llm read;
+        # ``ctx.messages`` is what every existing workspace helper / event
+        # consumer reads. Kept identical by routing every append through
+        # ``WorkspaceRunHooks._append_message`` (and the seed appends below).
+        state = RunState(
+            run_id=str(uuid4()),
+            session_id=self.session_id,
+            model_tier=self.model_tier,
+            messages=list(ctx.messages),
+            started_at=datetime.now(timezone.utc),
+        )
+
+        # Continuation request: reset wall-clock budget but keep transcript.
         is_continuation = user_message.content.strip().lower() == "continue"
         if is_continuation:
-            # Reset start time for continuation (use default limits)
             start_time = time.time()
-            logger.info("Continuation requested - resetting timer", extra={
-                "max_iters": self.guardrails.max_iterations,
-                "max_execution_time": self.guardrails.max_execution_time_s,
-            })
+            logger.info(
+                "Continuation requested - resetting timer",
+                extra={
+                    "max_iters": self.guardrails.max_iterations,
+                    "max_execution_time": self.guardrails.max_execution_time_s,
+                },
+            )
         else:
-            if ctx:
+            user_msg = AgentMessage(role="user", content=user_message)
+            ctx.messages.append(user_msg)
+            state.messages.append(user_msg)
 
-                # add user message context
-
-                ctx.messages.append(AgentMessage(role="user", content=user_message))
-
-        iteration = 0
-
-        tool_choice = "auto"
-
-        reasoning_message_id = str(uuid4())
-        accumulated_reasoning = ""
-        accumulated_duration = 0.0
-
-        # The context snapshot is rebuilt at the START of every iteration (see
-        # the loop body) so the rendered ``<turn_artifacts>`` block always
-        # reflects this turn's freshly-minted refs. We seed an initial snapshot
-        # here so the message list has one before iteration begins.
-        #
-        # No ``connectors=`` — the catalog is now its own stable message
-        # (see above); the per-iter snapshot carries only volatile state.
+        # Seed an initial context snapshot so the first iteration has one.
+        # No ``connectors=``: the catalog is its own stable prefix message
+        # (see ``_inject_connector_catalog``); the snapshot stays volatile-only.
         context_snapshot = await ctx.to_snapshot()
-
-        # filter previous context snapshots
-        ctx.messages = [m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False]
-
-        ctx.messages.append(Message(role="user", content=context_snapshot, metadata={"context_snapshot": True}))
-
-        while not turn_state.stopped:
-
-            iteration += 1
-
-            # Guard: max execution time
-            elapsed = time.time() - start_time
-            if elapsed > self.guardrails.max_execution_time_s:
-                error_msg = f"Reached max agent execution time ({self.guardrails.max_execution_time_s}s)."
-                logger.warning(error_msg, extra={"elapsed_s": elapsed, "max_execution_time_s": self.guardrails.max_execution_time_s})
-                if agent_span and agent_span.is_recording():
-                    agent_span.set_status(trace.Status(trace.StatusCode.ERROR, error_msg))
-                yield AgentError(
-                    message="Time limit reached.",
-                    recoverable=True,
-                    error_type="time_limit",
-                )
-                break
-
-            # Guard: max iterations per request
-            if iteration_count >= self.guardrails.max_iterations:
-                error_msg = f"Reached max agent iterations ({self.guardrails.max_iterations})."
-                logger.warning(error_msg, extra={"iteration_count": iteration_count, "max_iterations": self.guardrails.max_iterations})
-                if agent_span and agent_span.is_recording():
-                    agent_span.set_status(trace.Status(trace.StatusCode.ERROR, error_msg))
-                yield AgentError(
-                    message="Iteration limit reached.",
-                    recoverable=True,
-                    error_type="iteration_limit",
-                )
-                break
-
-            tools = self.system_tools.copy()
-
-            # Rebuild the context snapshot every iteration so the rendered
-            # <turn_artifacts> block reflects this turn's latest minted refs.
-            # Cheap: to_snapshot just lists files. Replacing the previous
-            # snapshot keeps message history bounded; the LLM only ever sees
-            # the current state, never a mid-turn-stale view.
-            #
-            # No ``connectors=`` — the catalog is a separate stable message
-            # (see the hoist above the loop), kept out of this volatile tail.
-            iter_snapshot = await ctx.to_snapshot(
-                minted_refs=turn_state.minted_refs,
-                minted_live_names=turn_state.minted_live_names,
-            )
-            ctx.messages = [
-                m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False
-            ]
-            ctx.messages.append(
-                Message(
-                    role="user",
-                    content=iter_snapshot,
-                    metadata={"context_snapshot": True},
-                )
-            )
-
-
-            # Last-N-iterations compaction. Tool results (observations)
-            # from the most recent RECENT_ITERATIONS_DEFAULT agent
-            # iterations render at "default" (full fidelity); every
-            # earlier observation collapses to "minimal".
-            #
-            # Why not keep the whole turn at "default": the agent's own
-            # assistant messages — reasoning + tool-call args — are never
-            # compacted, so the durable thread of what it learned stays
-            # intact. A raw observation is largely redundant once the
-            # agent has reasoned past it, and "minimal" still preserves
-            # structure (shape, columns, a sample). Keeping the prompt
-            # physically small this way wins on every provider — those
-            # that cache AND those where caching doesn't engage (e.g.
-            # Gemini) — and bounds runaway long turns.
-            #
-            # Iterations are delimited by assistant messages: each agent
-            # iteration emits one assistant message followed by its tool
-            # results. The cutoff is the N-th-from-last assistant index;
-            # tool messages after it belong to the last N iterations.
-            assistant_indices = [
-                i for i, m in enumerate(ctx.messages) if m.role == "assistant"
-            ]
-            if len(assistant_indices) <= RECENT_ITERATIONS_DEFAULT:
-                default_cutoff = -1  # too few iterations — keep all at default
-            else:
-                default_cutoff = assistant_indices[-RECENT_ITERATIONS_DEFAULT]
-            llm_messages = [
-                m.to_llm(
-                    mode="minimal"
-                    if (m.role == "tool" and i < default_cutoff)
-                    else "default"
-                )
-                for i, m in enumerate(ctx.messages)
-            ]
-
-            # appending of the user message happens after because 
-            # 1) the user message needs to persist in the messages, but the context is temporary
-            # 2) the user message should be the last message in the list of messages
-
-
-            response = None
-            last_exception = None
-            for attempt in range(self.guardrails.llm_max_retries + 1):
-
-                try:
-                    text_message_id = str(uuid4())  # Single messageId for all text chunks
-                    reasoning_start_time = time.time()  # Track when reasoning started
-
-                    request_model_config = dict(self.model_config)
-
-                    logger.info("Agent thinking", extra={"iteration": iteration_count, "attempt": attempt + 1})
-                    # Per-iteration timing for LLMCallCompleted. Covers
-                    # acompletion + chunk consumption + assembly — that's
-                    # where wall-clock time actually lives for a streamed call.
-                    t0 = time.perf_counter()
-
-                    # Anthropic-only: inject up to 3 cache_control breakpoints
-                    # (system / tools / stable history) so the active session's
-                    # cached prefix is reused across iterations. No-op for any
-                    # other provider — OpenAI / Gemini / DeepSeek cache
-                    # automatically from a stable prefix; the marker has no
-                    # meaning on their schemas. See agent/caching.py.
-                    _llm_tools = tools.to_llm()
-                    llm_messages, _llm_tools = apply_anthropic_cache_markers(
-                        request_model_config.get("model"),
-                        llm_messages,
-                        _llm_tools,
-                    )
-
-                    response = await litellm.acompletion(
-                        messages=llm_messages,
-                        tools=_llm_tools,
-                        tool_choice=tool_choice,
-                        request_timeout=self.guardrails.llm_timeout_s,
-                        stream=True,
-                        **request_model_config
-                    )
-
-                    # Process streaming response
-                    chunks = []
-                    user_broke_stream = False
-                    async for chunk in response:
-                        if cancellation and cancellation.is_set():
-                            user_broke_stream = True
-                            break
-                        chunks.append(chunk)
-                        if chunk.choices[0].delta.content:
-                            yield TextDeltaEvent(
-                                content=chunk.choices[0].delta.content,
-                                message_id=text_message_id,
-                                delta=True,
-                            )
-                        if reasoning_content := getattr(chunk.choices[0].delta, "reasoning_content", None):
-                            yield ReasoningDeltaEvent(
-                                content=reasoning_content,
-                                message_id=reasoning_message_id,
-                                delta=True,
-                            )
-
-                        for tool_call_chunk in (chunk.choices[0].delta.tool_calls or []):
-
-                            if not (name := tool_call_chunk.function.name):
-                                continue
-
-                            tool_call_id = tool_call_chunk.id
-
-                            if name not in tools:
-                                yield _append_tool_msg_and_observe(
-                                    ctx,
-                                    content=f"Unknown tool: {name}",
-                                    name=name,
-                                    tool_call_id=tool_call_id,
-                                )
-                                continue
-
-                            tool_type = tools[name].tool_type
-                            loading_label = tools[name].ui_message
-                            # Utility tools: the card appears with full metadata ("In") once
-                            # args are complete (Phase 1 planning, below), not here during
-                            # streaming when args are only partially known. This produces two
-                            # clean file writes: args-known → completed, matching the two
-                            # visible chunks the UI needs (In, then In+Out).
-                            if tool_type == "system" and loading_label is not None:
-                                yield ToolEvent(
-                                    tool_name=name,
-                                    tool_call_id=tool_call_id,
-                                    tool_type="system",
-                                    completed=False,
-                                    result=SystemToolMessage(message=loading_label),
-                                    ui_message=loading_label,
-                                )
-
-                    if user_broke_stream and cancellation is not None:
-                        yield RunCancelled(
-                            message="Generation was cancelled before the assistant message completed.",
-                            reason=cancellation.reason,
-                        )
-                        turn_state.stopped = True
-                        last_exception = None
-                        break
-
-                    response = litellm.stream_chunk_builder(chunks, messages=llm_messages)
-
-                    # Assemble per-iteration payload for LLMCallCompleted.
-                    # Best-effort: missing usage / tool-arg JSON must not
-                    # break the stream.
-                    _assembled_message = response.choices[0].message if response and response.choices else None
-                    _usage_obj = getattr(response, "usage", None) if response else None
-                    _usage_dict: dict[str, Any] | None = None
-                    if _usage_obj is not None and hasattr(_usage_obj, "model_dump"):
-                        try:
-                            _usage_dict = _usage_obj.model_dump()
-                        except Exception:
-                            _usage_dict = None
-
-                    # Best-effort USD cost extraction. Fallback chain:
-                    #   1. response._hidden_params["response_cost"] — LiteLLM's
-                    #      native field, populated inline on most OpenRouter
-                    #      routes when the provider returned billed cost.
-                    #   2. litellm.completion_cost(...) — computes from
-                    #      LiteLLM's static price table using model_id +
-                    #      token counts. Works for known models; raises or
-                    #      returns 0.0 for unknown ones, both treated as None.
-                    #   3. usage.cost — some providers attach cost to usage.
-                    # Stored on the usage dict so the recorder can pick it up
-                    # without a separate event-payload field.
-                    _cost_usd: float | None = None
-                    try:
-                        _hidden = getattr(response, "_hidden_params", None) or {}
-                        if isinstance(_hidden, dict):
-                            _cost_usd = _hidden.get("response_cost")
-                        if _cost_usd is None:
-                            try:
-                                _cost_candidate = litellm.completion_cost(completion_response=response)
-                                _cost_usd = float(_cost_candidate) if _cost_candidate else None
-                            except Exception:
-                                _cost_usd = None
-                        if _cost_usd is None and _usage_dict and "cost" in _usage_dict:
-                            _candidate = _usage_dict.get("cost")
-                            _cost_usd = float(_candidate) if _candidate is not None else None
-                    except Exception:
-                        _cost_usd = None
-                    if _cost_usd is not None:
-                        if _usage_dict is None:
-                            _usage_dict = {}
-                        _usage_dict["cost_usd"] = _cost_usd
-
-                    _tool_calls_payload: list[dict[str, Any]] = []
-                    for _tc in (getattr(_assembled_message, "tool_calls", None) or []):
-                        _raw_args = _tc.function.arguments or "{}"
-                        try:
-                            _args = json.loads(_raw_args)
-                        except json.JSONDecodeError as _exc:
-                            _args = {"_raw": _raw_args, "_decode_error": str(_exc)}
-                        _tool_calls_payload.append(
-                            {"id": _tc.id, "name": _tc.function.name, "args": _args}
-                        )
-
-                    _latency_ms = int((time.perf_counter() - t0) * 1000)
-
-                    yield LLMCallCompletedEvent(
-                        iteration=iteration_count,
-                        response_text=(getattr(_assembled_message, "content", None) or "") if _assembled_message else "",
-                        reasoning_text=(
-                            getattr(_assembled_message, "reasoning_content", None)
-                            if _assembled_message
-                            else None
-                        ),
-                        tool_calls=_tool_calls_payload,
-                        usage=_usage_dict,
-                        latency_ms=_latency_ms,
-                    )
-
-                    last_exception = None
-                    break
-                except (InternalServerError, RateLimitError, Timeout) as e:
-                    last_exception = e
-                    # Backoff then retry if attempts remain
-                    if attempt < self.guardrails.llm_max_retries:
-                        await asyncio.sleep(min(2 ** attempt, 8))
-                    else:
-                        break
-                except Exception as e:
-                    # Catch all other exceptions (e.g., APIConnectionError, TypeError, etc.)
-                    last_exception = e
-                    # Log for debugging but don't retry on unexpected errors
-                    error_logger.error(
-                        f"Unexpected error calling LLM: {str(e)}",
-                        exc_info=True
-                    )
-                    break
-
-            if turn_state.stopped:
-                break
-
-            if last_exception is not None:
-                async for event in self._handle_llm_error(
-                    last_exception, text_message_id, agent_span
-                ):
-                    yield event
-                break
-
-            if response is None or len(response.choices) == 0:
-                logger.warning("No response from LLM", extra={})
-                continue
-
-            response_message = Message.from_litellm(response.choices[0].message)
-            response_message = AgentMessage(**response_message.model_dump())
-
-            _new_tool_calls = []
-
-            for tool_call in (response_message.tool_calls or []):
-                _new_tool_calls.append(tool_call)
-                if tool_call.function.name in self._CODE_EDIT_TOOL_NAMES:
-                    # Notebook may run in the same call when ``execute`` is true.
-                    pass
-
-            if len(_new_tool_calls) == 0:
-                turn_state.stopped = True
-
-            response_message.tool_calls = _new_tool_calls if _new_tool_calls else None
-
-            # Log tool calls if any
-            if _new_tool_calls:
-                logger.info("Tool calls", extra={
-                    "iteration": iteration_count,
-                    "tool_names": [tc.function.name for tc in _new_tool_calls]
-                })
-
-            ctx.messages.append(response_message)
-
-            iteration_count += 1
-
-            if turn_reasoning := getattr(response.choices[0].message, "reasoning_content", None):
-                accumulated_reasoning += turn_reasoning
-                accumulated_duration += (time.time() - reasoning_start_time)
-
-            is_silent = not response_message.content and all(
-                getattr(tools.get(tc.function.name), "tool_type", None) == "system" and 
-                getattr(tools.get(tc.function.name), "ui_message", None) is None
-                for tc in (response_message.tool_calls or [])
-            )
-
-            if accumulated_reasoning and not is_silent:
-                yield ReasoningDeltaEvent(
-                    content=accumulated_reasoning,
-                    message_id=reasoning_message_id,
-                    title=f"Thought for {accumulated_duration:.1f} seconds",
-                    delta=False,
-                )
-                accumulated_reasoning = ""
-                accumulated_duration = 0.0
-                reasoning_message_id = str(uuid4())
-
-
-            if text_message := response_message.content:
-                yield TextDeltaEvent(
-                    content=text_message,
-                    message_id=text_message_id,
-                    delta=False,
-                )
-
-
-            if not (tool_calls := getattr(response_message, "tool_calls", None)):
-
-                logger.info("Agent stopped", extra={"iteration_count": iteration_count, "finish_reason": "stop"})
-                # the consecutiveness has been broken, so we need to create a new version
-
-                break
-                    
-
-            
-            else:
-
-                # Build a traced coroutine for a single tool call.
-                # Defined as a factory so each coroutine captures its arguments by value,
-                # avoiding the classic Python closure-over-loop-variable pitfall.
-                def _build_coroutine(
-                    tool: ToolMethod,
-                    args_with_ctx: dict,
-                    name: str,
-                    t_type: str,
-                    raw_args: dict,
-                    timeout_s: float,
-                ):
-                    @trace_tool_execution(name, t_type, logger, error_logger, timeout_s)
-                    async def _execute():
-                        return await tool(**args_with_ctx)
-                    return _execute(tool_args=raw_args)
-
-                # ── Phase 1: validate, yield "started" UI chunks, build coroutines ──────
-                # Each entry: (tool_call, call_signature, coroutine).
-                tool_executions: list[tuple] = []
-
-                for tool_call in tool_calls:
-                    tool_name = tool_call.function.name
-
-                    if tool_name not in tools:
-                        yield _append_tool_msg_and_observe(
-                            ctx,
-                            content=f"Unknown tool: {tool_name}",
-                            name=tool_name,
-                            tool_call_id=tool_call.id,
-                        )
-                        continue
-
-                    tool_args = json.loads(tool_call.function.arguments)
-
-                    # Extract LLM-provided UI description before hashing/execution.
-                    llm_ui_message = tool_args.pop("_ui_message", None)
-
-                    if tool_name == "dry_execute_code" and not (
-                        isinstance(llm_ui_message, str) and llm_ui_message.strip()
-                    ):
-                        yield _append_tool_msg_and_observe(
-                            ctx,
-                            content=(
-                                "dry_execute_code requires a non-empty _ui_message: one short, plain-language, "
-                                "past-tense line describing what this run does for the user (e.g. 'Previewed a rolling mean')."
-                            ),
-                            name=tool_name,
-                            tool_call_id=tool_call.id,
-                        )
-                        continue
-
-                    # Loop detection: same tool + same args called repeatedly.
-                    args_hash = _serialize_and_hash_object(tool_args)
-                    call_signature = (tool_name, args_hash)
-                    tool_timeout_s = self._tool_timeout_seconds(tool_name, tool_args)
-                    repeat_count = sum(1 for sig in tool_call_history if sig == call_signature)
-
-                    if repeat_count == 6:
-                        logger.warning(f"Loop detected: {tool_name} called {repeat_count + 1} times with same args", extra={
-                            "tool_name": tool_name,
-                            "repeat_count": repeat_count + 1
-                        })
-                        yield AgentError(
-                            message="Internal Error",
-                            recoverable=False,
-                            error_type="loop_detection",
-                        )
-                        yield _append_tool_msg_and_observe(
-                            ctx,
-                            content="Loop detected: You have called the same tool with the same arguments multiple times. Consider trying a different approach.",
-                            name=tool_name,
-                            tool_call_id=tool_call.id,
-                        )
-                        turn_state.stopped = True
-                        continue
-                    elif repeat_count >= 2:
-                        logger.warning(f"Loop suspected: {tool_name} called {repeat_count + 1} times with same args", extra={
-                            "tool_name": tool_name,
-                            "repeat_count": repeat_count + 1
-                        })
-
-                    tool_type = tools[tool_name].tool_type
-
-                    if tool_type == "code":
-                        notebook_path = self._resolve_code_tool_path(tool_args)
-                        if notebook_path is None:
-                            yield _append_tool_msg_and_observe(
-                                ctx,
-                                content="return_notebook and edit_notebook require a non-empty 'path'. The path is the notebook's identity address (e.g. 'notebooks/inflation_analysis.py' → slug 'inflation_analysis'); reuse to add a revision, or pick a fresh path under 'notebooks/' to create one.",
-                                name=tool_name,
-                                tool_call_id=tool_call.id,
-                            )
-                            continue
-
-                    loading_label = tools[tool_name].ui_message
-                    if tool_type == "code":
-                        if tool_name == "return_notebook" and tool_args.get("execute") is True:
-                            loading_label = "Writing and running notebook"
-                        elif tool_name == "edit_notebook" and tool_args.get("execute") is True:
-                            loading_label = "Editing and running notebook"
-                        if tool_name in ("return_notebook", "edit_notebook"):
-                            preview = ScriptPreview(
-                                path=notebook_path,
-                                code=tool_args.get("code", "") or "",
-                            )
-                        else:
-                            preview = ScriptPreview(path=notebook_path, code="")
-                        preview.ui_message = loading_label
-                        yield ToolEvent(
-                            tool_name=tool_name,
-                            tool_call_id=tool_call.id,
-                            tool_type="code",
-                            completed=False,
-                            result=preview,
-                            ui_message=loading_label,
-                        )
-                    elif tool_type == "utility":
-                        # Emit a second file write with the full tool args in metadata,
-                        # before execution starts. The loading event (Phase 1 streaming)
-                        # already wrote the file with just ui_message; this overwrites it
-                        # with metadata so the frontend can display "In [·]: <code>" while
-                        # the tool is running, before the output ("Out") is known.
-                        yield ToolEvent(
-                            tool_name=tool_name,
-                            tool_call_id=tool_call.id,
-                            tool_type="utility",
-                            completed=False,
-                            result=UtilityToolOutput(
-                                ui_message=loading_label or f"Executing {tool_name}",
-                                metadata=self._utility_tool_metadata(
-                                    tool_name=tool_name,
-                                    tool_description=tools[tool_name].ui_description or tools[tool_name].description,
-                                    tool_args=tool_args,
-                                ),
-                            ),
-                        )
-
-                    tool_executions.append((
-                        tool_call,
-                        call_signature,
-                        repeat_count,
-                        _build_coroutine(
-                            tools[tool_name],
-                            {**tool_args, "context": ctx},
-                            tool_name,
-                            tool_type,
-                            tool_args,
-                            tool_timeout_s,
-                        ),
-                    ))
-
-                if tool_executions and cancellation and cancellation.is_set():
-                    for tool_call, call_signature, repeat_count, _ in tool_executions:
-                        tool_name = tool_call.function.name
-                        if tool_name not in tools:
-                            continue
-                        tool_args = json.loads(tool_call.function.arguments)
-                        tool_args.pop("_ui_message", None)
-                        for tev in self._emit_cancelled_tool_events(
-                            tools, tool_name, tool_args, tool_call
-                        ):
-                            yield tev
-                        yield _append_tool_msg_and_observe(
-                            ctx,
-                            content=CANCELLED_TOOL_TEXT,
-                            name=tool_name,
-                            tool_call_id=tool_call.id,
-                        )
-                        tool_call_history.append(call_signature)
-                    yield RunCancelled(
-                        message="The run was cancelled before the remaining tools could finish.",
-                        reason=cancellation.reason,  # cancellation is not None here
-                    )
-                    turn_state.stopped = True
-                    yield StateSnapshot(context=ctx.model_copy(deep=False))
-                    break
-
-                # ── Phase 2: execute tool coroutines ───────────────────────────────────────
-                # Batches of read-only tools may run concurrently. Any batch with a
-                # return tool, a kernel/executor tool, a workspace-mutating tool, etc.
-                # runs sequentially in tool-call order. See
-                # ``_TOOL_NAMES_SAFE_CONCURRENT`` and ``_tool_batch_allows_concurrent``.
-                batch_names = [t.function.name for t, _, _, _ in tool_executions]
-                concurrent_batch = _tool_batch_allows_concurrent(batch_names, tools)
-                raw_results = await self._run_tool_coros_with_cancellation(
-                    tool_executions, cancellation, concurrent_batch
-                )
-
-                # ── Phase 3: flush results sequentially into shared state ────────────────
-                # Results are committed in the original tool-call order so the LLM sees a
-                # well-formed message sequence, and ctx mutations stay serialised.
-                for (tool_call, call_signature, repeat_count, _), raw_result in zip(
-                    tool_executions, raw_results, strict=True
-                ):
-                    tool_name = tool_call.function.name
-                    tool_args = json.loads(tool_call.function.arguments)
-                    # Re-extract _ui_message (already stripped during Phase 1,
-                    # but we re-parse from raw arguments here).
-                    llm_ui_message = tool_args.pop("_ui_message", None)
-
-                    if isinstance(raw_result, asyncio.CancelledError):
-                        for tev in self._emit_cancelled_tool_events(
-                            tools, tool_name, tool_args, tool_call
-                        ):
-                            yield tev
-                        yield _append_tool_msg_and_observe(
-                            ctx,
-                            content=CANCELLED_TOOL_TEXT,
-                            name=tool_name,
-                            tool_call_id=tool_call.id,
-                        )
-                        tool_call_history.append(call_signature)
-                        continue
-
-                    if isinstance(raw_result, Exception):
-                        yield _append_tool_msg_and_observe(
-                            ctx,
-                            content=str(raw_result),
-                            name=tool_name,
-                            tool_call_id=tool_call.id,
-                        )
-                        continue
-
-                    tool_result = raw_result
-
-                    if not tool_result.success:
-                        last_tool_internal_error = f"Tool {tool_name} got an internal error. Trace ID: {trace.get_current_span().get_span_context().trace_id}"
-
-                    tool_call_output: Any = None
-
-                    match tools[tool_name].tool_type:
-                        case "utility":
-                            # Static label for loading state; LLM message for completed state.
-                            ui_message = tools[tool_name].ui_message or f"Executing {tool_name}"
-                            ui_message_completed = llm_ui_message or tools[tool_name].ui_message_completed
-
-                            if tool_result.data:
-                                tool_call_output = tool_result.data
-
-                                # Propagate into the output object (consumed by UI).
-                                if ui_message_completed and not tool_call_output.ui_message_completed:
-                                    tool_call_output.ui_message_completed = ui_message_completed
-
-                                yield ToolEvent(
-                                    tool_name=tool_name,
-                                    tool_call_id=tool_call.id,
-                                    tool_type="utility",
-                                    completed=True,
-                                    result=tool_call_output,
-                                    ui_message_completed=ui_message_completed,
-                                )
-                            else:
-                                tool_call_output = tool_result.exception_message
-                                output = UtilityToolOutput(
-                                    ui_message=ui_message,
-                                    ui_message_completed=ui_message_completed,
-                                    metadata=self._utility_tool_metadata(
-                                        tool_name=tool_name,
-                                        tool_description=tools[tool_name].ui_description or tools[tool_name].description,
-                                        tool_args=tool_args,
-                                    ),
-                                    content=Text(content=f"Error: {tool_result.exception_message}"),
-                                )
-                                yield ToolEvent(
-                                    tool_name=tool_name,
-                                    tool_call_id=tool_call.id,
-                                    tool_type="utility",
-                                    completed=True,
-                                    result=output,
-                                    ui_message_completed=ui_message_completed,
-                                )
-
-                        case "return":
-                            return_loading = tools[tool_name].ui_message
-                            if tool_result.data:
-                                tool_call_output = tool_result.data
-                                return_types = (Dataset, Chart, Report)
-                                if isinstance(tool_call_output, return_types):
-                                    # Flip the streaming UI to delivery mode but DO NOT stop
-                                    # the loop: a single user request may need multiple
-                                    # deliverables (dataset + chart + report). The agent
-                                    # iterates freely until it emits no more tool calls
-                                    # (natural termination at the no-tool-calls branch above)
-                                    # or hits ``max_iterations``. Republish is idempotent under
-                                    # content-addressing, so this is safe.
-                                    yield ToolEvent(
-                                        tool_name=tool_name,
-                                        tool_call_id=tool_call.id,
-                                        tool_type="return",
-                                        completed=True,
-                                        result=tool_call_output,
-                                        ui_message=return_loading,
-                                        ui_message_completed=llm_ui_message,
-                                    )
-                                    # After the yield, the streaming layer has persisted
-                                    # the artifact and mutated ``content_sha``. Append to
-                                    # the turn's ref ledger so the next iteration's
-                                    # <turn_artifacts> block carries the freshly-minted
-                                    # triplet — the agent never has to scan back through
-                                    # tool messages to find it (Task 15).
-                                    if tool_call_output.logical_id and tool_call_output.content_sha:
-                                        turn_state.minted_refs.append(
-                                            ArtifactRef(
-                                                kind=tool_call_output.type,
-                                                logical_id=tool_call_output.logical_id,
-                                                content_sha=tool_call_output.content_sha,
-                                            )
-                                        )
-                                        # Carry the agent-typed slug forward so the
-                                        # next iteration's <turn_artifacts> row carries
-                                        # live_name=... — that attribute is what the
-                                        # seen-set extractor keys on. Without it, the
-                                        # very next return_* (e.g. return_chart after
-                                        # return_dataset) raises LiveNameCollisionError
-                                        # against our own iter-just-finished mint.
-                                        ln = getattr(tool_call_output, "live_name", None)
-                                        if ln:
-                                            turn_state.minted_live_names[
-                                                f"{tool_call_output.type}:{tool_call_output.logical_id}"
-                                            ] = ln
-                            else:
-                                tool_call_output = tool_result.exception_message
-
-                        case "code":
-                            tool_call_output = tool_result.data if tool_result.data else tool_result.exception_message
-                            if tool_result.success:
-                                notebook_path = self._resolve_code_tool_path(tool_args)
-                                if notebook_path is None:
-                                    raise ValueError("code tools require a non-empty 'path'.")
-                                ran_kernel = (
-                                    tool_name in ("return_notebook", "edit_notebook")
-                                    and tool_args.get("execute") is True
-                                )
-                                # Derive the canonical post-turn notebook source without
-                                # touching a transient working copy (the new model has
-                                # none — bytes live solely under
-                                # ``.ockham/notebooks/<lid>/<csha>.py``). For
-                                # return_notebook, the new source IS ``tool_args.code``.
-                                # For edit_notebook, we re-apply the edit against the
-                                # latest snapshot (matches what the tool method itself
-                                # did).
-                                script = await self._notebook_script_after_tool(
-                                    tool_name=tool_name,
-                                    notebook_path=notebook_path,
-                                    tool_args=tool_args,
-                                    context=ctx,
-                                )
-                                if ran_kernel:
-                                    ko = tool_result.data
-                                    if not isinstance(ko, KernelOutput):
-                                        raise TypeError(
-                                            f"{tool_name} with kernel run did not return KernelOutput"
-                                        )
-                                    script.output = ko
-                                    script.data_objects = stamp_fetch_log_to_script(ko)
-                                notebook = script
-                                preview = script.to_preview()
-                                if tool_name == "return_notebook":
-                                    preview.ui_message = (llm_ui_message or "").strip() or None
-                                else:
-                                    # edit_notebook: no optional detail in the file-ref line on the wire.
-                                    preview.ui_message = None
-
-                                yield ToolEvent(
-                                    tool_name=tool_name,
-                                    tool_call_id=tool_call.id,
-                                    tool_type="code",
-                                    completed=True,
-                                    result={"notebook": notebook, "preview": preview},
-                                    ui_message_completed=llm_ui_message,
-                                    also_executed=ran_kernel,
-                                )
-                                # Track the notebook ref in the turn ledger
-                                # (Task 15). The ref's content_sha is computed
-                                # synchronously from the script bytes; no
-                                # streaming-layer wait needed.
-                                if tool_name in ("return_notebook", "edit_notebook"):
-                                    try:
-                                        nb_ref = await self._notebook_ref_for(
-                                            script.code, notebook_path, ctx
-                                        )
-                                    except LiveNameCollisionError as exc:
-                                        # Post-success mint: the host resolver
-                                        # scans curations including the one
-                                        # we just wrote. Its live_name
-                                        # matches our path but the seen-set
-                                        # — derived from messages — does not
-                                        # yet carry the freshly-minted pair.
-                                        # The early-validation already
-                                        # cleared cross-terminal collisions,
-                                        # so trust the resolver's
-                                        # ``existing_logical_id`` here.
-                                        nb_ref = ArtifactRef(
-                                            kind="notebook",
-                                            logical_id=exc.existing_logical_id,
-                                            content_sha=notebook_content_sha(
-                                                script.code
-                                            ),
-                                        )
-                                    turn_state.minted_refs.append(nb_ref)
-                                    # The agent-typed slug is the path basename
-                                    # (``notebooks/<slug>.py``). That is what
-                                    # the next iteration's seen-set extractor
-                                    # must see — otherwise the post-mint
-                                    # ``return_dataset`` / ``return_chart``
-                                    # call that resolves the producing
-                                    # notebook via the host resolver raises
-                                    # ``LiveNameCollisionError`` against this
-                                    # terminal's own write.
-                                    try:
-                                        nb_live_name = notebook_logical_id(notebook_path)
-                                    except ValueError:
-                                        nb_live_name = None
-                                    if nb_live_name:
-                                        turn_state.minted_live_names[
-                                            f"notebook:{nb_ref.logical_id}"
-                                        ] = nb_live_name
-
-                        case "system":
-                            tool_call_output = tool_result.data
-                            system_ui = llm_ui_message or tools[tool_name].ui_message_completed or tools[tool_name].ui_message
-                            if system_ui is not None:
-                                yield ToolEvent(
-                                    tool_name=tool_name,
-                                    tool_call_id=tool_call.id,
-                                    tool_type="system",
-                                    completed=True,
-                                    result=SystemToolMessage(message=system_ui),
-                                    ui_message_completed=llm_ui_message,
-                                )
-
-                        case _:
-                            raise ValueError(f"Invalid tool type: {tools[tool_name].tool_type}")
-
-                    # If the agent is repeating itself, prepend the warning into the single
-                    # tool result message rather than emitting a second message for the same
-                    # tool_call_id (which violates the LLM API contract).
-                    if repeat_count >= 2:
-                        tool_call_output = [
-                            {"type": "text", "text": "Warning: You have called the same tool with the same arguments multiple times. Consider trying a different approach.\n\n"},
-                            *Message._normalize_content(tool_call_output),
-                        ]
-
-                    yield _append_tool_msg_and_observe(
-                        ctx,
-                        content=tool_call_output,
-                        name=tool_name,
-                        tool_call_id=tool_call.id,
-                    )
-                    tool_call_history.append(call_signature)
-
-                if any(isinstance(r, asyncio.CancelledError) for r in raw_results) and not turn_state.stopped:
-                    cancel_reason = cancellation.reason if cancellation is not None else "user_request"
-                    yield RunCancelled(
-                        message="The run was cancelled while tools were executing.",
-                        reason=cancel_reason,
-                    )
-                    turn_state.stopped = True
-
-                # Persist tool results immediately so a client disconnect mid-turn can recover.
-                yield StateSnapshot(context=ctx.model_copy(deep=False))
-
-
-        if accumulated_reasoning:
-            yield ReasoningDeltaEvent(
-                content=accumulated_reasoning,
-                message_id=reasoning_message_id,
-                title=f"Thought for {accumulated_duration:.1f} seconds",
-                delta=False,
-            )
-
-        # Log agent run completion (after while loop ends)
-        total_time = time.time() - start_time
-        logger.info(
-            f"Agent run completed in {total_time:.3f}s after {iteration_count} iterations",
-            extra={
-                "duration_s": total_time,
-                "iterations": iteration_count
-            }
+        ctx.messages = [
+            m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False
+        ]
+        ctx.messages.append(
+            Message(role="user", content=context_snapshot, metadata={"context_snapshot": True})
         )
-        
-        # Record final metrics on span (span created at router level)
-        self._record_agent_metrics(agent_span, total_time, iteration_count)
+        state.messages = list(ctx.messages)
 
-        # If agent gave up without successfully returning, yield the last tool error
-        if not turn_state.stopped and last_tool_internal_error:
-            yield AgentError(
-                message=last_tool_internal_error,
-                recoverable=False,
-                error_type="tool_error",
+        hooks = WorkspaceRunHooks(agent=self, ctx=ctx, turn_state=turn_state,
+                                  cancellation=cancellation, tool_choice=tool_choice,
+                                  start_time=start_time, agent_span=agent_span)
+        async for event in run_loop(hooks, state, cancellation=cancellation):
+            yield event
+
+    async def resume(
+        self,
+        suspension: SuspensionRecord,
+        user_reply: str,
+        *,
+        cancellation: CancellationRequest | None = None,
+        max_suspension_age_s: float | None = 24 * 3600.0,
+    ) -> AsyncGenerator[Any, None]:
+        """Resume a run that suspended via ``ask_user``.
+
+        Validates the suspension token + staleness, rebuilds the workspace
+        :class:`AgentContext` and :class:`RunState` from the record, appends
+        ``user_reply`` as the next user message, and re-enters the loop through
+        :class:`WorkspaceRunHooks` — the same path :meth:`run` uses, so a resumed
+        run gets context snapshots, rich tool dispatch, and event emission
+        identically to a fresh run.
+
+        :raises SuspensionTokenMismatch: the record's token fails HMAC verification.
+        :raises SuspensionExpired: the record is older than ``max_suspension_age_s``.
+        :raises ValueError: ``user_reply`` is empty.
+        """
+        from datetime import datetime, timezone
+
+        from parsimony_agents.agent.failure import (
+            SuspensionExpired,
+            SuspensionTokenMismatch,
+            verify_suspension_token,
+        )
+        from parsimony_agents.agent.loop import run_loop
+        from parsimony_agents.agent.state import RunState
+        from parsimony_agents.agent.workspace_hooks import WorkspaceRunHooks
+
+        if not user_reply or not user_reply.strip():
+            raise ValueError("resume requires a non-empty user_reply")
+
+        if not verify_suspension_token(record=suspension, secret=self.suspension_secret):
+            raise SuspensionTokenMismatch(
+                f"suspension token failed verification for run_id={suspension.run_id!r}"
             )
 
-        yield StateSnapshot(context=ctx.model_copy(deep=False))
+        if max_suspension_age_s is not None:
+            age = (datetime.now(timezone.utc) - suspension.suspended_at).total_seconds()
+            if age > max_suspension_age_s:
+                raise SuspensionExpired(
+                    f"suspension is {age:.0f}s old (max {max_suspension_age_s:.0f}s)"
+                )
+
+        agent_span = trace.get_current_span()
+        logger.info(
+            "Agent resume started",
+            extra={"run_id": suspension.run_id, "reply_preview": user_reply[:1000]},
+        )
+        start_time = time.time()
+
+        # --- System prompt + workspace ctx rebuilt from the record ----------
+        if isinstance(self.instructions, str):
+            system_message = AgentMessage(role="system", content=Text(content=self.instructions.rstrip()))
+        else:
+            system_message = AgentMessage(role="system", content=self.instructions)
+
+        # AgentContext validates ``messages`` against AgentMessage at construction,
+        # but a restored transcript legitimately mixes AgentMessage and Message
+        # (context-snapshot rows). Build minimally, then assign by mutation — the
+        # same sidestep ``run`` relies on (assignment is not re-validated).
+        ctx = AgentContext(messages=[system_message], session_id=self.session_id)
+        if suspension.messages:
+            restored = list(suspension.messages)
+            restored[0] = system_message  # refresh the system prompt
+            ctx.messages = restored
+
+        if self.session_id and self.file_store is not None:
+            ctx.files = self.file_store
+            ctx.vector_store = get_or_create_session_vector_store(self.session_id)
+            ctx.keyword_store = get_or_create_session_keyword_store(self.session_id)
+            await self.code_executor.set_cwd(
+                str(ctx.files.get_files_dir()), session_id=self.session_id
+            )
+
+        await self._setup_connectors()
+
+        # Connector catalog → stable cached-prefix message (see helper docstring).
+        _inject_connector_catalog(ctx, self._connectors)
+
+        # --- Turn state carries forward refs minted before suspension -------
+        turn_state = TurnState(
+            minted_refs=list(suspension.minted_refs),
+            minted_live_names=dict(suspension.minted_live_names),
+        )
+
+        # --- Spine state rebuilt from the record ----------------------------
+        state = RunState.from_suspension(suspension, cancellation=cancellation)
+        state.messages = list(ctx.messages)
+
+        # --- Append the user's reply as a normal user message (BRIEF §4.2) --
+        reply_msg = AgentMessage(role="user", content=Text(content=user_reply.strip()))
+        ctx.messages.append(reply_msg)
+        state.messages.append(reply_msg)
+
+        # --- Seed an initial context snapshot so iteration 1 has one --------
+        # No ``connectors=``: the catalog is its own stable prefix message
+        # (see ``_inject_connector_catalog``); the snapshot stays volatile-only.
+        context_snapshot = await ctx.to_snapshot()
+        ctx.messages = [
+            m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False
+        ]
+        ctx.messages.append(
+            Message(role="user", content=context_snapshot, metadata={"context_snapshot": True})
+        )
+        state.messages = list(ctx.messages)
+
+        hooks = WorkspaceRunHooks(agent=self, ctx=ctx, turn_state=turn_state,
+                                  cancellation=cancellation, tool_choice="auto",
+                                  start_time=start_time, agent_span=agent_span)
+        yield StateSnapshot(context=ctx)
+        async for event in run_loop(hooks, state, cancellation=cancellation):
+            yield event
 
     async def _run_tool_coros_with_cancellation(
         self,

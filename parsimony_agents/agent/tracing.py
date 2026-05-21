@@ -133,7 +133,33 @@ def trace_tool_execution(
                     raise TimeoutError(error_msg) from None
 
                 except Exception as e:
+                    # Control-flow exceptions raised by termination tools
+                    # (ask_user, return_unable) are NOT errors — they are how the
+                    # tools signal "suspend" / "handoff" to the loop. Log them at
+                    # info level and mark the span OK so the trace doesn't flag a
+                    # successful suspension as a failure.
+                    from parsimony_agents.agent.failure.suspension import SuspensionRequest
+                    from parsimony_agents.agent.failure.termination import TerminationRequest
+
                     tool_execution_time = time.time() - start_time
+
+                    if isinstance(e, (SuspensionRequest, TerminationRequest)):
+                        logger.info(
+                            f"Tool requested {type(e).__name__}: {tool_name}",
+                            extra={
+                                "tool_name": tool_name,
+                                "tool_type": tool_type,
+                                "control_flow": type(e).__name__,
+                                "duration_s": tool_execution_time,
+                            },
+                        )
+                        if tool_span.is_recording():
+                            tool_span.set_status(trace.Status(trace.StatusCode.OK))
+                            tool_span.set_attribute("tool.success", True)
+                            tool_span.set_attribute("tool.duration_s", tool_execution_time)
+                            tool_span.set_attribute("tool.control_flow", type(e).__name__)
+                        raise
+
                     error_logger.error(
                         f"Tool execution exception: {tool_name}",
                         extra={
