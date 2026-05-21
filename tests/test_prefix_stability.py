@@ -20,7 +20,10 @@ from unittest.mock import MagicMock
 
 from parsimony.connector import Connectors
 
+from parsimony_agents.agent.agent import _inject_connector_catalog
 from parsimony_agents.agent.helpers import render_connector_catalog
+from parsimony_agents.agent.models import AgentContext, AgentMessage
+from parsimony_agents.messages import Text
 
 
 def _bundle(body: str, length: int = 1) -> Connectors:
@@ -71,3 +74,47 @@ def test_catalog_render_empty_inputs_are_stable():
     """Empty / None inputs return the empty string, stable across calls."""
     assert render_connector_catalog({}) == ""
     assert render_connector_catalog(None) == ""
+
+
+# ---------------------------------------------------------------------------
+# Connector-catalog injection — the catalog must actually reach the prompt, as
+# a stable message inside the cached prefix (regression: a refactor once routed
+# it through an unwired render_for_llm parameter and silently dropped it).
+# ---------------------------------------------------------------------------
+
+
+def _ctx_with_system_prompt() -> AgentContext:
+    sys_msg = AgentMessage(role="system", content=Text(content="you are an agent"))
+    return AgentContext(messages=[sys_msg], session_id="s1")
+
+
+def test_inject_connector_catalog_places_stable_prefix_message():
+    """The catalog lands as a role=user message at index 1 — after the system
+    prompt, inside the cached prefix, never in the volatile snapshot."""
+    ctx = _ctx_with_system_prompt()
+    _inject_connector_catalog(ctx, {"fetch": _bundle("### fred\n", length=1)})
+
+    catalog_msgs = [m for m in ctx.messages if m.metadata.get("connectors_catalog")]
+    assert len(catalog_msgs) == 1
+    assert ctx.messages[1] is catalog_msgs[0]  # immediately after the system prompt
+    assert ctx.messages[1].role == "user"
+    assert "<available_connectors>" in ctx.messages[1].content.content
+
+
+def test_inject_connector_catalog_is_idempotent():
+    """Re-injecting refreshes in place — never stacks duplicate catalog messages."""
+    ctx = _ctx_with_system_prompt()
+    connectors = {"fetch": _bundle("### fred\n", length=1)}
+    _inject_connector_catalog(ctx, connectors)
+    _inject_connector_catalog(ctx, connectors)
+
+    assert len([m for m in ctx.messages if m.metadata.get("connectors_catalog")]) == 1
+
+
+def test_inject_connector_catalog_noop_without_connectors():
+    """No connectors → no catalog message injected."""
+    ctx = _ctx_with_system_prompt()
+    _inject_connector_catalog(ctx, None)
+
+    assert all(not m.metadata.get("connectors_catalog") for m in ctx.messages)
+    assert len(ctx.messages) == 1

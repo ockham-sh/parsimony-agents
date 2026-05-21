@@ -1,4 +1,11 @@
-"""LLM tool primitives: Tool, ToolMethod, ToolResult, Tools registry."""
+"""LLM tool primitives: Tool, ToolMethod, ToolResult, Tools registry.
+
+- :class:`Tool` carries structural declarations the loop reads —
+  ``idempotent``, ``retryable_on_error``, ``parallelizable``, ``timeout_s``.
+- :class:`ToolResult` carries a structured ``failure: Failure | None`` plus
+  ``partial_data: Any``, alongside the ``exception_message``/``data`` pair.
+- ``ok`` is the canonical successful-result predicate; ``success`` is an alias.
+"""
 
 from __future__ import annotations
 
@@ -7,17 +14,40 @@ from copy import deepcopy
 from typing import Any, Literal
 
 from parsimony.transport import redact_sensitive_text
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, ConfigDict, computed_field
+
+from parsimony_agents.agent.failure.kinds import Failure
 
 
 class ToolResult(BaseModel):
+    """Result of a single tool invocation.
+
+    ``failure`` and ``partial_data`` are the canonical fields for structured
+    failure reporting; ``exception_message``/``data`` carry the plain
+    message-and-payload form.
+    """
+
+    # ``Failure`` is a Pydantic frozen dataclass; allow it as a field type.
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     exception_message: str | None
     data: Any | None
+    # Structured-failure fields. Default to None so constructions like
+    # ``ToolResult(exception_message=None, data=x)`` work unchanged.
+    failure: Failure | None = None
+    partial_data: Any = None
 
     @computed_field
     @property
     def success(self) -> bool:
-        return self.exception_message is None
+        """Deprecated alias for :attr:`ok`. Retained for legacy call-sites."""
+        return self.ok
+
+    @computed_field
+    @property
+    def ok(self) -> bool:
+        """True iff neither :attr:`failure` nor :attr:`exception_message` is set."""
+        return self.exception_message is None and self.failure is None
 
     @classmethod
     def from_exception(cls, exception: Exception) -> ToolResult:
@@ -27,8 +57,26 @@ class ToolResult(BaseModel):
     def from_data(cls, data: Any) -> ToolResult:
         return cls(exception_message=None, data=data)
 
+    @classmethod
+    def from_failure(cls, failure: Failure, *, partial_data: Any = None) -> ToolResult:
+        """Construct a result from a structured :class:`Failure`.
+
+        Used by tools that produce typed failures (e.g. a kernel-invalidated
+        error from ``execute_code``, a connector schema-drift warning from
+        ``load_dataset``). ``exception_message`` is also populated with
+        ``failure.explanation`` so message-only consumers still see useful text.
+        """
+        return cls(
+            exception_message=failure.explanation,
+            data=None,
+            failure=failure,
+            partial_data=partial_data,
+        )
+
 
 class Tool:
+    """LLM tool definition (callable + schema + structural declarations)."""
+
     def __init__(
         self,
         function: Callable,
@@ -40,6 +88,12 @@ class Tool:
         ui_message: str | None = None,
         ui_message_completed: str | None = None,
         ui_description: str | None = None,
+        # ---- Structural declarations ---------------------------------------
+        # All default to conservative values so existing constructions don't break.
+        idempotent: bool = False,
+        retryable_on_error: bool = False,
+        parallelizable: bool = False,
+        timeout_s: float | None = None,
     ):
         self.function = function
         self.parameters_schema = parameters_schema
@@ -50,17 +104,37 @@ class Tool:
         self.ui_message = ui_message
         self.ui_message_completed = ui_message_completed
         self.ui_description = ui_description
+        # Structural declarations. The loop reads these to:
+        # - serialize parallelizable=False tools at the loop level
+        # - auto-retry retryable_on_error tools via the recovery funnel
+        # - apply per-tool timeouts (overriding the global tool_timeout_s)
+        self.idempotent = idempotent
+        self.retryable_on_error = retryable_on_error
+        self.parallelizable = parallelizable
+        self.timeout_s = timeout_s
 
     async def __call__(self, *args, **kwargs) -> ToolResult:
         """
         Execute tool function and wrap result/exception in ToolResult.
         If the result is already a ToolResult, return it as is.
+
+        Control-flow exceptions (Suspension/Termination/Cancellation) are *not*
+        wrapped — they propagate up so the loop can translate them into the
+        appropriate AgentEvent. See ``parsimony_agents.agent.failure.suspension``
+        and ``...failure.termination`` for the typed exception classes.
         """
+        # Local imports keep tools.py independent of agent.failure.* at module load.
+        from parsimony_agents.agent.failure.suspension import SuspensionRequest
+        from parsimony_agents.agent.failure.termination import TerminationRequest
+        import asyncio as _asyncio
+
         try:
             result = await self.function(*args, **kwargs)
             if isinstance(result, ToolResult):
                 return result
             return ToolResult.from_data(result)
+        except (SuspensionRequest, TerminationRequest, _asyncio.CancelledError):
+            raise
         except Exception as e:
             return ToolResult.from_exception(e)
 
@@ -126,6 +200,10 @@ class ToolMethod(Tool):
             ui_message=self.ui_message,
             ui_message_completed=self.ui_message_completed,
             ui_description=getattr(self, "ui_description", None),
+            idempotent=getattr(self, "idempotent", False),
+            retryable_on_error=getattr(self, "retryable_on_error", False),
+            parallelizable=getattr(self, "parallelizable", False),
+            timeout_s=getattr(self, "timeout_s", None),
         )
 
 
