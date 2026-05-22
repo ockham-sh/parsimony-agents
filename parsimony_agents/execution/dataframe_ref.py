@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, computed_field
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +54,6 @@ class DataframeRef(BaseModel):
     local_path: str
     content_hash: str
     remote_key: str | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _legacy_s3_key(cls, data: Any) -> Any:
-        if isinstance(data, dict) and data.get("s3_key") is not None and data.get("remote_key") is None:
-            return {**data, "remote_key": data["s3_key"]}
-        return data
 
     @computed_field
     @property

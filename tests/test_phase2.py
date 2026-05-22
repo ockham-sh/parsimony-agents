@@ -13,7 +13,7 @@ import tempfile
 import pandas as pd
 import pytest
 from parsimony.connector import Connectors
-from parsimony.result import Provenance, Result
+from parsimony.result import Provenance, Result, TabularResult
 
 from parsimony_agents.execution.helpers import normalize_connector_bundles
 from parsimony_agents.execution.outputs import FetchLogEntry
@@ -112,7 +112,8 @@ async def test_code_executor_await_cell_runs() -> None:
     assert out.fetch_log == []
 
 
-def test_result_from_dataframe_roundtrip() -> None:
+def test_tabular_result_from_dataframe_roundtrip() -> None:
     df = pd.DataFrame({"a": [1]})
-    r = Result.from_dataframe(df)
+    r = TabularResult.from_dataframe(df)
+    assert isinstance(r, TabularResult)
     assert isinstance(r, Result)

@@ -4,7 +4,7 @@ Datasets are open-format Parquet files. Two metadata namespaces live in the
 Arrow schema metadata of every dataset file:
 
 - ``parsimony.result`` (managed by parsimony) — provenance, columns, output
-  schema. Lets ``parsimony.Result.from_parquet(path)`` round-trip correctly.
+  schema. Lets ``parsimony.TabularResult.from_parquet(path)`` round-trip correctly.
 - ``parsimony_agents`` (managed here) — curation metadata: artifact id,
   title, description, tags, notebook refs. Equals the serialized form of
   :class:`parsimony_agents.artifacts.Dataset`. Lineage from a notebook
@@ -18,7 +18,7 @@ provenance and the curation envelope without translation.
 
 Read path
 ---------
-- Power users / agents call ``parsimony.Result.from_parquet(path)`` directly;
+- Power users / agents call ``parsimony.TabularResult.from_parquet(path)`` directly;
   they get DataFrame + provenance with no parsimony-agents coupling.
 - Workspace tooling calls ``deserialize_dataset(blob)`` to recover both the
   ``Result`` and the ``Dataset`` curation envelope.
@@ -51,7 +51,7 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from parsimony.result import Result
+from parsimony.result import Result, TabularResult
 
 from parsimony_agents.artifacts import Dataset
 from parsimony_agents.execution.outputs import DataFrameObject
@@ -104,7 +104,7 @@ def write_dataset_bytes(dataset: Dataset, payload: DataFrameObject) -> bytes:
             f"{type(payload).__name__}. Wrap raw frames with "
             f"DataFrameObject.from_pandas(df, local_dir=...)."
         )
-    result = Result.from_dataframe(payload.value)
+    result = TabularResult.from_dataframe(payload.value)
     table = _build_curated_table(result, dataset)
     buffer = io.BytesIO()
     pq.write_table(table, buffer)
@@ -124,7 +124,7 @@ def deserialize_dataset(data: bytes) -> tuple[Result, Dataset]:
     """
 
     table = pq.read_table(io.BytesIO(data))
-    result = Result.from_arrow(table)
+    result = TabularResult.from_arrow(table)
     dataset = _dataset_from_table(table)
     return result, dataset
 

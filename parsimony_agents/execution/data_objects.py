@@ -276,7 +276,7 @@ def _strip_table_metadata(table: pa.Table) -> pa.Table:
     """Return *table* with schema- and field-level metadata cleared.
 
     Used solely for the legacy hash; the persisted parquet retains
-    original metadata so :func:`Result.from_arrow` can recover
+    original metadata so :func:`TabularResult.from_arrow` can recover
     provenance later.
     """
     bare_fields = [

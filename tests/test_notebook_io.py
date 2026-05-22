@@ -104,12 +104,14 @@ def test_state_cache_round_trip(sample_script: Script, tmp_path: Path) -> None:
 
 def test_state_cache_round_trip_fetch_log_only(sample_script: Script, tmp_path: Path) -> None:
     entry = FetchLogEntry(
-        source="stub",
-        params={},
         row_count=1,
         column_names=["a"],
         columns=[{"name": "a", "dtype": "int", "role": "data"}],
-        provenance=Provenance(source="stub", source_description="stub fixture"),
+        provenance=Provenance(
+            source="stub",
+            source_description="stub fixture",
+            params={},
+        ),
     )
     sample_script.output = KernelOutput(outputs=[], fetch_log=[entry])
     save_notebook_state(sample_script, tmp_path)

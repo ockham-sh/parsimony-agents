@@ -10,7 +10,7 @@ layout (``CONTENT_ADDRESSED_ARTIFACTS_PLAN.md`` §2.3):
 * Different params → different logical_id (different folder).
 * Different data → same logical_id, different content_sha.
 * The persisted file is a valid parquet that round-trips through
-  ``Result.from_arrow``.
+  ``TabularResult.from_arrow``.
 * Errors degrade gracefully (return ``None``, no raise).
 """
 
@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
-from parsimony.result import Provenance, Result
+from parsimony.result import Provenance, TabularResult
 
 from parsimony_agents.execution.data_objects import (
     DATA_OBJECTS_NAMESPACE,
@@ -38,8 +38,8 @@ def _make_result(
     source: str = "src",
     params: dict | None = None,
     fetched_at: datetime | None = None,
-) -> Result:
-    return Result(
+) -> TabularResult:
+    return TabularResult(
         data=df,
         provenance=Provenance(
             source=source,
@@ -123,7 +123,7 @@ async def test_persisted_file_is_readable_parquet(tmp_path: Path) -> None:
     ref, _v = out
     blob = (tmp_path / ref.workspace_file_path).read_bytes()
     table = pq.read_table(BytesIO(blob))
-    round_tripped = Result.from_arrow(table)
+    round_tripped = TabularResult.from_arrow(table)
     pd.testing.assert_frame_equal(round_tripped.df.reset_index(drop=True), df)
     assert round_tripped.provenance.source == "us_cpi"
     assert round_tripped.provenance.params == {"q": "cpi"}

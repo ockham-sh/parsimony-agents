@@ -17,7 +17,7 @@ import litellm
 import pandas as pd
 from opentelemetry import trace
 from parsimony.connector import Connectors
-from parsimony.result import Result
+from parsimony.result import TabularResult
 from pydantic import TypeAdapter
 
 from parsimony_agents.agent.cancellation import CancellationRequest
@@ -1104,7 +1104,7 @@ class Agent:
         if not path.endswith(".parquet"):
             raise ValueError("read_data only supports .parquet files.")
         full = self._workspace_root() / path
-        result = Result.from_parquet(full)
+        result = TabularResult.from_parquet(full)
         df = result.df
         head = df.head(5)
         # Connector-supplied: column names, dtypes, source, params. Escape every interpolation.

@@ -268,7 +268,7 @@ class RawParquetIOLinter(ast.NodeVisitor):
                 )
             elif attr in self._BARE_READ_FUNCTIONS and _get_base_name(node.func.value) == "pd":
                 self.issues.append(
-                    f"Line {node.lineno}: prefer `Result.from_parquet(path)` over "
+                    f"Line {node.lineno}: prefer `TabularResult.from_parquet(path)` over "
                     "`pd.{attr}(path)` so embedded provenance round-trips into the "
                     "Result wrapper.".format(attr=attr)
                 )
