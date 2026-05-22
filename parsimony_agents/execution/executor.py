@@ -5,24 +5,26 @@ from __future__ import annotations
 import ast
 import asyncio
 import builtins
+import concurrent.futures
+import contextlib
+import ctypes
 import inspect
 import io
 import logging
 import os
 import secrets
 import string
+import threading
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger("parsimony_agents")
-
 import altair as alt
 import numpy as np
 import pandas as pd
-
 from parsimony.connector import Connectors
 
 from parsimony_agents.execution import documents as _documents
@@ -96,8 +98,118 @@ _SAFE_BUILTINS: dict[str, object] = {
 }
 _SAFE_BUILTINS["__import__"] = builtins.__import__
 
+logger = logging.getLogger("parsimony_agents")
+
+# ---------------------------------------------------------------------------
+# Default per-cell timeout.  A single env-var knob so ops can tune without
+# a code change.  Five minutes is generous for legit data work; single-digit
+# seconds are enough for most unit tests.
+# ---------------------------------------------------------------------------
+DEFAULT_CELL_TIMEOUT_S: float = float(os.environ.get("EXECUTOR_CELL_TIMEOUT_S", "300"))
+
+# ---------------------------------------------------------------------------
+# Per-event-loop global execution lock.
+#
+# RATIONALE: moving eval() off the event-loop thread (to a worker thread)
+# would otherwise allow two CodeExecutor instances in the same process to
+# run user code concurrently.  That is unsafe because _working_directory()
+# calls os.chdir(), which is process-global.  The global lock preserves the
+# existing one-eval-at-a-time semantics across executors.
+#
+# We key by event-loop object (not module-level) so the lock is fresh for
+# every pytest-asyncio per-test loop — a bare module-level asyncio.Lock()
+# would be bound to the first loop that touches it and would be closed/invalid
+# for subsequent test loops.
+#
+# LOCK ORDER (always observed, never inverted):
+#   1. _global_execution_lock()   — acquired first
+#   2. self._exec_lock            — acquired second
+# No other code path acquires them in the opposite order → deadlock-free.
+# ---------------------------------------------------------------------------
+_loop_global_locks: dict[int, asyncio.Lock] = {}
+
+
+def _global_execution_lock() -> asyncio.Lock:
+    """Return the execution lock for the currently-running event loop."""
+    loop = asyncio.get_running_loop()
+    loop_id = id(loop)
+    if loop_id not in _loop_global_locks:
+        _loop_global_locks[loop_id] = asyncio.Lock()
+    return _loop_global_locks[loop_id]
+
 
 _used_ids: set[str] = set()
+
+
+# ---------------------------------------------------------------------------
+# Thread interruption helper
+# ---------------------------------------------------------------------------
+
+def _interrupt_thread(thread: threading.Thread) -> None:
+    """Best-effort: inject SystemExit into *thread* at the next bytecode boundary.
+
+    This stops pure-Python tight loops (``while True: pass``).  It CANNOT
+    interrupt code blocked inside a C extension call (e.g. ``time.sleep``);
+    in that case the daemon thread will linger but the event loop and both
+    locks are already released so the executor is not wedged.
+
+    If ``PyThreadState_SetAsyncExc`` returns > 1 it means the exception was
+    injected into more than one thread-state — undo immediately by passing
+    a NULL exception type.  The whole call is wrapped in try/except so any
+    ctypes failure is silently swallowed; interruption is best-effort only.
+    """
+    try:
+        if thread.ident is None:
+            return
+        ret = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+            ctypes.c_long(thread.ident),
+            ctypes.py_object(SystemExit),
+        )
+        if ret > 1:
+            # Undo the over-broad injection immediately.
+            ctypes.pythonapi.PyThreadState_SetAsyncExc(
+                ctypes.c_long(thread.ident),
+                None,
+            )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _run_sync_in_thread_with_timeout(
+    fn: Callable[[], Any],
+    timeout: float,
+) -> Any:
+    """Run the synchronous callable *fn* in a dedicated daemon thread.
+
+    Returns the value returned by *fn*, or raises on exception.
+
+    Why a dedicated thread (not ``asyncio.to_thread`` / ThreadPoolExecutor):
+    A timed-out thread may be lingering (C-extension blocked).  Recycling a
+    pooled thread after a hard-kill risks corrupting the pool's state.  A
+    fresh daemon thread is safe to abandon — it will be reaped when the
+    process exits.
+
+    NOTE: The subprocess-isolation fix (the architecturally-complete answer
+    to untrusted user code) is tracked separately and intentionally out of
+    scope for this change.
+    """
+    fut: concurrent.futures.Future[Any] = concurrent.futures.Future()
+
+    def _target() -> None:
+        try:
+            fut.set_result(fn())
+        except BaseException as exc:  # noqa: BLE001
+            with contextlib.suppress(concurrent.futures.InvalidStateError):
+                fut.set_exception(exc)
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+
+    try:
+        return await asyncio.wait_for(asyncio.wrap_future(fut), timeout=timeout)
+    except (TimeoutError, asyncio.CancelledError):
+        _interrupt_thread(thread)
+        raise
 
 
 def _collect_top_level_assignments(source: str) -> set[str]:
@@ -116,11 +228,7 @@ def _collect_top_level_assignments(source: str) -> set[str]:
         if isinstance(node, ast.Assign):
             for target in node.targets:
                 _names_in(target, out)
-        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
-            _names_in(node.target, out)
-        elif isinstance(node, ast.For):
-            _names_in(node.target, out)
-        elif isinstance(node, (ast.AsyncFor,)):
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.For, ast.AsyncFor)):
             _names_in(node.target, out)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             out.add(node.name)
@@ -287,14 +395,14 @@ class BaseCodeExecutor(ABC):
             return None
         return self.origin_ledger.get(name)
 
-    async def set_connectors(self, connectors: Any) -> None:
+    async def set_connectors(self, connectors: Any) -> None:  # noqa: B027
         """Inject connectors into the execution namespace. Override in subclasses."""
         pass
 
-    def add_setup_snippet(self, code: str) -> None:
+    def add_setup_snippet(self, code: str) -> None:  # noqa: B027
         pass
 
-    async def close(self) -> None:
+    async def close(self) -> None:  # noqa: B027
         pass
 
     @abstractmethod
@@ -506,8 +614,10 @@ class CodeExecutor(BaseCodeExecutor):
     ) -> KernelOutput:
         """Run *code* in a fresh namespace."""
         _ = producer_notebook_path  # workspace mode runs do not produce lineage
+        timeout = timeout_seconds if timeout_seconds is not None else DEFAULT_CELL_TIMEOUT_S
         self._current_seen_live_names = seen_live_names
-        async with self._exec_lock:
+
+        async with _global_execution_lock(), self._exec_lock:
             self.origin_ledger.clear()
             self._connector_cache.clear()
             self.locals = self._base_locals()
@@ -522,12 +632,46 @@ class CodeExecutor(BaseCodeExecutor):
                     "print": self.capturer.print,
                 }
             )
-            try:
+
+            def _sync_eval() -> Any:
                 with self._working_directory(self.cwd):
                     compiled = compile(code, "workspace.py", "exec", ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
-                    result = eval(compiled, exec_locals)
-                    if inspect.iscoroutine(result):
-                        await result
+                    return eval(compiled, exec_locals)  # noqa: S307
+
+            try:
+                t0 = time.monotonic()
+                try:
+                    result = await _run_sync_in_thread_with_timeout(_sync_eval, timeout)
+                except asyncio.CancelledError:
+                    self.capturer.flush()
+                    raise
+                except TimeoutError:
+                    self.capturer.flush()
+                    fetch_log = _drain_fetch_log(exec_locals)
+                    return KernelOutput(
+                        outputs=[
+                            self._output_factory.from_value(
+                                TimeoutError(f"Execution exceeded {timeout}s and was aborted")
+                            )
+                        ],
+                        fetch_log=fetch_log,
+                    )
+                if inspect.iscoroutine(result):
+                    elapsed = time.monotonic() - t0
+                    remaining = max(timeout - elapsed, 0.01)
+                    try:
+                        await asyncio.wait_for(result, timeout=remaining)
+                    except TimeoutError:
+                        self.capturer.flush()
+                        fetch_log = _drain_fetch_log(exec_locals)
+                        return KernelOutput(
+                            outputs=[
+                                self._output_factory.from_value(
+                                    TimeoutError(f"Execution exceeded {timeout}s and was aborted")
+                                )
+                            ],
+                            fetch_log=fetch_log,
+                        )
                 fetch_log = _drain_fetch_log(exec_locals)
                 return KernelOutput(
                     outputs=self.capturer.flush(),
@@ -622,8 +766,10 @@ class CodeExecutor(BaseCodeExecutor):
         it; between calls the value is harmless because ``load_dataset``
         is only invoked while a kernel ``execute`` is in progress.
         """
+        timeout = timeout_seconds if timeout_seconds is not None else DEFAULT_CELL_TIMEOUT_S
         self._current_seen_live_names = seen_live_names
-        async with self._exec_lock:
+
+        async with _global_execution_lock(), self._exec_lock:
             exec_locals = self.locals.copy() if dry_run else self.locals
             self.capturer.flush()
             exec_locals.update(
@@ -633,7 +779,7 @@ class CodeExecutor(BaseCodeExecutor):
                 }
             )
 
-            def _run_in_scope() -> Any:
+            def _run_sync() -> Any:
                 with self._working_directory(self.cwd):
                     compiled = compile(
                         code,
@@ -647,15 +793,39 @@ class CodeExecutor(BaseCodeExecutor):
                     # restricted to _SAFE_BUILTINS to limit available attack surface.
                     return eval(compiled, exec_locals)  # noqa: S307
 
+            def _timeout_output() -> KernelOutput:
+                self.capturer = StructuredStreamCapturer(self._output_factory)
+                fetch_log = _drain_fetch_log(exec_locals)
+                return KernelOutput(
+                    outputs=[
+                        self._output_factory.from_value(
+                            TimeoutError(f"Execution exceeded {timeout}s and was aborted")
+                        )
+                    ],
+                    fetch_log=fetch_log,
+                )
+
             try:
                 if producer_notebook_path is not None and not dry_run:
                     # Snapshot the names that exist before the run so we
                     # can stamp the delta with the producing origin.
                     pre = set(self.locals.keys())
                     with self.origin_ledger.scope(producer_notebook_path) as scope:
-                        result = _run_in_scope()
+                        t0 = time.monotonic()
+                        try:
+                            result = await _run_sync_in_thread_with_timeout(_run_sync, timeout)
+                        except asyncio.CancelledError:
+                            self.capturer = StructuredStreamCapturer(self._output_factory)
+                            raise
+                        except TimeoutError:
+                            return _timeout_output()
                         if inspect.iscoroutine(result):
-                            await result
+                            elapsed = time.monotonic() - t0
+                            remaining = max(timeout - elapsed, 0.01)
+                            try:
+                                await asyncio.wait_for(result, timeout=remaining)
+                            except TimeoutError:
+                                return _timeout_output()
                         post = set(self.locals.keys())
                         # Stamp = (set-diff) ∪ (AST top-level assignments).
                         # Both are necessary and the union is sound:
@@ -682,9 +852,21 @@ class CodeExecutor(BaseCodeExecutor):
                         stamp_targets = sorted(set(new_or_changed) | assigned)
                         self.origin_ledger.stamp(stamp_targets, scope)
                 else:
-                    result = _run_in_scope()
+                    t0 = time.monotonic()
+                    try:
+                        result = await _run_sync_in_thread_with_timeout(_run_sync, timeout)
+                    except asyncio.CancelledError:
+                        self.capturer = StructuredStreamCapturer(self._output_factory)
+                        raise
+                    except TimeoutError:
+                        return _timeout_output()
                     if inspect.iscoroutine(result):
-                        await result
+                        elapsed = time.monotonic() - t0
+                        remaining = max(timeout - elapsed, 0.01)
+                        try:
+                            await asyncio.wait_for(result, timeout=remaining)
+                        except TimeoutError:
+                            return _timeout_output()
                 fetch_log = _drain_fetch_log(exec_locals)
                 return KernelOutput(
                     outputs=self.capturer.flush(),
@@ -704,10 +886,29 @@ class CodeExecutor(BaseCodeExecutor):
         dry_run: bool = False,
         timeout_seconds: float | None = None,
     ) -> KernelOutput:
-        async with self._exec_lock:
+        timeout = timeout_seconds if timeout_seconds is not None else DEFAULT_CELL_TIMEOUT_S
+
+        async with _global_execution_lock(), self._exec_lock:
             exec_locals = self.locals.copy() if dry_run else self.locals
+
+            def _sync_eval() -> Any:
+                return eval(expr, exec_locals)  # noqa: S307
+
             try:
-                val = eval(expr, exec_locals)
+                try:
+                    val = await _run_sync_in_thread_with_timeout(_sync_eval, timeout)
+                except asyncio.CancelledError:
+                    raise
+                except TimeoutError:
+                    fetch_log = _drain_fetch_log(exec_locals)
+                    return KernelOutput(
+                        outputs=[
+                            self._output_factory.from_value(
+                                TimeoutError(f"Execution exceeded {timeout}s and was aborted")
+                            )
+                        ],
+                        fetch_log=fetch_log,
+                    )
                 fetch_log = _drain_fetch_log(exec_locals)
                 return KernelOutput(
                     outputs=[self._output_factory.from_value(val)],
