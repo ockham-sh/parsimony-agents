@@ -25,7 +25,14 @@ from parsimony_agents import (
     read_chart,
     serialize_chart,
 )
-from parsimony_agents.chart_io import CURATION_META_KEY, write_chart_bytes
+from parsimony_agents.chart_io import (
+    CHART_DATA_REF_KEY,
+    CURATION_META_KEY,
+    chart_data_refs,
+    inline_chart_data,
+    split_chart_data,
+    write_chart_bytes,
+)
 from parsimony_agents.execution.outputs import FigureObject
 from parsimony_agents.identity import ArtifactRef
 
@@ -215,3 +222,134 @@ def test_deserialize_chart_ignores_unknown_fields(
     assert chart.title == "X"
     assert chart.notebook_ref == _nb_ref()
     assert spec["mark"] == "bar"
+
+
+# ----------------------------------------------------------------------
+# Chart-data pool — split_chart_data / chart_data_refs / inline_chart_data
+# ----------------------------------------------------------------------
+
+
+def test_split_chart_data_extracts_inline_values() -> None:
+    """``data.values`` is lifted into the pool; the spec keeps a marker."""
+    spec = {"mark": "bar", "data": {"values": [{"x": 1}, {"x": 2}]}}
+    deinlined, pool = split_chart_data(spec)
+    assert "values" not in deinlined["data"]
+    sha = deinlined["data"][CHART_DATA_REF_KEY]
+    assert sha in pool
+    assert json.loads(pool[sha].decode()) == [{"x": 1}, {"x": 2}]
+    assert deinlined["mark"] == "bar"  # unrelated keys preserved verbatim
+
+
+def test_split_chart_data_extracts_named_datasets() -> None:
+    """Entries of the top-level ``datasets`` map are de-inlined."""
+    spec = {
+        "datasets": {"src": [{"a": 1}], "other": [{"b": 2}]},
+        "data": {"name": "src"},
+        "mark": "line",
+    }
+    deinlined, pool = split_chart_data(spec)
+    for name in ("src", "other"):
+        entry = deinlined["datasets"][name]
+        assert set(entry) == {CHART_DATA_REF_KEY}
+        assert entry[CHART_DATA_REF_KEY] in pool
+    assert deinlined["data"] == {"name": "src"}  # name reference untouched
+    assert len(pool) == 2
+
+
+def test_split_chart_data_handles_layered_specs() -> None:
+    """Per-layer ``data.values`` arrays are de-inlined at depth."""
+    spec = {
+        "layer": [
+            {"mark": "line", "data": {"values": [{"x": 1}]}},
+            {"mark": "point", "data": {"values": [{"x": 2}]}},
+        ]
+    }
+    deinlined, pool = split_chart_data(spec)
+    assert len(pool) == 2
+    for layer in deinlined["layer"]:
+        assert "values" not in layer["data"]
+        assert layer["data"][CHART_DATA_REF_KEY] in pool
+
+
+def test_split_chart_data_leaves_url_data_untouched() -> None:
+    """A ``data.url`` external reference is not pooled."""
+    spec = {"mark": "bar", "data": {"url": "https://example.com/d.csv"}}
+    deinlined, pool = split_chart_data(spec)
+    assert pool == {}
+    assert deinlined == spec
+
+
+def test_split_chart_data_dedups_identical_data() -> None:
+    """Two layers plotting identical data share one pool entry."""
+    rows = [{"x": 1}, {"x": 2}]
+    spec = {
+        "layer": [
+            {"mark": "line", "data": {"values": list(rows)}},
+            {"mark": "point", "data": {"values": list(rows)}},
+        ]
+    }
+    deinlined, pool = split_chart_data(spec)
+    assert len(pool) == 1
+    shas = {layer["data"][CHART_DATA_REF_KEY] for layer in deinlined["layer"]}
+    assert len(shas) == 1
+
+
+def test_split_chart_data_skips_usermeta() -> None:
+    """A ``data`` key inside ``usermeta`` is curation, never chart data."""
+    spec = {
+        "mark": "bar",
+        "data": {"values": [{"x": 1}]},
+        "usermeta": {"parsimony_agents": {"data": {"values": [{"not": "touched"}]}}},
+    }
+    deinlined, pool = split_chart_data(spec)
+    assert len(pool) == 1  # only the real data, not the usermeta lookalike
+    assert deinlined["usermeta"] == spec["usermeta"]
+
+
+def test_split_chart_data_is_pure() -> None:
+    """The input spec is not mutated."""
+    spec = {"data": {"values": [{"x": 1}]}}
+    before = json.dumps(spec, sort_keys=True)
+    split_chart_data(spec)
+    assert json.dumps(spec, sort_keys=True) == before
+
+
+def test_chart_data_refs_collects_every_marker() -> None:
+    spec = {
+        "datasets": {"a": [{"x": 1}]},
+        "layer": [{"data": {"values": [{"y": 2}]}}],
+    }
+    deinlined, pool = split_chart_data(spec)
+    assert chart_data_refs(deinlined) == set(pool)
+
+
+def test_inline_chart_data_round_trips() -> None:
+    """``inline_chart_data(split_chart_data(spec))`` reproduces the spec."""
+    spec = {
+        "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
+        "datasets": {"src": [{"a": 1}, {"a": 2}]},
+        "layer": [
+            {"mark": "line", "data": {"values": [{"x": 1, "y": 2}]}},
+            {"mark": "point", "data": {"name": "src"}},
+        ],
+        "data": {"values": [{"top": 1}]},
+    }
+    deinlined, pool = split_chart_data(spec)
+    assert inline_chart_data(deinlined, pool) == spec
+
+
+def test_inline_chart_data_missing_pool_entry_degrades() -> None:
+    """A marker with no pool entry is left in place, not crashed on."""
+    spec = {"data": {"values": [{"x": 1}]}}
+    deinlined, _pool = split_chart_data(spec)
+    restored = inline_chart_data(deinlined, {})  # empty pool
+    assert CHART_DATA_REF_KEY in restored["data"]
+    assert "values" not in restored["data"]
+
+
+def test_inline_chart_data_is_pure() -> None:
+    spec = {"data": {"values": [{"x": 1}]}}
+    deinlined, pool = split_chart_data(spec)
+    snapshot = json.dumps(deinlined, sort_keys=True)
+    inline_chart_data(deinlined, pool)
+    assert json.dumps(deinlined, sort_keys=True) == snapshot
