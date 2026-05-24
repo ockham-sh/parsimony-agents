@@ -2,7 +2,7 @@
 
 Welcome to parsimony-agents! This page helps you navigate the documentation based on your needs.
 
-**Last Updated:** 2025-04-12
+**Last Updated:** 2026-05-21
 
 ## Getting Started
 
@@ -106,16 +106,12 @@ Contributing code or maintaining the project?
 
 ```
 docs/
-├── index.md                    # This file — navigation hub
+├── INDEX.md                    # This file — navigation hub
 ├── ARCHITECTURE.md             # System design & technical deep-dive
 ├── API.md                      # Complete API reference
 ├── RUNBOOK.md                  # Deployment & operations
 ├── COMMANDS.md                 # Development commands
-├── CODEMAPS.md                 # Code structure & public API
-│
-├── api-reference.md            # [Legacy] Older API reference
-├── deployment.md               # [Legacy] Older deployment guide
-└── user-guide.md               # [Legacy] Older user guide
+└── CODEMAPS.md                 # Code structure & public API
 ```
 
 ## Navigation Tips

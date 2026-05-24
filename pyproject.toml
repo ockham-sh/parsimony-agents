@@ -3,7 +3,7 @@ name = "parsimony-agents"
 version = "0.1.0"
 description = "AI agent framework for data analysis — write and execute Python code to answer questions about data"
 authors = [{ name = "Ockham.sh", email = "team@ockham.sh" }]
-license = "LicenseRef-Proprietary"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
@@ -12,6 +12,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: Apache Software License",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Office/Business :: Financial",
 ]

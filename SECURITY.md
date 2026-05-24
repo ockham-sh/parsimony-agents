@@ -29,7 +29,9 @@ We will coordinate with you on disclosure timing. We follow responsible disclosu
 ## Scope
 
 This policy covers the open-source packages:
-- `parsimony`
+- `parsimony` (parsimony-core)
 - `parsimony-agents`
+- `parsimony-mcp`
+- `parsimony-connectors` (parsimony-*)
 
-For vulnerabilities in the hosted product (ockhamterminal.com), please also email security@ockham.sh.
+For vulnerabilities in the ockham terminal (the AGPLv3 agentic data-analysis product built on this library), please also email security@ockham.sh.

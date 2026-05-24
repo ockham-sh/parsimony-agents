@@ -150,7 +150,7 @@ See [API.md](API.md#environment-variables) for full list.
 
 ## See Also
 
-- [Documentation Index](index.md) — Navigation guide by user role
+- [Documentation Index](INDEX.md) — Navigation guide by user role
 - [API.md](API.md) — Complete API reference and configuration
 - [ARCHITECTURE.md](ARCHITECTURE.md#testing) — Test structure and patterns
 - [RUNBOOK.md](RUNBOOK.md) — Deployment and operations

@@ -65,10 +65,10 @@ export AZURE_API_KEY="..."
 # Data Sources
 export FRED_API_KEY="your-fred-key"
 export FMP_API_KEY="your-fmp-key"
-
-# Optional: LLM routing
-export LITELLM_PROXY_URL="http://localhost:4000"
 ```
+
+Models are reached through `litellm`, which reads the provider key directly from
+the environment — there is no Ockham-hosted proxy.
 
 ### Agent Configuration
 
@@ -145,18 +145,20 @@ async def main():
         connectors=discover.load_all().bind_env(),
     )
     
+    # stream_to_display drives the full agent run and returns AgentResult
+    result = await stream_to_display(agent, "Analyze GDP trends")
+    print(result.text)
+
+    # Or handle events manually via agent.run()
     async for event in agent.run("Analyze GDP trends"):
-        # Auto-format output
-        stream_to_display(event)
-        
-        # Or handle events manually
         match event.type:
             case "text_delta":
                 print(event.content, end="", flush=True)
-            case "tool_call":
-                print(f"\n[Calling: {event.tool_name}]")
+            case "tool_event":
+                if not event.completed:
+                    print(f"\n[Calling: {event.tool_name}]")
             case "error":
-                print(f"\nError: {event.error_message}")
+                print(f"\nError: {event.message}")
 
 asyncio.run(main())
 ```
@@ -179,8 +181,8 @@ async def main():
     await agent.ask("Calculate year-over-year growth rates")
     result = await agent.ask("Create a visualization of the growth rates")
     
-    # Result contains all previous data
-    print("Total artifacts:", len(result.artifacts))
+    # Continue conversation using context from previous result
+    print("Charts produced:", list(result.charts.keys()))
 
 asyncio.run(main())
 ```
@@ -235,7 +237,7 @@ async def analyze(query: str):
     result = await agent.ask(query)
     return {
         "text": result.text,
-        "datasets": {k: v.data.to_dict() for k, v in result.datasets.items()},
+        "datasets": list(result.datasets.keys()),
         "charts": list(result.charts.keys()),
         "ok": result.ok,
     }
@@ -289,7 +291,7 @@ async def main():
         "datasets_returned": len(result.datasets),
         "charts_returned": len(result.charts),
         "success": result.ok,
-        "execution_time": result.code["main"].execution_time if result.code else None,
+        "scripts_run": list(result.code.keys()) if result.code else [],
     }
     
     print(f"Metrics: {metrics}")
@@ -373,15 +375,15 @@ agent = Agent(
 **Solution:**
 
 ```python
-# Reset execution state between queries
-await agent.ask("First query")
-agent.variable_store.clear()  # Clear state
-await agent.ask("Second query")
-
-# Or use fresh agent instance
+# Use a fresh agent instance per query (simplest, most reliable)
 for query in queries:
     agent = Agent(model="claude-sonnet-4-6", ...)  # New instance
     result = await agent.ask(query)
+
+# Or reuse an instance but restart the kernel to clear executor state
+await agent.ask("First query")
+await agent.ask("restart the kernel")  # Agent calls restart_kernel tool
+await agent.ask("Second query")
 ```
 
 ### Issue: Slow LLM Responses
@@ -421,10 +423,9 @@ finally:
 ```python
 # Check the executed code
 if not result.ok:
-    print("Error:", result.error_message)
     # See what code was attempted
-    for name, script in result.code.items():
-        print(f"Code ({name}):\n{script.source}")
+    for path, script in result.code.items():
+        print(f"Code ({path}):\n{script.code}")
 
 # Use more specific instructions
 agent = Agent(
@@ -459,12 +460,13 @@ print("Provenance:", result.provenance)  # Should not be empty
 ```python
 from parsimony_agents import Agent
 from parsimony_agents.execution.executor import CodeExecutor
+from parsimony_agents.execution.factory import OutputFactory
 
 agent = Agent(
     model="claude-haiku-4-5-20251001",  # Faster model
     code_executor=CodeExecutor(
-        timeout_s=30,  # Shorter timeout
         cwd="/tmp/work",
+        output_factory=OutputFactory(local_dir="/tmp/work"),
     ),
 )
 ```
@@ -518,7 +520,7 @@ async def ask_cheapest(agent_class, query):
 
 ## See Also
 
-- [Documentation Index](index.md) — Navigation guide by user role
+- [Documentation Index](INDEX.md) — Navigation guide by user role
 - [API Reference](API.md) — Configuration parameters and API methods
 - [Architecture](ARCHITECTURE.md) — Design and data flow
 - [CODEMAPS](CODEMAPS.md) — Code structure and public API exports
