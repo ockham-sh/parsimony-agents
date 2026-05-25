@@ -16,17 +16,12 @@ on:
   workflow_dispatch:
 
 # Sibling repos are checked out side-by-side so the editable path sources in
-# pyproject's [tool.uv.sources] resolve. parsimony-mcp isn't a uv.sources
-# dependency of parsimony-agents today; it's checked out so the integration
-# job exercises the full ecosystem surface and is ready if a path source is
-# added later. See the "parsimony-mcp" note in the task report.
+# pyproject's [tool.uv.sources] resolve.
 env:
   KERNEL_REPO: ockham-sh/parsimony
   KERNEL_REF: main
   CONNECTORS_REPO: ockham-sh/parsimony-connectors
   CONNECTORS_REF: main
-  MCP_REPO: ockham-sh/parsimony-mcp
-  MCP_REF: main
 
 jobs:
   integration:
@@ -54,12 +49,6 @@ jobs:
           repository: ${{ env.CONNECTORS_REPO }}
           ref: ${{ env.CONNECTORS_REF }}
           path: parsimony-connectors
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ${{ env.MCP_REPO }}
-          ref: ${{ env.MCP_REF }}
-          path: parsimony-mcp
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
