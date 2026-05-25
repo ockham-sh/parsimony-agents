@@ -21,70 +21,81 @@ agent = Agent(
 ```python
 Agent(
     model: str | None = None,
+    api_key: str | None = None,
     model_config: dict | None = None,
     instructions: str | None = None,
-    connectors: ConnectorGroup | None = None,
-    code_executor: CodeExecutor | None = None,
+    connectors: Connectors | None = None,
+    code_executor: BaseCodeExecutor | None = None,
     output_factory: OutputFactory | None = None,
     guardrails: AgentGuardrails | None = None,
-    tools: list[Callable] | None = None,
-    max_retries: int = 3,
+    session_id: str | None = None,
+    file_store: FileStore | None = None,
+    read_artifact_fn: Callable | None = None,
+    list_artifacts_fn: Callable | None = None,
 )
 ```
 
 **Parameters:**
 - `model` — LLM model string (e.g., `"claude-sonnet-4-6"`, `"gpt-4o"`). Passed to LiteLLM.
+- `api_key` — LLM provider API key (alternative to setting via environment variable).
 - `model_config` — Advanced LLM configuration: `{"model": "...", "api_key": "...", ...}`
 - `instructions` — System prompt for the agent
-- `connectors` — Data sources available to the agent
+- `connectors` — Data sources available to the agent (a `parsimony.Connectors` instance)
 - `code_executor` — Python execution engine (default: new `CodeExecutor()`)
 - `output_factory` — Output type dispatcher (default: new `OutputFactory()`)
-- `guardrails` — Execution safety limits
-- `tools` — Additional tools beyond built-in ones
-- `max_retries` — Retry failed tool calls this many times
+- `guardrails` — Execution safety limits (`AgentGuardrails`)
+- `session_id` — Workspace session identifier for file materialization
+- `file_store` — Optional `FileStore` implementation for artifact persistence
+- `read_artifact_fn` — Optional callable for reading stored artifacts by id
+- `list_artifacts_fn` — Optional callable for listing stored artifacts
 
 #### Methods
 
-##### `ask(query: str, **kwargs) -> Coroutine[AgentResult]`
+##### `ask(message: str, *, ctx=None, **kwargs) -> Coroutine[AgentResult]`
 
 Simple ask-and-answer mode. Returns complete result.
 
 ```python
 result = await agent.ask("Show me Apple revenue growth over 5 years")
-print(result.text)           # str — natural language analysis
-print(result.datasets)       # dict[str, Dataset]
-print(result.charts)         # dict[str, Chart]
-print(result.code)           # dict[str, Script] — named scripts
-print(result.ok)             # bool — success indicator
-print(result.error_message)  # str | None — error details
+print(result.text)       # str — natural language analysis
+print(result.datasets)   # dict[str, Dataset]
+print(result.charts)     # dict[str, Chart]
+print(result.code)       # dict[str, Script] — named scripts
+print(result.ok)         # bool — success indicator
 ```
 
-**Returns:** `AgentResult` with text, datasets, charts, code, and error status.
+Pass `ctx=result.context` on a follow-up call to continue the same conversation:
 
-##### `run(query: str, **kwargs) -> AsyncIterator[Event]`
+```python
+result1 = await agent.ask("Fetch US unemployment data")
+result2 = await agent.ask("Plot a chart", ctx=result1.context)
+```
 
-Streaming mode. Yields events as they occur.
+**Returns:** `AgentResult` with text, datasets, charts, code, and success status.
+
+##### `run(user_message: str, *, ctx=None, tool_choice="auto", cancellation=None) -> AsyncGenerator`
+
+Streaming mode. Yields typed event objects as they occur.
 
 ```python
 async for event in agent.run("Analyze market trends"):
     match event.type:
         case "text_delta":
             print(event.content, end="", flush=True)
-        case "tool_call":
-            print(f"\n[Tool: {event.tool_name}]")
-        case "tool_result":
-            print(f"[Result: {event.content}]")
+        case "tool_event":
+            if event.completed:
+                print(f"\n[Tool done: {event.tool_name}]")
+            else:
+                print(f"\n[Calling: {event.tool_name}]")
         case "error":
             print(f"Error: {event.message}")
-        case "done":
-            print("\nDone.")
 ```
 
-**Yields:** Event objects with type, content, and metadata.
+**Yields:** Typed event objects — see [Events (Streaming)](#events-streaming) for the full list.
 
 ### `AgentResult`
 
-Structured response from `agent.ask()`.
+Structured response from `agent.ask()` or accumulated from `agent.run()`.
 
 ```python
 @dataclass
@@ -92,11 +103,10 @@ class AgentResult:
     text: str                          # Natural language analysis
     datasets: dict[str, Dataset]       # Returned data
     charts: dict[str, Chart]           # Returned visualizations
-    code: dict[str, Script]            # Executed code (name -> Script)
-    artifacts: list[Artifact]          # All artifacts produced
-    messages: list[Message]            # Full conversation history
-    ok: bool                           # Success indicator
-    error_message: str | None          # Error details if ok=False
+    code: dict[str, Script]            # Executed notebooks (path -> Script)
+    context: AgentContext | None       # Conversation state for follow-up calls
+    events: list[Any]                  # All events collected during the run
+    ok: bool                           # True if no unrecoverable error occurred
 ```
 
 **Example:**
@@ -106,17 +116,29 @@ result = await agent.ask("Calculate GDP per capita")
 
 # Access datasets
 gdp = result.datasets.get("gdp_per_capita")
-print(f"Type: {gdp.type}")
-print(f"Shape: {gdp.data.shape}")
-print(f"Provenance: {gdp.provenance}")
+if gdp:
+    print(f"Title: {gdp.title}")
+    print(f"Description: {gdp.description}")
 
 # Access charts
 for name, chart in result.charts.items():
-    print(f"Chart '{name}': {chart.spec}")
+    print(f"Chart '{name}': {chart.title}")
 
 # Access execution code
-for name, script in result.code.items():
-    print(f"Script '{name}':\n{script.source}")
+for path, script in result.code.items():
+    print(f"Script '{path}':\n{script.code}")
+
+# Continue conversation
+result2 = await agent.ask("Now show year-over-year growth", ctx=result.context)
+```
+
+**Accumulating manually from a stream:**
+
+```python
+result = AgentResult()
+async for event in agent.run("Question"):
+    result._collect(event)
+    # your custom per-event logic here
 ```
 
 ## Execution
@@ -148,24 +170,21 @@ CodeExecutor(
 
 #### Methods
 
-##### `execute(code: str, variables: dict) -> ExecutionResult`
+##### `execute(code: str, dry_run=False, timeout_seconds=None, producer_notebook_path=None, seen_live_names=None) -> KernelOutput` (async)
 
-Execute Python code with given variables.
+Execute Python code in the persistent kernel namespace.
 
 ```python
-result = executor.execute(
-    code="x = df.sum()",
-    variables={"df": my_dataframe}
-)
-
-print(result.outputs)      # dict of returned variables
-print(result.stdout)       # Captured print output
-print(result.error)        # Exception if execution failed
+output = await executor.execute("x = 1 + 1")
+print(output.outputs)    # list of KernelOutputType (PrimitiveObject, DataFrameObject, etc.)
+print(output.fetch_log)  # list of FetchLogEntry
 ```
+
+`dry_run=True` copies the namespace before execution; mutations do not persist.
 
 ### `OutputFactory`
 
-Converts execution outputs to typed Artifacts.
+Converts execution outputs to typed artifact objects.
 
 ```python
 from parsimony_agents.execution.factory import OutputFactory
@@ -173,160 +192,191 @@ from parsimony_agents.execution.factory import OutputFactory
 factory = OutputFactory(local_dir="/tmp/outputs")
 ```
 
-#### Methods
-
-##### `create(name: str, value: Any) -> Artifact | None`
-
-Convert a Python value to an Artifact.
-
-```python
-import pandas as pd
-import altair as alt
-
-df = pd.DataFrame({"x": [1, 2, 3], "y": [4, 5, 6]})
-chart = alt.Chart(df).mark_point().encode(x="x", y="y")
-
-dataset_artifact = factory.create("my_data", df)      # Dataset
-chart_artifact = factory.create("my_chart", chart)    # Chart
-```
-
 ## Artifacts
 
 ### `Dataset`
 
-Typed data artifact with metadata and provenance.
+Curated data artifact with identity, curation, and lineage.
 
 ```python
-@dataclass
-class Dataset(Artifact):
-    data: pd.DataFrame
-    metadata: DatasetMetadata
-    provenance: list[FetchRecord]
+class Dataset(_ArtifactBase):
+    type: Literal["dataset"] = "dataset"
+    logical_id: str
+    content_sha: str
+    title: str
+    description: str
+    tags: list[str]
+    notes: list[str]
+    live_name: str | None
+    notebook_refs: list[ArtifactRef]
+    source_refs: list[ArtifactRef]
+    variable_name: str
 ```
 
-**Properties:**
-- `name` — Dataset identifier
-- `type` — Always `"dataset"`
-- `data` — Pandas DataFrame
-- `metadata.description` — Human-readable description
-- `metadata.columns` — Column information
-- `provenance` — List of data fetches with source, parameters, timestamp
+The DataFrame payload is held in a private `_payload: DataFrameObject | None` attribute, not exposed as a public field. Use `dataset.payload` to access it.
 
 **Example:**
 
 ```python
 dataset = result.datasets["unemployment"]
-print(f"Source: {dataset.provenance[0].source}")
-print(f"Fetched: {dataset.provenance[0].timestamp}")
-print(f"Parameters: {dataset.provenance[0].parameters}")
+print(f"Title: {dataset.title}")
+print(f"Description: {dataset.description}")
+print(f"Tags: {dataset.tags}")
 ```
 
 ### `Chart`
 
-Visualization artifact with Altair/Vega-Lite specification.
+Visualization artifact with curation and lineage.
 
 ```python
-@dataclass
-class Chart(Artifact):
-    spec: dict  # Vega-Lite JSON spec
-    dataset_ref: str | None  # Reference to source dataset
+class Chart(_ArtifactBase):
+    type: Literal["chart"] = "chart"
+    logical_id: str
+    content_sha: str
+    title: str
+    description: str
+    tags: list[str]
+    notes: list[str]
+    live_name: str | None
+    notebook_ref: ArtifactRef | None
+    source_dataset_refs: list[ArtifactRef]
+    source_refs: list[ArtifactRef]
+    variable_name: str
 ```
 
-**Properties:**
-- `name` — Chart identifier
-- `type` — Always `"chart"`
-- `spec` — Vega-Lite specification (dict)
+The Altair/Vega-Lite payload is held in `_payload: FigureObject | None`. Use `chart.payload` to access it.
 
 **Example:**
 
 ```python
 chart = result.charts["revenue_trend"]
-print(chart.spec)  # Raw Vega-Lite spec
-# Use vl-convert to render: vega_to_html(chart.spec)
+print(f"Title: {chart.title}")
+```
+
+### `Report`
+
+Markdown report artifact.
+
+```python
+class Report(_ArtifactBase):
+    type: Literal["report"] = "report"
+    logical_id: str
+    content_sha: str
+    title: str
+    subtitle: str
+    description: str
+    tags: list[str]
+    notes: list[str]
+    live_name: str | None
+    markdown: str
+    formats: list[str]
+    live_name_pins: dict[str, ArtifactRef]
 ```
 
 ## Tools
 
 ### Built-in Tools
 
-Agents have these tools automatically available:
+Agents have these tools automatically available (the LLM calls them; you do not invoke them directly):
 
-#### `code_set`
+#### Notebook / code tools
 
-Write a new code notebook.
+| Tool | Purpose |
+|------|---------|
+| `return_notebook` | Write notebook cells to disk (creates or replaces) |
+| `edit_notebook` | Edit individual cells within an existing notebook |
+| `dry_execute_code` | Execute code in a throwaway sandbox for inspection |
 
-```python
-# Called automatically by agent, but signature is:
-# code_set(notebook_name: str, code: str) -> ExecutionResult
-```
+#### File tools
 
-#### `code_edit`
+| Tool | Purpose |
+|------|---------|
+| `write_file` | Write a new file to the working directory |
+| `edit_file` | Apply a patch to an existing file |
+| `read_file` | Read a file from the working directory |
+| `list_files` | List files in the working directory |
 
-Modify an existing notebook cell.
+#### Data tools
 
-```python
-# code_edit(notebook_name: str, cell_index: int, new_code: str)
-```
+| Tool | Purpose |
+|------|---------|
+| `read_data` | Fetch data from a bound connector |
+| `refresh` | Re-fetch connector data (e.g. for live feeds) |
+| `restart_kernel` | Clear the executor namespace |
 
-#### `return_dataset`
+#### Return / artifact tools
 
-Finalize and return a dataset.
+| Tool | Purpose |
+|------|---------|
+| `return_dataset` | Finalize and publish a dataset artifact |
+| `return_chart` | Finalize and publish a chart artifact |
+| `return_report` | Finalize and publish a report artifact |
+| `edit_report` | Edit an in-progress report artifact |
 
-```python
-# return_dataset(name: str, description: str = "")
-```
+#### Utility tools
 
-#### `return_chart`
-
-Finalize and return a chart.
-
-```python
-# return_chart(name: str, description: str = "")
-```
-
-#### `get_context`
-
-Inspect current execution state.
-
-```python
-# get_context() -> dict
-# Returns: {
-#   "variables": list of variable names and types,
-#   "notebooks": list of notebook names,
-#   "artifacts": list of artifact names and types
-# }
-```
-
-#### `output_search` (if RAG enabled)
-
-Semantic search over previous outputs.
-
-```python
-# output_search(query: str, limit: int = 5) -> list[OutputMatch]
-```
+| Tool | Purpose |
+|------|---------|
+| `output_read` | Read a previously returned artifact by name |
+| `output_search` | Semantic search over previous outputs (requires RAG extra) |
 
 ## Display & Streaming
 
 ### `stream_to_display`
 
-Format streaming events for terminal output.
+Async helper that runs a full agent turn and formats events for terminal output.
 
 ```python
-from parsimony_agents import stream_to_display
+from parsimony_agents import stream_to_display, AgentResult
 
-async for event in agent.run("Query"):
-    stream_to_display(event)
+async def main():
+    result = await stream_to_display(agent, "What is the current unemployment rate?")
+    # result is an AgentResult
+    print(result.text)
+
+# Pass ctx for multi-turn conversations
+result2 = await stream_to_display(agent, "Show a chart", ctx=result.context)
+```
+
+**Signature:**
+
+```python
+async def stream_to_display(
+    agent,
+    message: str,
+    *,
+    ctx=None,
+    console=None,
+    show_code: bool = True,
+    show_data: bool = True,
+    max_table_rows: int = 5,
+    max_code_lines: int = 30,
+) -> AgentResult
 ```
 
 ### `display_result`
 
-Pretty-print an AgentResult.
+Pretty-print an already-collected `AgentResult`.
 
 ```python
 from parsimony_agents import display_result
 
 result = await agent.ask("Query")
 display_result(result)
+```
+
+**Signature:**
+
+```python
+def display_result(
+    result: AgentResult,
+    *,
+    console=None,
+    show_code: bool = True,
+    show_data: bool = True,
+    max_table_rows: int = 5,
+    max_code_lines: int = 30,
+) -> None
 ```
 
 ## Configuration
@@ -350,54 +400,75 @@ agent = Agent(guardrails=guardrails, ...)
 
 ## Events (Streaming)
 
-Event types yielded by `agent.run()`:
+Typed event objects yielded by `agent.run()`. Each event has a `type` attribute you can match on:
+
+| Type | Class | Key fields |
+|------|-------|------------|
+| `text_delta` | `TextDelta` | `content: str`, `message_id: str`, `delta: str` |
+| `reasoning_delta` | `ReasoningDelta` | `content: str`, `message_id: str`, `title: str`, `delta: str` |
+| `tool_event` | `ToolEvent` | `tool_name: str`, `tool_call_id: str`, `tool_type: str`, `completed: bool`, `result: Any`, `ui_message: str`, `ui_message_completed: bool` |
+| `state_snapshot` | `StateSnapshot` | `context: AgentContext` |
+| `error` | `AgentError` | `message: str`, `recoverable: bool`, `error_type: str` |
+| `run_cancelled` | `RunCancelled` | `message: str`, `reason: str` |
+| `llm_call_completed` | `LLMCallCompleted` | _(no payload fields)_ |
+| `tool_result_observed` | `ToolResultObserved` | _(no payload fields)_ |
+
+**Example — accumulate text and track tool calls:**
 
 ```python
-@dataclass
-class Event:
-    type: str          # Event type
-    content: Any       # Event data
-    timestamp: float   # Unix timestamp
-    tool_name: str | None      # Tool name (if tool_* event)
-    error_message: str | None  # Error details (if error event)
+messages: dict[str, str] = {}
+async for event in agent.run("question"):
+    if event.type == "text_delta":
+        messages[event.message_id] = messages.get(event.message_id, "") + event.content
+    elif event.type == "tool_event" and not event.completed:
+        print(f"Calling tool: {event.tool_name}")
+    elif event.type == "error":
+        print(f"Error: {event.message} (recoverable={event.recoverable})")
 ```
 
-**Event types:**
+**Importing event types:**
 
-| Type | Content | Meaning |
-|------|---------|---------|
-| `text_delta` | str | Incremental text response |
-| `tool_call` | ToolCall | Agent calling a tool |
-| `tool_result` | str | Tool returned a result |
-| `error` | str | Execution error |
-| `done` | AgentResult | Agent finished |
+```python
+from parsimony_agents.agent.events import (
+    TextDelta,
+    ReasoningDelta,
+    ToolEvent,
+    StateSnapshot,
+    AgentError,
+    RunCancelled,
+    LLMCallCompleted,
+    ToolResultObserved,
+)
+```
 
 ## Notebooks
 
 ### `Script`
 
-Immutable record of executed code.
+Workspace notebook file: path, code body, and (after execution) kernel output.
 
 ```python
-@dataclass
-class Script:
-    name: str                    # Notebook name
-    source: str                  # Full source code
-    language: str                # "python"
-    cells: list[Cell]            # Individual cells with outputs
-    execution_time: float        # Total execution time
+class Script(BaseModel):
+    type: Literal["script"] = "script"
+    path: str         # Workspace path, e.g. "notebooks/main.py"
+    code: str         # Full Python source
+    output: KernelOutput
+    data_objects: list[FetchLogEntry]
 ```
 
 ### `ScriptPreview`
 
-Lightweight reference to a script.
+Lightweight UI-oriented projection of a `Script`.
 
 ```python
-@dataclass
-class ScriptPreview:
-    name: str
-    language: str
-    cell_count: int
+class ScriptPreview(BaseModel):
+    type: Literal["script_preview"] = "script_preview"
+    path: str
+    code: str
+    error_message: str | None
+    data_objects: list[FetchLogEntry]
+    output: KernelOutput | None
+    steps: list[ScriptStepPreview]   # computed from code structure
 ```
 
 ## Environment Variables
@@ -409,13 +480,13 @@ Set these to configure agents:
 | `ANTHROPIC_API_KEY` | Anthropic Claude models |
 | `OPENAI_API_KEY` | OpenAI GPT models |
 | `GEMINI_API_KEY` | Google Gemini models |
+| `AZURE_API_KEY` | Azure OpenAI models |
 | `FRED_API_KEY` | FRED data source |
 | `FMP_API_KEY` | FMP financial data |
-| `LITELLM_PROXY_URL` | LLM routing proxy |
 
 ## See Also
 
-- [Documentation Index](index.md) — Navigation guide by user role
+- [Documentation Index](INDEX.md) — Navigation guide by user role
 - [Architecture](ARCHITECTURE.md) — System design, data flow, and design patterns
 - [RUNBOOK](RUNBOOK.md) — Deployment, configuration, monitoring, and troubleshooting
 - [CODEMAPS](CODEMAPS.md) — Code structure and public API exports

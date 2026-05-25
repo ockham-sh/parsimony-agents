@@ -18,8 +18,7 @@ The agent loop connects them: it serializes the conversation state into an LLM-r
 
 ## Core Components
 
-### 1. Agent (`
-`)
+### 1. Agent (`parsimony_agents/agent/agent.py`)
 
 The main orchestrator that manages the LLM loop, tool invocation, and execution state.
 
@@ -57,12 +56,12 @@ CodeExecutor(
 
 ### 3. Files, kernel, and `Script` (no `VariableStore`)
 
-- **Workspace files** are the artifact for notebook code. `code_set` / `code_edit` update on-disk Jupytext-style files; use `execute`: true on those tools or call `run_notebook` (or `dry_execute_code` where appropriate) to populate the kernel.
+- **Workspace files** are the artifact for notebook code. `return_notebook` / `edit_notebook` update on-disk Jupytext-style files; use `execute`: true on those tools or call `dry_execute_code` where appropriate to populate the kernel.
 - The **CodeExecutor** namespace is **ephemeral** (cleared on `clear_namespace` / `restart_kernel`). `return_dataset` and `return_chart` resolve the Python value with `code_executor.get(name)`; they do not read a parallel in-memory store.
 
 ### 4. Notebooks (`parsimony_agents/notebook.py`)
 
-- **`Script` (`parsimony_agents/notebook.py`)** — The serialization shape for a file path, code body, and (after a run) last `KernelOutput` + fetch log for the notebook viewer. Execution is not implicit unless the agent uses `code_set` / `code_edit` with `execute` or calls `run_notebook`.
+- **`Script` (`parsimony_agents/notebook.py`)** — The serialization shape for a file path, code body, and (after a run) last `KernelOutput` + fetch log for the notebook viewer. Execution is not implicit unless the agent uses `return_notebook` / `edit_notebook` with `execute` or calls `dry_execute_code`.
 
 ### 5. Artifacts (`parsimony_agents/artifacts/`)
 
@@ -104,8 +103,8 @@ LLM Prompt + Tool Definitions
 LLM generates Tool Calls
     ↓
 Tool Dispatch
-    ├─ code_set / code_edit → write notebook files; optional ``execute`` runs kernel in the same call
-    ├─ run_notebook → CodeExecutor (kernel) + file read from disk
+    ├─ return_notebook / edit_notebook → write notebook files; optional ``execute`` runs kernel in the same call
+    ├─ dry_execute_code → CodeExecutor (kernel, dry run) + file read from disk
     ├─ return_dataset / return_chart → `code_executor.get` + emit Dataset / Chart
     ↓
 Artifact streaming / `.ockham` snapshots (file-backed in product)
@@ -193,16 +192,11 @@ class MyDataConnector(Connector):
 
 ### Custom Tools
 
-Add application-specific tools via `Agent.tools` parameter:
+Custom tools are registered as tagged connector bundles or via the connector-to-tool bridge.
+The built-in tool set covers notebook/code, file, data, return/artifact, and utility operations.
+See [CODEMAPS.md](CODEMAPS.md#built-in-tools) for the full built-in list.
 
-```python
-@tool
-def my_tool(arg: str) -> str:
-    """Tool description for LLM"""
-    return f"Result: {arg}"
-
-agent = Agent(tools=[my_tool], ...)
-```
+<!-- TODO: document the public API for registering application-specific tools once stabilized -->
 
 ### Custom Output Types
 
@@ -270,7 +264,6 @@ agent = Agent(
     
     # Behavior
     instructions="Custom system prompt...",
-    tools=[...],
 )
 ```
 
@@ -460,14 +453,22 @@ Built-in tools are registered in `Agent.__init__()` as `ToolMethod` descriptors 
 
 ```
 Agent.system_tools
-  ├── code_set         (tool_type="code")
-  ├── code_edit        (tool_type="code")
+  ├── return_notebook  (tool_type="code")
+  ├── edit_notebook    (tool_type="code")
   ├── dry_execute_code (tool_type="code")
+  ├── write_file       (tool_type="code")
+  ├── edit_file        (tool_type="code")
+  ├── read_file        (tool_type="utility")
+  ├── read_data        (tool_type="utility")
+  ├── list_files       (tool_type="utility")
+  ├── restart_kernel   (tool_type="utility")
   ├── return_dataset   (tool_type="return")
   ├── return_chart     (tool_type="return")
+  ├── return_report    (tool_type="return")
+  ├── edit_report      (tool_type="return")
+  ├── refresh          (tool_type="utility")
   ├── output_read      (tool_type="utility")
-  ├── output_search    (tool_type="utility")
-  └── get_context      (tool_type="system")
+  └── output_search    (tool_type="utility")
 ```
 
 ### Parallel execution
@@ -491,7 +492,7 @@ results = await asyncio.gather(
 ```
 
 This means two `utility` tools can run at the same time (when the batch is
-utility-only). However, `code` tools are serialized by the `threading.Lock`
+utility-only). However, `code` tools are serialized by the `asyncio.Lock`
 inside `CodeExecutor` — only one code execution runs at a time, even if two
 `code` tools are dispatched in the same batch.
 
@@ -510,7 +511,7 @@ graph TD
     C["Serial if return else gather"]:::dispatch
     D["utility tool 1\noutput_read / output_search"]:::parallel
     E["utility tool 2\n(concurrent)"]:::parallel
-    F["code tool\ncode_set / code_edit"]:::serial
+    F["code tool\nreturn_notebook / edit_notebook"]:::serial
     G["threading.Lock\nserializes code execution"]:::serial
     H["code tool 2\nwaits at lock"]:::serial
     I["yield ToolEvent(completed=True)\nper tool"]:::result
@@ -568,9 +569,9 @@ CodeExecutor.locals = {
 }
 ```
 
-### Threading lock
+### Async lock
 
-A single `threading.Lock` guards all reads and writes to `self.locals`. This prevents concurrent corruption when the agent dispatches multiple code tools in parallel (the second waits at the lock while the first runs).
+A single `asyncio.Lock` guards all reads and writes to `self.locals`. This prevents concurrent corruption when the agent dispatches multiple code tools in parallel (the second waits at the lock while the first runs).
 
 ### Dry run isolation
 
@@ -714,8 +715,8 @@ async for event in agent.run("question"):
 
 ```
 User message → Agent LLM
-  → LLM writes Altair code into a notebook file (`code_set` / `code_edit`)
-  → LLM runs `run_notebook` to execute the file in the kernel
+  → LLM writes Altair code into a notebook file (`return_notebook` / `edit_notebook`)
+  → LLM runs `dry_execute_code` or uses `execute: true` on the notebook tool to run the file in the kernel
   → Altair chart object produced in sandbox
   → display(chart) called in user code, or chart returned from exec
   → OutputFactory._from_altair(chart):
@@ -743,7 +744,7 @@ graph TD
     classDef output fill:#50C878,stroke:#2E7D50,color:#fff
     classDef error fill:#E05252,stroke:#B03030,color:#fff
 
-    A["LLM: code_set tool\nAltair chart code written"]:::llm
+    A["LLM: return_notebook tool\nAltair chart code written"]:::llm
     B["Sandbox executes cell\nalt.Chart(...) produced"]:::sandbox
     C["display(chart) or\nprint(chart)"]:::sandbox
     D["OutputFactory._from_altair(chart)"]:::factory
@@ -875,7 +876,7 @@ The package declares `requires-python = ">=3.11,<3.13"`. Python 3.13 is not supp
 
 ## See Also
 
-- [Documentation Index](index.md) — Navigation guide by user role
+- [Documentation Index](INDEX.md) — Navigation guide by user role
 - [API Reference](API.md) — Complete method signatures and parameter details
 - [RUNBOOK](RUNBOOK.md) — Deployment, monitoring, and performance tuning
 - [CODEMAPS](CODEMAPS.md) — Code structure and public API exports

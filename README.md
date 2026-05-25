@@ -124,14 +124,22 @@ Agents organize code into notebooks (editable, re-executable cells) and produce 
 
 | Tool | Description |
 |------|-------------|
-| `code_set` | Write a new code notebook (`execute` optional: run in same call) |
-| `code_edit` | Modify an existing notebook (`execute` optional: run in same call) |
-| `dry_execute_code` | Preview code output without committing |
+| `return_notebook` | Write notebook cells to disk |
+| `edit_notebook` | Edit individual cells within an existing notebook |
+| `dry_execute_code` | Preview code output without committing to state |
+| `write_file` | Write a file to the working directory |
+| `edit_file` | Apply a patch to an existing file |
+| `read_file` | Read a file from the working directory |
+| `read_data` | Fetch data from a bound connector |
+| `list_files` | List files in the working directory |
+| `restart_kernel` | Clear the executor namespace |
 | `return_dataset` | Finalize a dataset as a deliverable |
 | `return_chart` | Finalize a chart as a deliverable |
-| `output_read` | Read a specific execution output |
-| `output_search` | Search across all outputs |
-| `get_context` | Inspect current variables and notebooks |
+| `return_report` | Finalize a report document as a deliverable |
+| `edit_report` | Edit an in-progress report |
+| `refresh` | Re-fetch connector data |
+| `output_read` | Read a previously returned artifact |
+| `output_search` | Semantic search across outputs (requires `[rag]` extra) |
 
 ## Architecture
 
@@ -141,10 +149,9 @@ parsimony (connectors, catalog, Result model)
 parsimony-agents (this package)
      |
      +-- Agent                  — LLM loop, tool orchestration
-     +-- CodeExecutor           — in-process Python execution
-     +-- CodeExecutor — ephemeral kernel; workspace files are the notebook source of truth
+     +-- CodeExecutor           — in-process Python execution; workspace files are the notebook source of truth
      +-- Notebooks              — editable, re-executable code cells
-     +-- Artifacts              — typed deliverables (datasets, charts)
+     +-- Artifacts              — typed deliverables (datasets, charts, reports)
      +-- OutputFactory          — value -> typed output dispatch
      +-- RAG (optional)         — semantic + keyword search over outputs
 ```

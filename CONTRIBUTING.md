@@ -54,8 +54,8 @@ mypy parsimony_agents/
 
 ## Repository Structure
 
-This repository is a read-only mirror of `packages/parsimony-agents/` in our development monorepo. Your PR will be reviewed here and synced upstream.
+This is the canonical source repository for `parsimony-agents`. Development happens here; PRs are reviewed and merged directly into this repo.
 
 ## Code of Conduct
 
-Please read our [Code of Conduct](../../CODE_OF_CONDUCT.md). We are committed to providing a welcoming and inclusive experience for everyone.
+Please read our [Code of Conduct](CODE_OF_CONDUCT.md). We are committed to providing a welcoming and inclusive experience for everyone.
