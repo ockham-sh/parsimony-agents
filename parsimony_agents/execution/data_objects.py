@@ -201,7 +201,7 @@ def _write_curation_sidecar(root: Path, logical_id: str, provenance: Any) -> Non
         "source_description": str(safe.get("source_description") or ""),
         "params": safe.get("params") or {},
         "fetched_at": fetched_at,
-        "properties": safe.get("properties") or {},
+        "properties": {},
         "created_at": created_at,
         "updated_at": now,
     }

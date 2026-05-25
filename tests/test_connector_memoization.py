@@ -8,13 +8,11 @@ and logs stay truthful.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import pandas as pd
 
 from parsimony.connector import Connectors, connector
 from parsimony.result import Result
-from pydantic import BaseModel
 from parsimony_agents.execution.connector_cache import (
     ConnectorCache,
     MemoizingConnectorBundle,
@@ -24,17 +22,13 @@ from parsimony_agents.execution.connector_cache import (
 _CALL_COUNT = {"n": 0}
 
 
-class _Params(BaseModel):
-    series_id: str
-
-
 @connector(
     name="test_fetch",
     description="test connector",
 )
-async def _test_fetch(params: _Params) -> pd.DataFrame:
+async def _test_fetch(series_id: str) -> pd.DataFrame:
     _CALL_COUNT["n"] += 1
-    return pd.DataFrame({"v": [_CALL_COUNT["n"]], "id": [params.series_id]})
+    return pd.DataFrame({"v": [_CALL_COUNT["n"]], "id": [series_id]})
 
 
 def _reset_calls() -> None:

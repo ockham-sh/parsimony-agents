@@ -51,22 +51,21 @@ def test_fetch_log_entry_roundtrip() -> None:
             {"name": "value", "dtype": "numeric", "role": "data"},
         ],
         "provenance": {
-            "source": "fred",
+            "source": "fred_fetch",
             "source_description": "St. Louis Fed FRED",
             "params": {"series_id": "GDPC1"},
-            "properties": {"series_url": "https://example.com/GDPC1"},
         },
         "head": {"schema": {}, "data": []},
         "tail": None,
     }
     e = FetchLogEntry.model_validate(raw)
-    assert e.source == "fred"
+    assert e.source == "fred_fetch"
     assert e.row_count == 2
     dumped = e.model_dump(mode="json")
     e2 = FetchLogEntry.model_validate(dumped)
     assert e2.source == e.source
     assert e2.provenance.source_description == "St. Louis Fed FRED"
-    assert e2.provenance.properties == {"series_url": "https://example.com/GDPC1"}
+    assert e2.provenance.params == {"series_id": "GDPC1"}
 
 
 @pytest.mark.asyncio

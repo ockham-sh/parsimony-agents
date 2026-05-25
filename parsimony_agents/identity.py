@@ -20,7 +20,7 @@ snapshots is the version history.
 | dataset     | hash of inputs (notebook_refs, var_name, sources)               |
 | chart       | hash of inputs (notebook_ref, var_name, source_datasets)        |
 | report      | hash of inputs (embedded_refs, title)                           |
-| data_object | hash of provenance minus ``fetched_at``                         |
+| data_object | hash of provenance minus ``fetched_at`` and ``properties`` |
 
 Notebook identity follows git's model: ``logical_id`` IS the
 working-copy basename, so renaming a notebook starts a fresh
@@ -285,10 +285,10 @@ def data_object_logical_id(provenance: Any) -> str:
     """Hash the canonical provenance of a data_object, excluding ``fetched_at``.
 
     Same source + same params → same logical_id, regardless of when the
-    fetch occurred or what bytes came back. Refreshes propagate on the
-    content axis only.
+    fetch occurred or what bytes came back. ``properties`` is excluded —
+    provider facts belong in result data columns, not provenance identity.
     """
-    canonical = provenance.model_dump(mode="json", exclude={"fetched_at"})
+    canonical = provenance.model_dump(mode="json", exclude={"fetched_at", "properties"})
     return _hash_canonical({"data_object": canonical})
 
 

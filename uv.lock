@@ -1354,7 +1354,6 @@ dependencies = [
     { name = "platformdirs" },
     { name = "pyarrow" },
     { name = "pydantic" },
-    { name = "tenacity" },
 ]
 
 [package.metadata]
@@ -1383,14 +1382,13 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.15.10" },
     { name = "s3fs", marker = "extra == 's3'", specifier = ">=2024.0" },
     { name = "sentence-transformers", marker = "extra == 'standard'", specifier = ">=3.0.0" },
-    { name = "tenacity", specifier = ">=9.0.0,<10" },
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.31" },
 ]
 provides-extras = ["standard", "standard-onnx", "litellm", "s3", "all", "dev", "docs"]
 
 [[package]]
 name = "parsimony-fmp"
-version = "0.5.0"
+version = "0.7.0"
 source = { editable = "../parsimony-connectors/packages/fmp" }
 dependencies = [
     { name = "pandas" },
@@ -1414,7 +1412,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "parsimony-fred"
-version = "0.5.0"
+version = "0.7.0"
 source = { editable = "../parsimony-connectors/packages/fred" }
 dependencies = [
     { name = "pandas" },

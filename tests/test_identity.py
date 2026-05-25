@@ -194,6 +194,12 @@ def test_data_object_logical_id_distinguishes_params() -> None:
     assert data_object_logical_id(a) != data_object_logical_id(b)
 
 
+def test_data_object_logical_id_ignores_properties() -> None:
+    a = _FakeProvenance({"source": "fred", "params": {"id": "GDP"}, "properties": {"series_url": "a"}})
+    b = _FakeProvenance({"source": "fred", "params": {"id": "GDP"}, "properties": {"series_url": "b"}})
+    assert data_object_logical_id(a) == data_object_logical_id(b)
+
+
 # ---------------------------------------------------------------------------
 # dataset_logical_id
 # ---------------------------------------------------------------------------
