@@ -16,9 +16,10 @@ without needing custom serializers per field.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any
 
 from pydantic import Field
 from pydantic.dataclasses import dataclass as pydantic_dataclass

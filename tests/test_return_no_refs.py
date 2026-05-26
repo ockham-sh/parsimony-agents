@@ -7,7 +7,6 @@ Brief §5: the agent never types a ref. ``return_dataset`` /
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -158,6 +157,7 @@ async def test_return_report_pins_embedded_live_names(tmp_path: Path) -> None:
     """Body URIs name embeds by live_name; return_report resolves each against
     curation and freezes the pin map into the snapshot bytes."""
     import json as _json
+
     from parsimony_agents.identity import content_sha
 
     ex, _ = _bare_executor(tmp_path)

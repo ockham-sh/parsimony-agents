@@ -18,8 +18,6 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from parsimony_agents.artifacts import Chart, Dataset, Report
@@ -39,7 +37,6 @@ from parsimony_agents.identity import (
     report_logical_id,
 )
 from parsimony_agents.refresh import refresh_artifact
-
 
 # ---------------------------------------------------------------------------
 # Stub executor

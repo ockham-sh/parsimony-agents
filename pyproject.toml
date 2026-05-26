@@ -60,6 +60,9 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
+[tool.ruff.lint.per-file-ignores]
+"parsimony_agents/agent/prompts.py" = ["E501"]
+
 [tool.mypy]
 python_version = "3.11"
 warn_return_any = true
@@ -84,4 +87,5 @@ build-backend = "hatchling.build"
 dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=0.25.0",
+    "ruff>=0.11.0",
 ]

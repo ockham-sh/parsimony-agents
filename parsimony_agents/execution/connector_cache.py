@@ -29,8 +29,8 @@ __all__ = ["ConnectorCache", "MemoizingConnectorBundle"]
 
 import inspect
 import json
-from collections.abc import Mapping
-from typing import Any, Callable
+from collections.abc import Callable, Mapping
+from typing import Any
 
 from parsimony.connector import Connector, Connectors
 from parsimony.result import Result

@@ -9,7 +9,7 @@ the loop through ``WorkspaceRunHooks`` — the same path ``Agent.run`` uses.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +19,6 @@ from parsimony_agents.agent.events import StateSnapshot, UserInputRequested
 from parsimony_agents.agent.failure import SuspensionExpired, SuspensionTokenMismatch
 from parsimony_agents.agent.failure.suspension import compute_suspension_token
 from parsimony_agents.agent.state import SuspensionRecord
-
 
 # ---------------------------------------------------------------------------
 # Scripted LLM (monkeypatches litellm.acompletion / stream_chunk_builder)
@@ -108,7 +107,7 @@ def _make_record(agent: Agent, **overrides) -> SuspensionRecord:
         "suspension_token": compute_suspension_token(
             run_id=run_id, session_id=agent.session_id, secret=agent.suspension_secret
         ),
-        "started_at": datetime.now(timezone.utc),
+        "started_at": datetime.now(UTC),
         "pending_question": "Which dataset — A or B?",
         "messages": [],
     }
@@ -181,7 +180,7 @@ async def test_resume_rejects_forged_token() -> None:
 async def test_resume_rejects_stale_suspension() -> None:
     agent = Agent(model="test-model")
     record = _make_record(agent)
-    record.suspended_at = datetime.now(timezone.utc) - timedelta(hours=48)
+    record.suspended_at = datetime.now(UTC) - timedelta(hours=48)
     with pytest.raises(SuspensionExpired):
         async for _ in agent.resume(record, "my reply", max_suspension_age_s=3600.0):
             pass

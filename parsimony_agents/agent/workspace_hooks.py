@@ -21,7 +21,8 @@ import asyncio
 import json
 import logging
 import time
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 from uuid import uuid4
 
 from opentelemetry import trace
@@ -37,29 +38,29 @@ from parsimony_agents.agent.events import (
     LLMCallCompleted as LLMCallCompletedEvent,
 )
 from parsimony_agents.agent.events import (
-    ToolResultObserved as ToolResultObservedEvent,
-)
-from parsimony_agents.agent.events import (
     ReasoningDelta as ReasoningDeltaEvent,
 )
 from parsimony_agents.agent.events import (
     TextDelta as TextDeltaEvent,
 )
-from parsimony_agents.agent.models import AgentContext, AgentMessage
+from parsimony_agents.agent.events import (
+    ToolResultObserved as ToolResultObservedEvent,
+)
 from parsimony_agents.agent.helpers import TurnState
+from parsimony_agents.agent.models import AgentContext, AgentMessage
 from parsimony_agents.agent.outputs import (
     SystemToolMessage,
     UtilityToolOutput,
 )
 from parsimony_agents.agent.tracing import trace_tool_execution
 from parsimony_agents.artifacts import Chart, Dataset, Report
+from parsimony_agents.execution.outputs import KernelOutput
 from parsimony_agents.identity import (
     ArtifactRef,
     LiveNameCollisionError,
     notebook_content_sha,
     notebook_logical_id,
 )
-from parsimony_agents.execution.outputs import KernelOutput
 from parsimony_agents.messages import Message, Text
 from parsimony_agents.notebook import ScriptPreview, stamp_fetch_log_to_script
 from parsimony_agents.tools import ToolMethod, Tools
@@ -249,18 +250,17 @@ class WorkspaceRunHooks:
                 message_id=self._reasoning_message_id,
                 delta=True,
             )
-        elif isinstance(sig, LLMToolCallStarted):
-            if sig.tool_name in self.tools:
-                t = self.tools[sig.tool_name]
-                if t.tool_type == "system" and t.ui_message is not None:
-                    yield ToolEvent(
-                        tool_name=sig.tool_name,
-                        tool_call_id=sig.tool_call_id,
-                        tool_type="system",
-                        completed=False,
-                        result=SystemToolMessage(message=t.ui_message),
-                        ui_message=t.ui_message,
-                    )
+        elif isinstance(sig, LLMToolCallStarted) and sig.tool_name in self.tools:
+            t = self.tools[sig.tool_name]
+            if t.tool_type == "system" and t.ui_message is not None:
+                yield ToolEvent(
+                    tool_name=sig.tool_name,
+                    tool_call_id=sig.tool_call_id,
+                    tool_type="system",
+                    completed=False,
+                    result=SystemToolMessage(message=t.ui_message),
+                    ui_message=t.ui_message,
+                )
         # LLMComplete carries the assembled response — captured by run_loop.
 
     # ------------------------------------------------------------------
@@ -396,6 +396,7 @@ class WorkspaceRunHooks:
         self, state: Any, response: Any, *, cancellation: CancellationRequest | None
     ) -> AsyncIterator[Any]:
         from datetime import datetime as _dt  # noqa: F401
+
         from parsimony_agents.agent.failure.suspension import (
             SuspensionRequest as _SuspensionRequest,
         )
@@ -557,10 +558,7 @@ class WorkspaceRunHooks:
             # take as their workspace handle. Without this guard the
             # workspace injection clobbers ``ask_user``'s ``context`` arg
             # and ``context.strip()`` fails.
-            if tool_name in _TERMINATION_TOOL_NAMES:
-                invocation_args = dict(tool_args)
-            else:
-                invocation_args = {**tool_args, "context": ctx}
+            invocation_args = dict(tool_args) if tool_name in _TERMINATION_TOOL_NAMES else {**tool_args, "context": ctx}
 
             tool_executions.append(
                 (
@@ -579,7 +577,7 @@ class WorkspaceRunHooks:
             )
 
         if tool_executions and cancellation and cancellation.is_set():
-            for tool_call, sig_str, repeat_count, _ in tool_executions:
+            for tool_call, _sig_str, _repeat_count, _ in tool_executions:
                 tool_name = tool_call.function.name
                 if tool_name not in tools:
                     continue
@@ -621,7 +619,7 @@ class WorkspaceRunHooks:
         # request so the surrounding loop exits after the batch finishes.
         pending_termination: tuple[str, Any] | None = None
 
-        for (tool_call, sig_str, repeat_count, _), raw_result in zip(
+        for (tool_call, _sig_str, repeat_count, _), raw_result in zip(
             tool_executions, raw_results, strict=True
         ):
             tool_name = tool_call.function.name

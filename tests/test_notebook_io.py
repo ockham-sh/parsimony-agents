@@ -10,6 +10,7 @@ import ast
 from pathlib import Path
 
 import pytest
+from parsimony.result import Provenance
 
 from parsimony_agents import (
     Script,
@@ -20,7 +21,6 @@ from parsimony_agents import (
     save_notebook_state,
     serialize_notebook,
 )
-from parsimony.result import Provenance
 from parsimony_agents.execution.outputs import FetchLogEntry, KernelOutput, PrimitiveObject
 from parsimony_agents.notebook_io import notebook_state_cache_path
 
@@ -201,10 +201,10 @@ async def test_read_latest_notebook_resolves_from_log() -> None:
     csha_old = "a" * 64
     csha_new = "b" * 64
     files = {
-        f".ockham/notebooks/foo/log.jsonl": (
+        ".ockham/notebooks/foo/log.jsonl": (
             f'{{"ts": "t1", "content_sha": "{csha_old}"}}\n'
             f'{{"ts": "t2", "content_sha": "{csha_new}"}}\n'
-        ).encode("utf-8"),
+        ).encode(),
         f".ockham/notebooks/foo/{csha_new}.py": b"x = 2\n",
         f".ockham/notebooks/foo/{csha_old}.py": b"x = 1\n",
     }

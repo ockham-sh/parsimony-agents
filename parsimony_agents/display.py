@@ -25,7 +25,6 @@ import time
 from typing import Any, Protocol
 
 import pandas as pd
-
 from parsimony.result import ColumnRole
 
 from parsimony_agents.agent.agent import Agent, AgentResult
@@ -941,7 +940,11 @@ def display_result(
     display.show_status(
         ok=result.ok,
         elapsed=0.0,
-        tool_count=sum(1 for e in result.events if getattr(e, "type", None) == "tool_event" and getattr(e, "completed", False)),
+        tool_count=sum(
+            1
+            for e in result.events
+            if getattr(e, "type", None) == "tool_event" and getattr(e, "completed", False)
+        ),
         dataset_count=len(result.datasets),
         chart_count=len(result.charts),
         notebook_count=len(result.code),

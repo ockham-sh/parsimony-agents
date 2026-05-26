@@ -142,21 +142,19 @@ class IndexPolicyLinter(ast.NodeVisitor):
             target_name = stmt.targets[0].id
             if isinstance(stmt.value, ast.Call) and isinstance(
                 stmt.value.func, ast.Attribute
+            ) and (
+                stmt.value.func.attr == "reset_index"
+                and _get_base_name(stmt.value.func.value) == target_name
             ):
-                if (
-                    stmt.value.func.attr == "reset_index"
-                    and _get_base_name(stmt.value.func.value) == target_name
-                ):
-                    return target_name
+                return target_name
 
         # x.reset_index(..., inplace=True)
         if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
             call = stmt.value
-            if isinstance(call.func, ast.Attribute):
-                if call.func.attr == "reset_index" and _has_kw_true(
-                    call, kw_name="inplace"
-                ):
-                    return _get_base_name(call.func.value)
+            if isinstance(call.func, ast.Attribute) and call.func.attr == "reset_index" and _has_kw_true(
+                call, kw_name="inplace"
+            ):
+                return _get_base_name(call.func.value)
 
         return None
 
@@ -190,7 +188,8 @@ class IndexPolicyLinter(ast.NodeVisitor):
 
         for name, (lineno, op_name) in pending.items():
             self.issues.append(
-                f"Line {lineno}: result assigned to '{name}' comes from '.{op_name}()' and should be followed by '.reset_index()' to avoid index-based semantics."
+                f"Line {lineno}: result assigned to '{name}' comes from '.{op_name}()' and should be "
+                "followed by '.reset_index()' to avoid index-based semantics."
             )
 
     def _check_scopes_for_next_line_reset(self, tree: ast.AST) -> None:
@@ -204,7 +203,8 @@ class IndexPolicyLinter(ast.NodeVisitor):
             base_name = _get_base_name(node.value)
             if self._is_pandas_like_base(base_name):
                 self.issues.append(
-                    f"Line {node.lineno}: avoid reading '.index' — prefer explicit columns and call '.reset_index()' after index-producing operations."
+                    f"Line {node.lineno}: avoid reading '.index' — prefer explicit columns and call "
+                    "'.reset_index()' after index-producing operations."
                 )
         self.generic_visit(node)
 
@@ -232,7 +232,8 @@ class RollingLinter(ast.NodeVisitor):
             has_min_periods = any(kw.arg == "min_periods" for kw in node.keywords)
             if not has_min_periods:
                 self.issues.append(
-                    f"Line {node.lineno}: .rolling() should include min_periods parameter to avoid introducing NA values."
+                    f"Line {node.lineno}: .rolling() should include min_periods parameter to avoid "
+                    "introducing NA values."
                 )
         self.generic_visit(node)
 

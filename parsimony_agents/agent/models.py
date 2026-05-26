@@ -18,16 +18,15 @@ import numpy
 import pandas
 import scipy
 import statsmodels
-from pydantic import Field, model_validator
+from pydantic import Field
 
 from parsimony_agents.agent.outputs import SystemToolMessage, SystemToolOutput, UtilityToolOutput
+from parsimony_agents.agent.session_state import SessionState
 from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.execution import KernelOutput
 from parsimony_agents.identity import ArtifactRef
 from parsimony_agents.messages import Message, MessageContent, Reasoning, Text
 from parsimony_agents.notebook import Script
-
-from parsimony_agents.agent.session_state import SessionState
 
 
 class AgentContextSnapshot(MessageContent):
@@ -137,7 +136,19 @@ class AgentContextSnapshot(MessageContent):
 
 
 AgentMessageContent = Annotated[
-    Chart | Dataset | Report | Script | AgentContextSnapshot | UtilityToolOutput | SystemToolOutput | SystemToolMessage | KernelOutput | Reasoning | Text | str | list[dict[str, Any]],
+    Chart
+    | Dataset
+    | Report
+    | Script
+    | AgentContextSnapshot
+    | UtilityToolOutput
+    | SystemToolOutput
+    | SystemToolMessage
+    | KernelOutput
+    | Reasoning
+    | Text
+    | str
+    | list[dict[str, Any]],
     Field(union_mode="smart"),
 ]
 
@@ -150,7 +161,8 @@ class AgentContext(MessageContent):
     session_id: str
     messages: list[AgentMessage] = Field(default_factory=list)
 
-    # Session-scoped services (runtime only, not serialized). Runtime types: FileStore, SessionVectorStore, SessionKeywordStore.
+    # Session-scoped services (runtime only, not serialized).
+    # Runtime types: FileStore, SessionVectorStore, SessionKeywordStore.
     files: Any | None = Field(default=None, exclude=True)
     vector_store: Any | None = Field(default=None, exclude=True)
     keyword_store: Any | None = Field(default=None, exclude=True)

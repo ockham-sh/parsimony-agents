@@ -45,9 +45,7 @@ def is_safe_name(name: str) -> bool:
         return False
     if name != PurePosixPath(name).name:
         return False
-    if "\x00" in name or name.startswith("."):
-        return False
-    return True
+    return not ("\x00" in name or name.startswith("."))
 
 
 def latest_content_sha(log_path: Path) -> str | None:

@@ -40,9 +40,10 @@ __all__ = [
     "VariableOrigin",
 ]
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any
 
 from parsimony_agents.identity import ArtifactRef
 

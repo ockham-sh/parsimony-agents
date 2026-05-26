@@ -9,6 +9,7 @@ Verifies (BRIEF §1.A, plan Phase 1 done criteria):
 from __future__ import annotations
 
 import dataclasses
+
 import pytest
 
 from parsimony_agents.agent.failure import (

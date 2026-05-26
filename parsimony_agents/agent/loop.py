@@ -89,6 +89,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator
+from datetime import UTC
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -120,6 +121,7 @@ from parsimony_agents.agent.failure import (
     record_tool_call,
     verify_suspension_token,
 )
+from parsimony_agents.agent.failure.suspension import compute_suspension_token
 from parsimony_agents.agent.llm import (
     LLMComplete,
     LLMReasoningDelta,
@@ -131,7 +133,6 @@ from parsimony_agents.agent.llm import (
 )
 from parsimony_agents.agent.renderer import render_for_llm
 from parsimony_agents.agent.state import RunState, SuspensionRecord
-from parsimony_agents.agent.failure.suspension import compute_suspension_token
 from parsimony_agents.tools import Tool, ToolResult, Tools
 
 _logger = logging.getLogger(__name__)
@@ -371,10 +372,7 @@ async def run_loop(
             yield event
 
         # --- Render messages ---
-        if render is not None:
-            messages = render(state)
-        else:
-            messages = render_for_llm(state, instructions=agent.instructions)
+        messages = render(state) if render is not None else render_for_llm(state, instructions=agent.instructions)
 
         # --- LLM call ---
         response: LLMResponse | None = None
@@ -704,7 +702,7 @@ async def resume_run(
     Cancellation precedence: if ``cancellation`` is set before resume, the loop
     yields :class:`RunCancelled` immediately on its first cancellation check.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     if not user_reply or not user_reply.strip():
         raise ValueError("resume_run requires a non-empty user_reply")
@@ -715,7 +713,7 @@ async def resume_run(
         )
 
     if max_suspension_age_s is not None:
-        age = (datetime.now(timezone.utc) - suspension.suspended_at).total_seconds()
+        age = (datetime.now(UTC) - suspension.suspended_at).total_seconds()
         if age > max_suspension_age_s:
             raise SuspensionExpired(
                 f"suspension is {age:.0f}s old (max {max_suspension_age_s:.0f}s)"

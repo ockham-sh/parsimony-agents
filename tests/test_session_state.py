@@ -52,14 +52,14 @@ def test_session_state_xml_escapes() -> None:
 
 @pytest.mark.asyncio
 async def test_read_artifact_tool_invokes_injected_fn() -> None:
+    import tempfile
+
     from parsimony_agents.agent.agent import Agent
     from parsimony_agents.agent.models import AgentContext
+    from parsimony_agents.agent.outputs import ArtifactLlmResult
     from parsimony_agents.execution.executor import CodeExecutor
     from parsimony_agents.execution.factory import OutputFactory as FrameworkOutputFactory
     from parsimony_agents.messages import Text
-    import tempfile
-
-    from parsimony_agents.agent.outputs import ArtifactLlmResult
 
     async def _fn(live_name: str, kind: str, options: dict) -> ArtifactLlmResult:
         m = (options.get("view") or options.get("mode") or "summary") or "summary"
@@ -195,6 +195,7 @@ def test_kernel_output_to_llm_omits_ref_blocks() -> None:
     tempt the LLM to re-paste them.
     """
     from parsimony.result import Provenance
+
     from parsimony_agents.execution.outputs import FetchLogEntry, KernelOutput
     from parsimony_agents.identity import ArtifactRef
 

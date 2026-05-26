@@ -10,14 +10,13 @@ from __future__ import annotations
 import asyncio
 
 import pandas as pd
-
 from parsimony.connector import Connectors, connector
 from parsimony.result import Result
+
 from parsimony_agents.execution.connector_cache import (
     ConnectorCache,
     MemoizingConnectorBundle,
 )
-
 
 _CALL_COUNT = {"n": 0}
 

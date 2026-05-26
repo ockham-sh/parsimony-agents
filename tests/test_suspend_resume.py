@@ -12,7 +12,7 @@ Verifies (PLAN Phase 8 done criteria):
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -28,6 +28,7 @@ from parsimony_agents.agent.events import (
 )
 from parsimony_agents.agent.failure import (
     DefaultPolicy,
+    FailureKind,
     SuspensionExpired,
     SuspensionTokenMismatch,
 )
@@ -35,7 +36,6 @@ from parsimony_agents.agent.loop import resume_run, run_loop
 from parsimony_agents.agent.state import RunState, SuspensionRecord
 from parsimony_agents.agent.termination_tools import TERMINATION_TOOLS
 from parsimony_agents.tools import Tools
-
 
 # ---------------------------------------------------------------------------
 # Reuse helpers from test_loop
@@ -183,7 +183,7 @@ async def test_resume_with_tampered_token_raises_mismatch() -> None:
         run_id="r1",
         session_id="s1",
         suspension_token=compute_suspension_token(run_id="r1", session_id="s1", secret="topsecret"),
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
         pending_question="?",
     )
     tampered = record.model_copy(update={"run_id": "r2"})
@@ -208,8 +208,8 @@ async def test_resume_on_stale_suspension_raises_expired() -> None:
         run_id="r1",
         session_id="s1",
         suspension_token=compute_suspension_token(run_id="r1", session_id="s1", secret="topsecret"),
-        suspended_at=datetime.now(timezone.utc) - timedelta(seconds=3600),  # 1h old
-        started_at=datetime.now(timezone.utc) - timedelta(seconds=3700),
+        suspended_at=datetime.now(UTC) - timedelta(seconds=3600),  # 1h old
+        started_at=datetime.now(UTC) - timedelta(seconds=3700),
         pending_question="?",
     )
 
@@ -233,7 +233,7 @@ async def test_resume_with_preset_cancellation_yields_run_cancelled() -> None:
         run_id="r1",
         session_id="s1",
         suspension_token=compute_suspension_token(run_id="r1", session_id="s1", secret="topsecret"),
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
         pending_question="?",
     )
     cancellation = CancellationRequest()
@@ -260,7 +260,7 @@ async def test_resume_with_empty_reply_raises_value_error() -> None:
         run_id="r1",
         session_id="s1",
         suspension_token=compute_suspension_token(run_id="r1", session_id="s1", secret="topsecret"),
-        started_at=datetime.now(timezone.utc),
+        started_at=datetime.now(UTC),
         pending_question="?",
     )
 
@@ -286,7 +286,7 @@ def test_runstate_from_suspension_preserves_accumulators() -> None:
         run_id="r1",
         session_id="s1",
         suspension_token=compute_suspension_token(run_id="r1", session_id="s1", secret="x"),
-        started_at=datetime.now(timezone.utc) - timedelta(seconds=120),
+        started_at=datetime.now(UTC) - timedelta(seconds=120),
         elapsed_seconds=120.0,
         iteration_count=7,
         tool_call_history=["read_data:abc", "read_data:def"],
@@ -310,14 +310,14 @@ def test_runstate_from_suspension_preserves_accumulators() -> None:
     assert state.pending_instruction is None  # cleared on resume
 
 
-def _budget_suspension_record(kind: "FailureKind") -> "SuspensionRecord":
+def _budget_suspension_record(kind: FailureKind) -> SuspensionRecord:
     from parsimony_agents.agent.failure import compute_suspension_token
 
     return SuspensionRecord(
         run_id="r1",
         session_id="s1",
         suspension_token=compute_suspension_token(run_id="r1", session_id="s1", secret="x"),
-        started_at=datetime.now(timezone.utc) - timedelta(seconds=900),
+        started_at=datetime.now(UTC) - timedelta(seconds=900),
         elapsed_seconds=34.8,
         iteration_count=20,
         pending_question="continue?",

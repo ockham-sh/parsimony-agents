@@ -14,11 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-import pytest
-
 from parsimony_agents.agent.failure import Failure, FailureKind
 from parsimony_agents.agent.renderer import (
-    RECENT_ITERATIONS_DEFAULT,
     infer_message_mode,
     recent_iterations_cutoff,
     render_for_llm,
@@ -26,7 +23,6 @@ from parsimony_agents.agent.renderer import (
     select_messages_to_render,
 )
 from parsimony_agents.agent.state import RunState
-
 
 # ---------------------------------------------------------------------------
 # Minimal message stub

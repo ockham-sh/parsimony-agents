@@ -25,7 +25,6 @@ from parsimony_agents.agent.outputs import SystemToolOutput
 from parsimony_agents.messages import Text
 from parsimony_agents.tools import Tool
 
-
 # ---------------------------------------------------------------------------
 # return_done
 # ---------------------------------------------------------------------------

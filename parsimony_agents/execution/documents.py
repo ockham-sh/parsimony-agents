@@ -7,10 +7,9 @@ into ``locals`` (users do not ``import`` third-party packages directly).
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from typing import Any
-
-import io
 
 import pandas as pd
 

@@ -13,7 +13,7 @@ import tempfile
 import pandas as pd
 import pytest
 from parsimony.connector import Connectors
-from parsimony.result import Provenance, Result, TabularResult
+from parsimony.result import Result, TabularResult
 
 from parsimony_agents.execution.helpers import normalize_connector_bundles
 from parsimony_agents.execution.outputs import FetchLogEntry

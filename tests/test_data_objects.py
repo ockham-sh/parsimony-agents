@@ -112,7 +112,7 @@ async def test_same_logical_id_different_content_appends_log(tmp_path: Path) -> 
     log = (tmp_path / DATA_OBJECTS_NAMESPACE / ref_a.logical_id / "log.jsonl").read_text()
     log_lines = [json.loads(line) for line in log.splitlines() if line.strip()]
     assert len(log_lines) == 2
-    assert {l["content_sha"] for l in log_lines} == {ref_a.content_sha, ref_b.content_sha}
+    assert {line["content_sha"] for line in log_lines} == {ref_a.content_sha, ref_b.content_sha}
 
 
 async def test_persisted_file_is_readable_parquet(tmp_path: Path) -> None:

@@ -8,8 +8,6 @@ Verifies (PLAN Phase 6 done criteria, tests 1-3):
 
 from __future__ import annotations
 
-import pytest
-
 from parsimony_agents.agent.failure import Failure, FailureKind
 from parsimony_agents.tools import Tool, ToolResult
 

@@ -28,7 +28,6 @@ from parsimony_agents.agent.llm import (
     call_llm,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers: stub litellm-style streaming response
 # ---------------------------------------------------------------------------
@@ -146,13 +145,12 @@ async def test_call_llm_rate_limit_error_becomes_failure_raised() -> None:
     async def _raise(*_, **__):
         raise RateLimitError("429 Too Many Requests")
 
-    with patch("litellm.acompletion", side_effect=_raise):
-        with pytest.raises(FailureRaised) as excinfo:
-            async for _ in call_llm(
-                messages=[{"role": "user", "content": "x"}],
-                model_config={"model": "anthropic/claude-opus-4-7"},
-            ):
-                pass
+    with patch("litellm.acompletion", side_effect=_raise), pytest.raises(FailureRaised) as excinfo:
+        async for _ in call_llm(
+            messages=[{"role": "user", "content": "x"}],
+            model_config={"model": "anthropic/claude-opus-4-7"},
+        ):
+            pass
 
     failure = excinfo.value.failure
     assert failure.kind == FailureKind.transient_provider
@@ -170,13 +168,12 @@ async def test_call_llm_authentication_error_classifies_as_capability_gap() -> N
     async def _raise(*_, **__):
         raise AuthenticationError("invalid api key")
 
-    with patch("litellm.acompletion", side_effect=_raise):
-        with pytest.raises(FailureRaised) as excinfo:
-            async for _ in call_llm(
-                messages=[{"role": "user", "content": "x"}],
-                model_config={"model": "anthropic/claude-opus-4-7"},
-            ):
-                pass
+    with patch("litellm.acompletion", side_effect=_raise), pytest.raises(FailureRaised) as excinfo:
+        async for _ in call_llm(
+            messages=[{"role": "user", "content": "x"}],
+            model_config={"model": "anthropic/claude-opus-4-7"},
+        ):
+            pass
 
     failure = excinfo.value.failure
     assert failure.kind == FailureKind.capability_gap
@@ -196,15 +193,14 @@ async def test_call_llm_heartbeat_fires_after_silence() -> None:
 
     with (
         patch("litellm.acompletion", return_value=fake_stream),
-        patch("litellm.stream_chunk_builder", return_value=assembled),
+        patch("litellm.stream_chunk_builder", return_value=assembled),pytest.raises(FailureRaised) as excinfo
     ):
-        with pytest.raises(FailureRaised) as excinfo:
-            async for _ in call_llm(
-                messages=[{"role": "user", "content": "x"}],
-                model_config={"model": "anthropic/claude-opus-4-7"},
-                stream_heartbeat_s=0.05,
-            ):
-                pass
+        async for _ in call_llm(
+            messages=[{"role": "user", "content": "x"}],
+            model_config={"model": "anthropic/claude-opus-4-7"},
+            stream_heartbeat_s=0.05,
+        ):
+            pass
 
     failure = excinfo.value.failure
     assert failure.kind == FailureKind.transient_provider
@@ -249,14 +245,16 @@ async def test_call_llm_cancellation_before_call_raises_immediately() -> None:
     """Pre-set cancellation → CancelledError before litellm.acompletion is even called."""
     cancellation = CancellationRequest()
     cancellation.set()
-    with patch("litellm.acompletion", side_effect=AssertionError("must not be called")):
-        with pytest.raises(asyncio.CancelledError):
-            async for _ in call_llm(
-                messages=[{"role": "user", "content": "x"}],
-                model_config={"model": "anthropic/claude-opus-4-7"},
-                cancellation=cancellation,
-            ):
-                pass
+    with (
+        patch("litellm.acompletion", side_effect=AssertionError("must not be called")),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        async for _ in call_llm(
+            messages=[{"role": "user", "content": "x"}],
+            model_config={"model": "anthropic/claude-opus-4-7"},
+            cancellation=cancellation,
+        ):
+            pass
 
 
 # ---------------------------------------------------------------------------
