@@ -514,7 +514,7 @@ class CodeExecutor(BaseCodeExecutor):
         run on every call, cached or not:
 
         - ``persister`` writes the canonical
-          ``.ockham/data_objects/<lid>/<csha>.parquet`` file and returns
+          ``.ockham/objects/<sha[:2]>/<sha[2:]>.parquet`` file and returns
           an :class:`ArtifactRef`.
         - ``fetch_logger`` produces the :class:`FetchLogEntry` for the
           kernel output and records the data_object ref on the current

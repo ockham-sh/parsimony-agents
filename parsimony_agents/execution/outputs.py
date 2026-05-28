@@ -311,10 +311,8 @@ class FetchLogEntry(BaseModel):
     ``provenance`` is the upstream identity. ``data_object_ref`` pins
     the persisted snapshot — typed (``kind="data_object"``) so downstream
     code consumes a structured ref rather than a path string. ``version``
-    is the 1-based snapshot index for that data_object's ``log.jsonl``;
-    same ``v{N}`` semantic as datasets/charts/reports under the unified
-    versioning model — so the agent can tell ``"GDPC1 v1"`` (first
-    fetch) from ``"GDPC1 v3"`` (data refreshed twice in between).
+    is always ``None`` for immutable object-pool entries (data objects are
+    not versioned).
 
     Both ``data_object_ref`` and ``version`` are ``None`` when the
     executor was configured without a persister.

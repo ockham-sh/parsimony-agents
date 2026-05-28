@@ -38,6 +38,7 @@ from __future__ import annotations
 __all__ = [
     "ArtifactRef",
     "LiveNameCollisionError",
+    "OBJECTS_NAMESPACE",
     "SNAPSHOT_KINDS",
     "SnapshotKind",
     "chart_logical_id",
@@ -46,6 +47,7 @@ __all__ = [
     "dataset_logical_id",
     "notebook_content_sha",
     "notebook_logical_id",
+    "object_pool_path",
     "report_logical_id",
     "slug_from_title",
 ]
@@ -68,6 +70,8 @@ _EXT_BY_KIND: Final[dict[SnapshotKind, str]] = {
     "chart": ".vl.json",
     "report": ".qmd",
 }
+
+OBJECTS_NAMESPACE = ".ockham/objects"
 
 
 class LiveNameCollisionError(Exception):
@@ -137,9 +141,12 @@ class ArtifactRef:
     def workspace_file_path(self) -> str:
         """Workspace-relative on-disk path for this snapshot.
 
-        One layout for every kind:
-        ``.ockham/<kind>s/<logical_id>/<content_sha>.<ext>``.
+        Versioned kinds live under ``.ockham/<kind>s/<logical_id>/``.
+        ``data_object`` bytes are immutable pool entries addressed only by
+        ``content_sha`` under :data:`OBJECTS_NAMESPACE`.
         """
+        if self.kind == "data_object":
+            return object_pool_path(self.content_sha)
         ext = _EXT_BY_KIND[self.kind]
         return f".ockham/{self.kind}s/{self.logical_id}/{self.content_sha}{ext}"
 
@@ -170,6 +177,11 @@ class ArtifactRef:
         if not path.startswith(".ockham/"):
             return None
         parts = path.split("/")
+        if len(parts) == 4 and parts[1] == "objects" and parts[3].endswith(".parquet"):
+            content_sha = f"{parts[2]}{parts[3][: -len('.parquet')]}"
+            if not content_sha:
+                return None
+            return cls(kind="data_object", logical_id=content_sha, content_sha=content_sha)
         if len(parts) != 4:
             return None
         kind_plural, logical_id, last = parts[1], parts[2], parts[3]
@@ -220,6 +232,13 @@ class ArtifactRef:
 def content_sha(blob: bytes) -> str:
     """SHA-256 of ``blob`` as lowercase hex."""
     return hashlib.sha256(blob).hexdigest()
+
+
+def object_pool_path(content_sha: str) -> str:
+    """Workspace-relative path for an immutable object-pool parquet entry."""
+    if len(content_sha) < 3:
+        raise ValueError("object_pool_path: content_sha must be at least 3 hex chars")
+    return f"{OBJECTS_NAMESPACE}/{content_sha[:2]}/{content_sha[2:]}.parquet"
 
 
 # ---------------------------------------------------------------------------

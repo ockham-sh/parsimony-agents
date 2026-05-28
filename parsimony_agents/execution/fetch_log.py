@@ -8,7 +8,7 @@ each :class:`~parsimony_agents.execution.outputs.KernelOutput`.
 
 When ``persist_fn`` is supplied, each fetch result is also written to a
 content-addressed file under
-``.ockham/data_objects/<logical_id>/<content_sha>.parquet`` and the
+``.ockham/objects/<content_sha[:2]>/<content_sha[2:]>.parquet`` and the
 returned :class:`ArtifactRef` is recorded on the active
 :class:`~parsimony_agents.execution.run_scope.RunScope` (if any), so
 the producing notebook's lineage automatically accumulates fetch edges
@@ -29,7 +29,7 @@ from parsimony_agents.identity import ArtifactRef
 
 PersistFn = Callable[
     [Any],
-    Awaitable[tuple[ArtifactRef, int] | None] | tuple[ArtifactRef, int] | None,
+    Awaitable[tuple[ArtifactRef, int | None] | None] | tuple[ArtifactRef, int | None] | None,
 ]
 
 
@@ -42,7 +42,8 @@ def make_fetch_logger(
 
     When *persist_fn* is supplied, it is invoked with each ``Result`` and
     its ``(ref, version)`` return is split onto the entry as
-    ``data_object_ref`` and ``version`` respectively.
+    ``data_object_ref`` and ``version`` respectively. ``version`` is
+    always ``None`` for immutable object-pool entries.
 
     When *ledger* is supplied, the data_object ref is also recorded on
     the ledger's current :class:`RunScope` so the producing notebook's
