@@ -7,7 +7,7 @@ for LLM responses / tool results so the tests don't need a real LLM client.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -25,7 +25,6 @@ from parsimony_agents.agent.failure import (
     record_tool_call,
 )
 from parsimony_agents.agent.state import RunState
-
 
 # ---------------------------------------------------------------------------
 # Stubs for LLM-response and tool-result shapes
@@ -84,7 +83,7 @@ def test_time_limit_fires_when_elapsed_exceeds_threshold() -> None:
         run_id="r1",
         session_id="s1",
         # started_at backed up so elapsed > threshold immediately.
-        started_at=datetime.now(timezone.utc) - timedelta(seconds=20),
+        started_at=datetime.now(UTC) - timedelta(seconds=20),
         # last_event_time_s set to "now" so stall detector doesn't preempt.
         last_event_time_s=time.monotonic(),
     )

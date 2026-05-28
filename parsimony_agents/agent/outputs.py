@@ -68,7 +68,10 @@ class ArtifactNotFound(FileNotFoundError):
 
 
 class UtilityToolOutput(MessageContent):
-    """Tool output for utility tools (incl. temporary code). ``ui_message`` / ``ui_message_completed`` are the user-facing label in the terminal."""
+    """Tool output for utility tools, including temporary code.
+
+    ``ui_message`` / ``ui_message_completed`` are the user-facing label in the terminal.
+    """
 
     type: Literal["utility_tool_output"] = "utility_tool_output"
     ui_message: str

@@ -25,6 +25,7 @@ import time
 from typing import Any, Protocol
 
 import pandas as pd
+from parsimony.result import ColumnRole
 
 from parsimony_agents.agent.agent import Agent, AgentResult
 from parsimony_agents.artifacts import Dataset
@@ -62,11 +63,42 @@ _TOOL_COLORS = {
     "system": "dim",
 }
 
-# Metadata columns to hide from dataset preview (keep the useful ones)
-_HIDDEN_COLUMNS = {
-    "index", "realtime_start", "realtime_end", "series_id",
-    "frequency_short", "seasonal_adjustment_short", "units_short",
-}
+# Columns hidden from previews when schema roles are unavailable (legacy fallback).
+_FALLBACK_HIDDEN_COLUMNS = frozenset({"index"})
+
+
+def _schema_hidden_columns(column_schema: list[dict[str, Any]] | None) -> set[str]:
+    """Column names to omit from previews based on output schema roles."""
+    if not column_schema:
+        return set(_FALLBACK_HIDDEN_COLUMNS)
+    hidden: set[str] = set()
+    for col in column_schema:
+        name = col.get("name")
+        if not isinstance(name, str):
+            continue
+        role = col.get("role")
+        if role in (ColumnRole.METADATA, ColumnRole.KEY, ColumnRole.TITLE, "metadata", "key", "title"):
+            hidden.add(name)
+        if col.get("exclude_from_llm_view"):
+            hidden.add(name)
+    return hidden
+
+
+def _title_from_preview(preview_df: pd.DataFrame | None, column_schema: list[dict[str, Any]] | None) -> str:
+    """Best-effort title from a TITLE-role column in the preview row."""
+    if preview_df is None or preview_df.empty or not column_schema:
+        return ""
+    title_cols = [
+        c["name"]
+        for c in column_schema
+        if c.get("role") in (ColumnRole.TITLE, "title") and isinstance(c.get("name"), str)
+    ]
+    for col in title_cols:
+        if col in preview_df.columns:
+            val = preview_df[col].iloc[0]
+            if pd.notna(val):
+                return str(val)
+    return ""
 
 
 def _format_columns(names: list[str], max_cols: int = 5) -> str:
@@ -149,9 +181,15 @@ def _collect_fetch_entries(result: AgentResult) -> list[FetchLogEntry]:
     return entries
 
 
-def _pick_display_columns(df: pd.DataFrame, max_cols: int = 6) -> list[str]:
-    """Select the most useful columns for display, hiding metadata."""
-    cols = [c for c in df.columns if c not in _HIDDEN_COLUMNS]
+def _pick_display_columns(
+    df: pd.DataFrame,
+    *,
+    column_schema: list[dict[str, Any]] | None = None,
+    max_cols: int = 6,
+) -> list[str]:
+    """Select preview columns, hiding KEY/METADATA and LLM-excluded schema roles."""
+    hidden = _schema_hidden_columns(column_schema)
+    cols = [c for c in df.columns if c not in hidden]
     if len(cols) > max_cols:
         cols = cols[:max_cols]
     return cols
@@ -307,15 +345,14 @@ class _RichDisplay:
             df = _dataset_dataframe(artifact)
             if not isinstance(df, pd.DataFrame):
                 continue
-            prov = artifact.provenance if isinstance(artifact, Dataset) else None
-            title = (prov.title if prov and prov.title else "") or aid
+            title = artifact.title or aid
             self._console.print(f"  [bold bright_blue]# {title}[/]")
 
-            desc = prov.description if prov and prov.description else ""
+            desc = artifact.description or ""
             if desc:
                 self._console.print(f"  [dim]{desc}[/]")
 
-            tags = list(prov.tags) if prov and prov.tags else []
+            tags = list(artifact.tags) if artifact.tags else []
             if tags:
                 self._console.print(f"  [dim]{' · '.join(tags)}[/]")
 
@@ -398,40 +435,29 @@ class _RichDisplay:
         for entry in entries:
             prov = entry.provenance
             rows, _cols = entry.row_count, len(entry.column_names)
+            preview_df = _head_to_dataframe(entry.head)
 
-            # Header: # UNRATE · Unemployment Rate
             param_id = str(next(iter(entry.params.values()), "")) if entry.params else ""
-            title = prov.title or ""
+            title = _title_from_preview(preview_df, entry.columns) or prov.source_description or ""
             header = RichText()
-            header.append(f"  # {param_id}", style="bold bright_blue")
-            if title:
+            header.append(f"  # {param_id or prov.source}", style="bold bright_blue")
+            if title and title.lower() != param_id.lower():
                 header.append(f" · {title}", style="bright_blue")
             self._console.print(header)
 
-            # Subtitle: source · params · visible metadata values
-            # Values already shown in header (param_id, title) are skipped dynamically.
-            header_values = {param_id.lower(), title.lower()} - {""}
             parts: list[str] = []
             source = prov.source or entry.source
             if source:
                 parts.append(source)
             if entry.params:
                 parts.append(_format_params(entry.params))
-            for item in prov.properties.get("metadata", []):
-                if not isinstance(item, dict) or item.get("exclude_from_llm_view", False):
-                    continue
-                value = str(item.get("value", ""))
-                if value and value.lower() not in header_values:
-                    parts.append(value)
             if parts:
                 self._console.print(f"  [dim]{' · '.join(parts)}[/]")
 
             self._console.print()
 
-            # Table preview from head (same style as show_datasets)
-            preview_df = _head_to_dataframe(entry.head)
             if preview_df is not None and not preview_df.empty:
-                display_cols = _pick_display_columns(preview_df, max_cols=5)
+                display_cols = _pick_display_columns(preview_df, column_schema=entry.columns, max_cols=5)
                 has_extra = len(display_cols) < len(preview_df.columns)
                 table = Table(
                     show_header=True,
@@ -590,13 +616,12 @@ class _PlainDisplay:
                 continue
             rows, cols = df.shape
             display_cols = _pick_display_columns(df)
-            prov = artifact.provenance if isinstance(artifact, Dataset) else None
-            title = (prov.title if prov and prov.title else "") or aid
+            title = artifact.title or aid
             print(f"  # {title}")
-            desc = prov.description if prov and prov.description else ""
+            desc = artifact.description or ""
             if desc:
                 print(f"  {desc}")
-            tags = list(prov.tags) if prov and prov.tags else []
+            tags = list(artifact.tags) if artifact.tags else []
             if tags:
                 print(f"  {' · '.join(tags)}")
             for note in getattr(artifact, "notes", []):
@@ -645,34 +670,27 @@ class _PlainDisplay:
         for entry in entries:
             prov = entry.provenance
             rows, _cols = entry.row_count, len(entry.column_names)
+            preview_df = _head_to_dataframe(entry.head)
+
             param_id = str(next(iter(entry.params.values()), "")) if entry.params else ""
-            title = prov.title or ""
-            header = f"  # {param_id}"
-            if title:
+            title = _title_from_preview(preview_df, entry.columns) or prov.source_description or ""
+            header = f"  # {param_id or prov.source}"
+            if title and title.lower() != param_id.lower():
                 header += f" · {title}"
             print(header)
 
-            # Subtitle
-            header_values = {param_id.lower(), title.lower()} - {""}
             parts = []
             source = prov.source or entry.source
             if source:
                 parts.append(source)
             if entry.params:
                 parts.append(_format_params(entry.params))
-            for item in prov.properties.get("metadata", []):
-                if not isinstance(item, dict) or item.get("exclude_from_llm_view", False):
-                    continue
-                value = str(item.get("value", ""))
-                if value and value.lower() not in header_values:
-                    parts.append(value)
             if parts:
                 print(f"  {' · '.join(parts)}")
             print()
 
-            preview_df = _head_to_dataframe(entry.head)
             if preview_df is not None and not preview_df.empty:
-                display_cols = _pick_display_columns(preview_df, max_cols=5)
+                display_cols = _pick_display_columns(preview_df, column_schema=entry.columns, max_cols=5)
                 preview = preview_df[display_cols].head(3)
                 if _tab:
                     print(_tab(preview, headers="keys", tablefmt="simple", showindex=False))
@@ -922,7 +940,11 @@ def display_result(
     display.show_status(
         ok=result.ok,
         elapsed=0.0,
-        tool_count=sum(1 for e in result.events if getattr(e, "type", None) == "tool_event" and getattr(e, "completed", False)),
+        tool_count=sum(
+            1
+            for e in result.events
+            if getattr(e, "type", None) == "tool_event" and getattr(e, "completed", False)
+        ),
         dataset_count=len(result.datasets),
         chart_count=len(result.charts),
         notebook_count=len(result.code),

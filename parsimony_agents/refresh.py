@@ -57,7 +57,6 @@ from parsimony_agents.identity import (
 )
 from parsimony_agents.notebook_io import deserialize_notebook, read_latest_notebook
 
-
 _REFRESHABLE_KINDS: frozenset[SnapshotKind] = frozenset({"dataset", "chart", "report"})
 
 
@@ -67,8 +66,6 @@ class _Executor(Protocol):
     Aligned with :class:`BaseCodeExecutor`, but typed loosely so tests
     can stub it without inheriting the whole abstract base.
     """
-
-    cwd: str | None
 
     async def read_workspace_file(self, path: str) -> bytes: ...
     async def write_workspace_file(self, path: str, data: bytes) -> None: ...

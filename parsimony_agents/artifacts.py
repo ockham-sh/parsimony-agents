@@ -56,7 +56,6 @@ from parsimony_agents.execution.outputs import DataFrameObject, FigureObject
 from parsimony_agents.identity import ArtifactRef
 from parsimony_agents.messages import MessageContent
 
-
 # ============================================================================
 # Shared identity + payload mechanics
 # ============================================================================

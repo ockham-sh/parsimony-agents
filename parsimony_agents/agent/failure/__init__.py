@@ -30,6 +30,12 @@ from parsimony_agents.agent.failure.kinds import (
     FailureRaised,
     default_action_for,
 )
+
+# Lazy imports: ``policy`` is fine eagerly (no events dep), but ``recovery`` depends
+# on :mod:`parsimony_agents.agent.events`, which imports :class:`Failure` from this
+# package. Loading recovery here would create a cycle when ``events`` is loaded
+# during package init. Keep recovery accessible at the root via ``__getattr__``.
+from parsimony_agents.agent.failure.policy import DefaultPolicy, RecoveryPolicy
 from parsimony_agents.agent.failure.suspension import (
     SuspensionExpired,
     SuspensionRequest,
@@ -38,12 +44,6 @@ from parsimony_agents.agent.failure.suspension import (
     verify_suspension_token,
 )
 from parsimony_agents.agent.failure.termination import TerminationRequest
-
-# Lazy imports: ``policy`` is fine eagerly (no events dep), but ``recovery`` depends
-# on :mod:`parsimony_agents.agent.events`, which imports :class:`Failure` from this
-# package. Loading recovery here would create a cycle when ``events`` is loaded
-# during package init. Keep recovery accessible at the root via ``__getattr__``.
-from parsimony_agents.agent.failure.policy import DefaultPolicy, RecoveryPolicy
 
 
 def __getattr__(name: str):

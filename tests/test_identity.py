@@ -17,10 +17,10 @@ from parsimony_agents.identity import (
     dataset_logical_id,
     notebook_content_sha,
     notebook_logical_id,
+    object_pool_path,
     report_logical_id,
     slug_from_title,
 )
-
 
 # ---------------------------------------------------------------------------
 # ArtifactRef
@@ -33,8 +33,8 @@ def test_artifact_ref_workspace_path_for_each_kind() -> None:
         == ".ockham/notebooks/lid/csha.py"
     )
     assert (
-        ArtifactRef(kind="data_object", logical_id="lid", content_sha="csha").workspace_file_path
-        == ".ockham/data_objects/lid/csha.parquet"
+        ArtifactRef(kind="data_object", logical_id="csha", content_sha="csha").workspace_file_path
+        == object_pool_path("csha")
     )
     assert (
         ArtifactRef(kind="dataset", logical_id="lid", content_sha="csha").workspace_file_path
@@ -79,13 +79,19 @@ def test_artifact_ref_round_trips_workspace_file_path() -> None:
     """``from_workspace_file_path`` must invert ``workspace_file_path`` for every kind."""
     cases = [
         ArtifactRef(kind="notebook", logical_id="lid", content_sha="csha"),
-        ArtifactRef(kind="data_object", logical_id="lid", content_sha="csha"),
+        ArtifactRef(kind="data_object", logical_id="csha", content_sha="csha"),
         ArtifactRef(kind="dataset", logical_id="lid", content_sha="csha"),
         ArtifactRef(kind="chart", logical_id="lid", content_sha="csha"),
         ArtifactRef(kind="report", logical_id="lid", content_sha="csha"),
     ]
     for ref in cases:
-        assert ArtifactRef.from_workspace_file_path(ref.workspace_file_path) == ref
+        parsed = ArtifactRef.from_workspace_file_path(ref.workspace_file_path)
+        if ref.kind == "data_object":
+            assert parsed is not None
+            assert parsed.kind == "data_object"
+            assert parsed.content_sha == ref.content_sha
+        else:
+            assert parsed == ref
 
 
 def test_artifact_ref_from_workspace_file_path_rejects_non_canonical() -> None:
@@ -192,6 +198,12 @@ def test_data_object_logical_id_distinguishes_params() -> None:
     a = _FakeProvenance({"source": "fred", "params": {"id": "GDP"}})
     b = _FakeProvenance({"source": "fred", "params": {"id": "UNRATE"}})
     assert data_object_logical_id(a) != data_object_logical_id(b)
+
+
+def test_data_object_logical_id_ignores_properties() -> None:
+    a = _FakeProvenance({"source": "fred", "params": {"id": "GDP"}, "properties": {"series_url": "a"}})
+    b = _FakeProvenance({"source": "fred", "params": {"id": "GDP"}, "properties": {"series_url": "b"}})
+    assert data_object_logical_id(a) == data_object_logical_id(b)
 
 
 # ---------------------------------------------------------------------------

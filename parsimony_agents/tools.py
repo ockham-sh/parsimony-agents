@@ -124,9 +124,10 @@ class Tool:
         and ``...failure.termination`` for the typed exception classes.
         """
         # Local imports keep tools.py independent of agent.failure.* at module load.
+        import asyncio as _asyncio
+
         from parsimony_agents.agent.failure.suspension import SuspensionRequest
         from parsimony_agents.agent.failure.termination import TerminationRequest
-        import asyncio as _asyncio
 
         try:
             result = await self.function(*args, **kwargs)

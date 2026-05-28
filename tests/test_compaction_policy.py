@@ -81,7 +81,7 @@ def test_assistant_messages_never_compacted():
     """Assistant reasoning messages always render default, however old."""
     roles = ["assistant", "tool"] * 6  # 6 iterations — well past the window
     modes = _modes(roles)
-    assert [m for r, m in zip(roles, modes) if r == "assistant"] == ["default"] * 6
+    assert [m for r, m in zip(roles, modes, strict=False) if r == "assistant"] == ["default"] * 6
 
 
 def test_user_and_system_messages_never_compacted():

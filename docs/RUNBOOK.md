@@ -44,7 +44,7 @@ from parsimony import discover
 # Test basic import and instantiation
 agent = Agent(
     model="claude-sonnet-4-6",
-    connectors=discover.load_all().bind_env(),
+    connectors=discover.load_all(),
 )
 print("parsimony-agents installed successfully")
 ```
@@ -80,7 +80,7 @@ from parsimony_agents.execution.factory import OutputFactory
 from parsimony import discover
 
 # Autodiscover installed connectors and bind credentials from env vars
-connectors = discover.load_all().bind_env()
+connectors = discover.load_all()
 
 # Minimal config (production-safe defaults)
 agent = Agent(
@@ -115,7 +115,7 @@ from parsimony import discover
 async def main():
     agent = Agent(
         model="claude-sonnet-4-6",
-        connectors=discover.load_all().bind_env(),
+        connectors=discover.load_all(),
     )
     
     result = await agent.ask("Show me US unemployment rate for the last 10 years")
@@ -142,7 +142,7 @@ from parsimony import discover
 async def main():
     agent = Agent(
         model="claude-sonnet-4-6",
-        connectors=discover.load_all().bind_env(),
+        connectors=discover.load_all(),
     )
     
     # stream_to_display drives the full agent run and returns AgentResult
@@ -173,7 +173,7 @@ from parsimony import discover
 async def main():
     agent = Agent(
         model="claude-sonnet-4-6",
-        connectors=discover.load_all().bind_env(),
+        connectors=discover.load_all(),
     )
     
     # State persists across calls
@@ -229,7 +229,7 @@ app = FastAPI()
 
 agent = Agent(
     model="claude-sonnet-4-6",
-    connectors=discover.load_all().bind_env(),
+    connectors=discover.load_all(),
 )
 
 @app.post("/analyze")

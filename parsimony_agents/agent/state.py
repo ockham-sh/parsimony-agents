@@ -22,7 +22,7 @@ convenience.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -101,7 +101,7 @@ class RunState(BaseModel):
     # Wall-clock start of the *current* turn. A fresh run sets it at construction;
     # resume resets it to the resume moment (prior-turn time lives in
     # ``accumulated_elapsed_s``). ``elapsed_seconds()`` = accumulated + (now - started_at).
-    started_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    started_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     # Seconds already consumed by prior turns; resume adds (now - resume_start) on top.
     accumulated_elapsed_s: float = 0.0
 
@@ -142,19 +142,19 @@ class RunState(BaseModel):
             When ``None`` (the default), the wall clock is read via
             ``datetime.now(timezone.utc)``.
         """
-        now_ts = now if now is not None else datetime.now(timezone.utc).timestamp()
+        now_ts = now if now is not None else datetime.now(UTC).timestamp()
         wall = now_ts - self.started_at.timestamp()
         return self.accumulated_elapsed_s + max(0.0, wall)
 
     @classmethod
     def from_suspension(
         cls,
-        record: "SuspensionRecord",
+        record: SuspensionRecord,
         *,
         files: Any | None = None,
         code_executor: Any | None = None,
         cancellation: Any | None = None,
-    ) -> "RunState":
+    ) -> RunState:
         """Rebuild a :class:`RunState` from a persisted :class:`SuspensionRecord`.
 
         Runtime services (``files``, ``code_executor``, ``cancellation``) cannot be
@@ -194,7 +194,7 @@ class RunState(BaseModel):
             cumulative_prompt_tokens=record.cumulative_prompt_tokens,
             cumulative_completion_tokens=record.cumulative_completion_tokens,
             last_event_time_s=time.monotonic(),  # reset wall-clock; suspension is over
-            started_at=datetime.now(timezone.utc),  # this turn's clock starts at resume
+            started_at=datetime.now(UTC),  # this turn's clock starts at resume
             accumulated_elapsed_s=accumulated_elapsed_s,
             tool_call_history=list(record.tool_call_history),
             accumulated_reasoning=record.accumulated_reasoning,
@@ -225,7 +225,7 @@ class SuspensionRecord(BaseModel):
     run_id: str
     session_id: str
     suspension_token: str
-    suspended_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    suspended_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     # Opaque host-supplied model identifier (product "tier"). Persisted so
     # ``Agent.resume`` can rebuild the agent on the same model the run used.
@@ -259,23 +259,24 @@ class SuspensionRecord(BaseModel):
     failure_attempts: dict[FailureKind, int] = Field(default_factory=dict)
 
 
-def __getattr__(name: str) -> Any:
-    """Re-export the token helpers from :mod:`failure.suspension` lazily.
+def compute_suspension_token(
+    *,
+    run_id: str,
+    session_id: str,
+    secret: str,
+    nonce: str | None = None,
+) -> str:
+    """Issue a suspension token via the failure module without importing it eagerly."""
+    from parsimony_agents.agent.failure.suspension import compute_suspension_token as _compute_suspension_token
 
-    Lazy import avoids a hard cycle: ``failure.suspension`` imports
-    :class:`SuspensionRecord` from this module, and ``state.py`` cannot import
-    from ``failure.suspension`` at module load time without recursion.
-    """
-    if name in {"compute_suspension_token", "verify_suspension_token"}:
-        from parsimony_agents.agent.failure.suspension import (
-            compute_suspension_token,
-            verify_suspension_token,
-        )
-        return {
-            "compute_suspension_token": compute_suspension_token,
-            "verify_suspension_token": verify_suspension_token,
-        }[name]
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    return _compute_suspension_token(run_id=run_id, session_id=session_id, secret=secret, nonce=nonce)
+
+
+def verify_suspension_token(*, record: SuspensionRecord, secret: str) -> bool:
+    """Verify a suspension token via the failure module without importing it eagerly."""
+    from parsimony_agents.agent.failure.suspension import verify_suspension_token as _verify_suspension_token
+
+    return _verify_suspension_token(record=record, secret=secret)
 
 
 __all__ = [

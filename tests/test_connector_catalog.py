@@ -54,9 +54,42 @@ class TestRenderConnectorCatalog:
             render_connector_catalog("not-a-bundle")  # type: ignore[arg-type]
 
 
+class TestFlatConnectorCatalogShape:
+    def test_real_connector_catalog_has_no_bundled_params_row(self) -> None:
+        import pandas as pd
+        from parsimony.connector import connector
+
+        @connector()
+        async def sample_macro(country: str, indicator: str) -> pd.DataFrame:
+            """Fetch macro indicator values for a country and indicator code."""
+            return pd.DataFrame({"country": [country], "indicator": [indicator]})
+
+        catalog = render_connector_catalog(Connectors([sample_macro]))
+        assert "- params:" not in catalog
+        assert "- country:" in catalog
+        assert "- indicator:" in catalog
+
+
 class TestSnapshotEmitsAvailableConnectorsBlock:
     def _to_text(self, snapshot: AgentContextSnapshot) -> str:
         return "".join(chunk["text"] for chunk in snapshot.to_llm())
+
+    def test_available_connectors_omits_bundled_params_row(self) -> None:
+        import pandas as pd
+        from parsimony.connector import connector
+
+        @connector()
+        async def sample_macro(country: str, indicator: str) -> pd.DataFrame:
+            """Fetch macro indicator values for a country and indicator code."""
+            return pd.DataFrame({"country": [country], "indicator": [indicator]})
+
+        snap = AgentContextSnapshot(
+            files_list=[],
+            connectors_catalog=render_connector_catalog(Connectors([sample_macro])),
+        )
+        block = self._to_text(snap).split("<available_connectors>", 1)[1].split("</available_connectors>", 1)[0]
+        assert "- params:" not in block
+        assert "- country:" in block
 
     def test_empty_catalog_omits_block(self) -> None:
         snap = AgentContextSnapshot(connectors_catalog="")

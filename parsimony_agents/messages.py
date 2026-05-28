@@ -146,10 +146,7 @@ class Text(MessageContent):
             main_content = main_content + files_section
 
         # Wrap in tags if specified
-        if self.wrap_in_tags:
-            value = f"<{self.wrap_in_tags}>{main_content}</{self.wrap_in_tags}>"
-        else:
-            value = main_content
+        value = f"<{self.wrap_in_tags}>{main_content}</{self.wrap_in_tags}>" if self.wrap_in_tags else main_content
 
         return [{"type": "text", "text": value}]
 

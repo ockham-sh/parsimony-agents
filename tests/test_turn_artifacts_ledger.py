@@ -22,7 +22,6 @@ from parsimony_agents.agent.session_state import (
 )
 from parsimony_agents.identity import ArtifactRef
 
-
 # ---------------------------------------------------------------------------
 # fuse_workspace_artifacts
 # ---------------------------------------------------------------------------

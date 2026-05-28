@@ -38,12 +38,13 @@ def series_na_report(series: pd.Series, top_k: int = 5, min_run: int = 2) -> str
         return base + "(NA values scattered)"
 
     lines = []
-    for i, (ratio, start, end, length) in enumerate(top_runs):
+    for _i, (ratio, start, end, length) in enumerate(top_runs):
         warning_flag = ""
         if ratio >= 0.9 and length >= 10:
             warning_flag = "WARNING: "
         lines.append(
-            f"* {warning_flag} {length} NAs concentrated ({ratio:.1%}) in indices [{series.index[start]}, ... , {series.index[end]}]"
+            f"* {warning_flag} {length} NAs concentrated ({ratio:.1%}) "
+            f"in indices [{series.index[start]}, ... , {series.index[end]}]"
         )
     return base + "\n  " + "\n  ".join(lines)
 

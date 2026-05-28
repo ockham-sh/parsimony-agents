@@ -19,10 +19,9 @@ from __future__ import annotations
 
 __all__ = ["LoadDatasetError", "build_load_dataset", "resolve_dataset_slug"]
 
-import io
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import pandas as pd
 

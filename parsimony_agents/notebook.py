@@ -150,7 +150,10 @@ class ScriptPreview(BaseModel):
     output: KernelOutput | None = None
     ui_message: str | None = Field(
         default=None,
-        description="Optional non-technical detail after '>' in Created/… labels (return_notebook only; not used for edit_notebook).",
+        description=(
+            "Optional non-technical detail after '>' in Created/… labels "
+            "(return_notebook only; not used for edit_notebook)."
+        ),
     )
 
     @computed_field

@@ -33,12 +33,12 @@ required so prompt caches at the provider stay hot across iterations.
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Literal, Protocol
+from collections.abc import Iterable
+from typing import Any, Literal, Protocol
 
 from parsimony_agents.agent.failure.kinds import Failure
 from parsimony_agents.agent.state import RunState
-from parsimony_agents.agent.xml_render import escape_attr, escape_text
-
+from parsimony_agents.agent.xml_render import escape_attr
 
 # ---------------------------------------------------------------------------
 # Constants

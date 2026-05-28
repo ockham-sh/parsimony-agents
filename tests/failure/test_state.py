@@ -10,13 +10,12 @@ Verifies (BRIEF gaps 44–48, plan Phase 1 done criteria):
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from parsimony_agents.agent.failure import Action, Failure, FailureKind
 from parsimony_agents.agent.state import (
     RunState,
     SuspensionRecord,
-    TurnSubstate,
     compute_suspension_token,
     verify_suspension_token,
 )
@@ -86,7 +85,7 @@ def test_record_failure_attempt_increments() -> None:
 
 def test_suspension_record_round_trips() -> None:
     """:class:`SuspensionRecord` survives JSON round-trip with all gap-44–48 fields."""
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
     record = SuspensionRecord(
         run_id="r1",
         session_id="s1",
@@ -127,7 +126,7 @@ def test_suspension_tokens_are_unique_per_record() -> None:
 
 def test_suspension_token_verifies() -> None:
     """A freshly-issued token verifies under the same secret."""
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
     record = SuspensionRecord(
         run_id="r1",
         session_id="s1",
@@ -140,7 +139,7 @@ def test_suspension_token_verifies() -> None:
 
 def test_suspension_token_rejects_tamper() -> None:
     """A tampered token (wrong run_id) fails verification."""
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
     record = SuspensionRecord(
         run_id="r1",
         session_id="s1",
@@ -154,7 +153,7 @@ def test_suspension_token_rejects_tamper() -> None:
 
 def test_suspension_token_rejects_wrong_secret() -> None:
     """A token issued under one secret fails verification under another."""
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
     record = SuspensionRecord(
         run_id="r1",
         session_id="s1",
@@ -167,7 +166,7 @@ def test_suspension_token_rejects_wrong_secret() -> None:
 
 def test_suspension_token_rejects_malformed() -> None:
     """A token missing the ``nonce.digest`` separator fails verification cleanly."""
-    started = datetime.now(timezone.utc)
+    started = datetime.now(UTC)
     record = SuspensionRecord(
         run_id="r1",
         session_id="s1",

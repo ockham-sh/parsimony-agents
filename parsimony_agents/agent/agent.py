@@ -4,20 +4,20 @@ import asyncio
 import contextlib
 import json
 import logging
-import re
 import tempfile
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import litellm
 import pandas as pd
 from opentelemetry import trace
 from parsimony.connector import Connectors
-from parsimony.result import Result
+from parsimony.result import TabularResult
 from pydantic import TypeAdapter
 
 from parsimony_agents.agent.cancellation import CancellationRequest
@@ -46,7 +46,20 @@ from parsimony_agents.agent.outputs import (
     SystemToolOutput,
     UtilityToolOutput,
 )
+from parsimony_agents.agent.seen_refs import extract_seen_live_names
+from parsimony_agents.agent.xml_render import escape_attr, escape_text
 from parsimony_agents.artifacts import Chart, Dataset, Report
+from parsimony_agents.execution import (
+    DataFrameObject,
+    ExceptionObject,
+    FigureObject,
+    PrimitiveObject,
+    StringPaginator,
+)
+from parsimony_agents.execution.executor import BaseCodeExecutor
+from parsimony_agents.execution.factory import OutputFactory as FrameworkOutputFactory
+from parsimony_agents.execution.outputs import KernelOutput
+from parsimony_agents.execution.parquet_helpers import parquet_summary
 from parsimony_agents.identity import (
     ArtifactRef,
     LiveNameCollisionError,
@@ -57,31 +70,7 @@ from parsimony_agents.identity import (
     notebook_logical_id,
     report_logical_id,
 )
-from parsimony_agents.agent.seen_refs import extract_seen_live_names
-from parsimony_agents.refresh import (
-    embedded_refs_from_markdown,
-    extract_embed_keys_from_markdown,
-    refresh_artifact,
-)
-from parsimony_agents.agent.xml_render import escape_attr, escape_text
-from parsimony_agents.execution import (
-    DataFrameObject,
-    ExceptionObject,
-    FigureObject,
-    PrimitiveObject,
-    StringPaginator,
-)
-from parsimony_agents.execution.outputs import KernelOutput
-from parsimony_agents.execution.executor import BaseCodeExecutor
-from parsimony_agents.execution.factory import OutputFactory as FrameworkOutputFactory
-from parsimony_agents.execution.parquet_helpers import parquet_summary
-from parsimony_agents.messages import Message, Text, blocks_to_text
-
-# Tool message for cooperative cancellation; keeps one tool output per tool call id.
-# Used by ``_emit_cancelled_tool_events`` below; the loop body that also referenced
-# it moved to ``workspace_hooks.py`` (which keeps its own copy).
-CANCELLED_TOOL_TEXT = "Cancelled by user before the tool completed."
-
+from parsimony_agents.messages import Text, blocks_to_text
 from parsimony_agents.notebook import Script
 from parsimony_agents.notebook_io import (
     deserialize_notebook,
@@ -91,14 +80,27 @@ from parsimony_agents.notebook_io import (
 )
 from parsimony_agents.rag.keyword_store import get_or_create_session_keyword_store
 from parsimony_agents.rag.vector_store import get_or_create_session_vector_store
+from parsimony_agents.refresh import (
+    embedded_refs_from_markdown,
+    extract_embed_keys_from_markdown,
+    refresh_artifact,
+)
 from parsimony_agents.tools import ToolMethod, Tools, toolmethod
 from parsimony_agents.views import get_llm_view_defaults
+
+if TYPE_CHECKING:
+    from parsimony_agents.agent.state import SuspensionRecord
+
+# Tool message for cooperative cancellation; keeps one tool output per tool call id.
+# Used by ``_emit_cancelled_tool_events`` below; the loop body that also referenced
+# it moved to ``workspace_hooks.py`` (which keeps its own copy).
+CANCELLED_TOOL_TEXT = "Cancelled by user before the tool completed."
 
 logger = logging.getLogger("parsimony_agents")
 error_logger = logging.getLogger("parsimony_agents.errors")
 
 
-litellm.REPEATED_STREAMING_CHUNK_LIMIT = 100  # TODO: Monitor how many repeated chunks appear naturally before hitting the limit
+litellm.REPEATED_STREAMING_CHUNK_LIMIT = 100
 
 
 def _format_list_artifacts(
@@ -206,7 +208,7 @@ def _inject_connector_catalog(ctx: AgentContext, connectors: Any) -> None:
     if catalog:
         ctx.messages.insert(
             1,
-            Message(
+            AgentMessage(
                 role="user",
                 content=Text(content=f"<available_connectors>\n{catalog}\n</available_connectors>"),
                 metadata={"connectors_catalog": True},
@@ -249,7 +251,7 @@ class Agent:
         instructions: str | None = None,
         code_executor: BaseCodeExecutor | None = None,
         output_factory: FrameworkOutputFactory | None = None,
-        guardrails: AgentGuardrails = AgentGuardrails(),
+        guardrails: AgentGuardrails | None = None,
         session_id: str | None = None,
         file_store: FileStore | None = None,
         # Opaque host model identifier (product "tier"). Not interpreted by the
@@ -357,7 +359,7 @@ class Agent:
 
         self.model_config = resolved_config
 
-        self.guardrails = guardrails
+        self.guardrails = guardrails or AgentGuardrails()
 
         # Failure-handling spine attributes; resolved lazily to avoid importing
         # the spine at module load time (recovery transitively imports events,
@@ -460,7 +462,7 @@ class Agent:
         # Lazy imports for the failure-handling spine: keeps the Agent module
         # cheap to import and breaks the cycle between recovery (which imports
         # events) and this module (which exports the Agent).
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from parsimony_agents.agent.loop import run_loop
         from parsimony_agents.agent.state import RunState
@@ -511,7 +513,7 @@ class Agent:
             session_id=self.session_id,
             model_tier=self.model_tier,
             messages=list(ctx.messages),
-            started_at=datetime.now(timezone.utc),
+            started_at=datetime.now(UTC),
         )
 
         # Continuation request: reset wall-clock budget but keep transcript.
@@ -538,7 +540,7 @@ class Agent:
             m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False
         ]
         ctx.messages.append(
-            Message(role="user", content=context_snapshot, metadata={"context_snapshot": True})
+            AgentMessage(role="user", content=context_snapshot, metadata={"context_snapshot": True})
         )
         state.messages = list(ctx.messages)
 
@@ -569,7 +571,7 @@ class Agent:
         :raises SuspensionExpired: the record is older than ``max_suspension_age_s``.
         :raises ValueError: ``user_reply`` is empty.
         """
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         from parsimony_agents.agent.failure import (
             SuspensionExpired,
@@ -589,7 +591,7 @@ class Agent:
             )
 
         if max_suspension_age_s is not None:
-            age = (datetime.now(timezone.utc) - suspension.suspended_at).total_seconds()
+            age = (datetime.now(UTC) - suspension.suspended_at).total_seconds()
             if age > max_suspension_age_s:
                 raise SuspensionExpired(
                     f"suspension is {age:.0f}s old (max {max_suspension_age_s:.0f}s)"
@@ -654,7 +656,7 @@ class Agent:
             m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False
         ]
         ctx.messages.append(
-            Message(role="user", content=context_snapshot, metadata={"context_snapshot": True})
+            AgentMessage(role="user", content=context_snapshot, metadata={"context_snapshot": True})
         )
         state.messages = list(ctx.messages)
 
@@ -745,21 +747,22 @@ class Agent:
                     ui_message_completed=uic,
                 )
             ]
-        if ttype == "system":
-            if tools[tool_name].ui_message is not None or tools[tool_name].ui_message_completed is not None:
-                return [
-                    ToolEvent(
+        if ttype == "system" and (
+            tools[tool_name].ui_message is not None or tools[tool_name].ui_message_completed is not None
+        ):
+            return [
+                ToolEvent(
+                    tool_name=tool_name,
+                    tool_call_id=tool_call.id,
+                    tool_type="system",
+                    completed=True,
+                    result=SystemToolMessage(
+                        message=msg,
                         tool_name=tool_name,
-                        tool_call_id=tool_call.id,
-                        tool_type="system",
-                        completed=True,
-                        result=SystemToolMessage(
-                            message=msg,
-                            tool_name=tool_name,
-                            tool_args=tool_args,
-                        ),
-                    )
-                ]
+                        tool_args=tool_args,
+                    ),
+                )
+            ]
         return []
 
     @toolmethod(
@@ -772,7 +775,13 @@ class Agent:
             "type": "object",
             "properties": {
                 "variable_name": {"type": "string", "description": "Kernel variable, or 'df[row,col]' cell ref."},
-                "pages": {"type": "array", "description": "Up to 5 pages.", "items": {"type": "integer"}, "minItems": 1, "maxItems": 5},
+                "pages": {
+                    "type": "array",
+                    "description": "Up to 5 pages.",
+                    "items": {"type": "integer"},
+                    "minItems": 1,
+                    "maxItems": 5,
+                },
             },
             "required": ["variable_name", "pages"],
             "additionalProperties": False,
@@ -800,7 +809,11 @@ class Agent:
 
         obj_kernel = await self.code_executor.eval(variable_name)
         output = obj_kernel.outputs[0]
-        text = blocks_to_text(output.to_llm(overrides={"display_pages": display_pages}))
+        if isinstance(output, (DataFrameObject, PrimitiveObject)):
+            blocks = output.to_llm(overrides={"display_pages": display_pages})
+        else:
+            blocks = output.to_llm()
+        text = blocks_to_text(blocks)
         return SystemToolOutput(content=Text(content=text))
 
 
@@ -824,7 +837,14 @@ class Agent:
         ui_message="Reading output...",
         ui_message_completed="Read output"
     )
-    async def output_search(self, *, query: str, variable_name: str | None = None, top_k: int = 5, context: AgentContext) -> SystemToolOutput:
+    async def output_search(
+        self,
+        *,
+        query: str,
+        variable_name: str | None = None,
+        top_k: int = 5,
+        context: AgentContext,
+    ) -> SystemToolOutput:
         """Search outputs using hybrid search (keyword + semantic)."""
         from parsimony_agents.rag import hybrid_search
 
@@ -844,7 +864,11 @@ class Agent:
         except Exception as e:
             return _system_error(f"Search failed: {str(e)}")
 
-        response_text = self._format_no_search_results(query, variable_name) if not results else self._format_search_results(query, results)
+        response_text = (
+            self._format_no_search_results(query, variable_name)
+            if not results
+            else self._format_search_results(query, results)
+        )
 
         return SystemToolOutput(content=Text(content=response_text))
     
@@ -1104,7 +1128,7 @@ class Agent:
         if not path.endswith(".parquet"):
             raise ValueError("read_data only supports .parquet files.")
         full = self._workspace_root() / path
-        result = Result.from_parquet(full)
+        result = TabularResult.from_parquet(full)
         df = result.df
         head = df.head(5)
         # Connector-supplied: column names, dtypes, source, params. Escape every interpolation.
@@ -1358,10 +1382,8 @@ class Agent:
         # sibling terminal the agent has never read. ``ValueError`` from
         # path-shape edge cases (standalone tests, legacy flat paths) is
         # swallowed — there is nothing to gate against.
-        try:
+        with contextlib.suppress(ValueError):
             await self._resolve_notebook_logical_id(normalized, context)
-        except ValueError:
-            pass
         # Canonicalize newlines via in-memory round-trip — same shape the
         # snapshot store will write, so ``content_sha`` matches what the
         # streaming layer's persist step computes from the ScriptPreview.
@@ -2091,6 +2113,11 @@ class Agent:
                     f"refresh: dataset variable {dataset.variable_name!r} "
                     "is not in the kernel after refresh."
                 )
+            if not isinstance(payload, DataFrameObject):
+                raise ValueError(
+                    f"refresh: dataset variable {dataset.variable_name!r} "
+                    f"has unexpected payload type {type(payload).__name__}."
+                )
             return dataset.with_payload(payload)
         if new_ref.kind == "chart":
             from parsimony_agents.chart_io import deserialize_chart
@@ -2101,6 +2128,11 @@ class Agent:
                 raise ValueError(
                     f"refresh: chart variable {chart.variable_name!r} is "
                     "not in the kernel after refresh."
+                )
+            if not isinstance(payload, FigureObject):
+                raise ValueError(
+                    f"refresh: chart variable {chart.variable_name!r} "
+                    f"has unexpected payload type {type(payload).__name__}."
                 )
             return chart.with_payload(payload)
         if new_ref.kind == "report":
@@ -2349,8 +2381,8 @@ class Agent:
         sibling terminal and the agent must ``read_artifact`` it first.
         Passing ``None`` skips the gate for programmatic callers.
         """
-        kinds = (kind,) if kind else ("dataset", "chart", "report")
-        matches: list[tuple[str, str]] = []  # (kind, logical_id)
+        kinds: tuple[SnapshotKind, ...] = (kind,) if kind else ("dataset", "chart", "report")
+        matches: list[tuple[SnapshotKind, str]] = []  # (kind, logical_id)
         for k in kinds:
             try:
                 _ = await self.code_executor.list_workspace_files(f".ockham/{k}s")

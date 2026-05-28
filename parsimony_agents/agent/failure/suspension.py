@@ -75,7 +75,7 @@ def compute_suspension_token(
         # The wire format is ``"{nonce}.{hexdigest}"`` and verification splits on
         # the first ".". A nonce containing "." would corrupt that boundary.
         raise ValueError("suspension_token nonce must not contain '.'")
-    payload = f"{run_id}:{session_id}:{nonce}".encode("utf-8")
+    payload = f"{run_id}:{session_id}:{nonce}".encode()
     digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
     return f"{nonce}.{digest}"
 
@@ -92,7 +92,7 @@ def verify_suspension_token(
     if "." not in token:
         return False
     nonce, provided_digest = token.split(".", 1)
-    payload = f"{record.run_id}:{record.session_id}:{nonce}".encode("utf-8")
+    payload = f"{record.run_id}:{record.session_id}:{nonce}".encode()
     expected_digest = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
     return hmac.compare_digest(provided_digest, expected_digest)
 

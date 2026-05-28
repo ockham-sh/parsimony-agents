@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
 
 import pandas as pd
 import pytest
@@ -38,10 +37,8 @@ def test_origin_ledger_scope_lifecycle(tmp_path: Path) -> None:
 
 def test_nested_scope_raises() -> None:
     ledger = OriginLedger()
-    with ledger.scope("a") as _:
-        with pytest.raises(RuntimeError, match="already open"):
-            with ledger.scope("b"):
-                pass
+    with ledger.scope("a") as _, pytest.raises(RuntimeError, match="already open"), ledger.scope("b"):
+        pass
 
 
 def test_executor_stamps_origin_for_producing_run(tmp_path: Path) -> None:
@@ -185,7 +182,6 @@ def test_run_scope_dedupes_repeated_refs() -> None:
 def test_origin_captures_load_refs(tmp_path: Path) -> None:
     """When a producing run calls load_dataset, the ref lands on the origin."""
     import json
-    import pandas as pd
 
     from parsimony_agents.artifacts import Dataset
     from parsimony_agents.dataset_io import write_dataset_bytes

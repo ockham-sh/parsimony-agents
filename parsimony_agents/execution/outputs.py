@@ -152,7 +152,10 @@ class DataFrameObject(BaseOutputObject):
                     },
                     {
                         "type": "text",
-                        "text": "Data in CSV format [index=False, na_rep=`<NULL>`; column names are displayed as `<column_name> (<dtype>)` (access with `df['<column_name>'])`]:\n",
+                        "text": (
+                            "Data in CSV format [index=False, na_rep=`<NULL>`; column names are displayed "
+                            "as `<column_name> (<dtype>)` (access with `df['<column_name>'])`]:\n"
+                        ),
                     },
                 ]
             )
@@ -271,10 +274,7 @@ class PrimitiveObject(BaseOutputObject):
         view_cfg = get_llm_view_defaults("primitive")[mode].model_copy(update=overrides)
 
         if len(text) <= view_cfg.page_chars:
-            if view_cfg.minimal:
-                value = text
-            else:
-                value = f"{get_output_header(self.type, mode)}\n{text}".strip()
+            value = text if view_cfg.minimal else f"{get_output_header(self.type, mode)}\n{text}".strip()
             return [{"type": "text", "text": value}]
 
         from parsimony_agents.execution.pagination import StringPaginator
@@ -311,10 +311,8 @@ class FetchLogEntry(BaseModel):
     ``provenance`` is the upstream identity. ``data_object_ref`` pins
     the persisted snapshot — typed (``kind="data_object"``) so downstream
     code consumes a structured ref rather than a path string. ``version``
-    is the 1-based snapshot index for that data_object's ``log.jsonl``;
-    same ``v{N}`` semantic as datasets/charts/reports under the unified
-    versioning model — so the agent can tell ``"GDPC1 v1"`` (first
-    fetch) from ``"GDPC1 v3"`` (data refreshed twice in between).
+    is always ``None`` for immutable object-pool entries (data objects are
+    not versioned).
 
     Both ``data_object_ref`` and ``version`` are ``None`` when the
     executor was configured without a persister.
@@ -349,7 +347,10 @@ class KernelOutput(MessageContent):
 
     type: Literal["kernel_output"] = "kernel_output"
     outputs: list[KernelOutputType] = Field(..., description="Kernel outputs")
-    metadata: dict[str, Any] | None = Field(default=None, description="Lightweight metadata (e.g. source, source_description, code)")
+    metadata: dict[str, Any] | None = Field(
+        default=None,
+        description="Lightweight metadata (e.g. source, source_description, code)",
+    )
     fetch_log: list[FetchLogEntry] = Field(
         default_factory=list,
         description="Data fetches performed during this execution (from executor locals _fetch_log)",

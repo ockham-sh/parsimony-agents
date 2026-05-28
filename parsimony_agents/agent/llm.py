@@ -33,8 +33,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Literal
+from typing import Any, Literal
 
 import litellm
 
@@ -88,7 +89,7 @@ class LLMComplete(_LLMStreamSignalBase):
     """Terminal signal carrying the assembled response. Always last."""
 
     type: Literal["llm_complete"] = "llm_complete"
-    response: "LLMResponse | None" = None
+    response: LLMResponse | None = None
 
 
 LLMStreamSignal = LLMTextDelta | LLMReasoningDelta | LLMToolCallStarted | LLMComplete
@@ -171,7 +172,7 @@ async def _next_chunk_with_heartbeat(
     """
     try:
         return await asyncio.wait_for(aiter.__anext__(), timeout=heartbeat_s)
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         raise FailureRaised(
             Failure(
                 kind=FailureKind.transient_provider,

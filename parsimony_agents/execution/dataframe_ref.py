@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import shutil
 import tempfile
 import warnings
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, computed_field
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +55,6 @@ class DataframeRef(BaseModel):
     local_path: str
     content_hash: str
     remote_key: str | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _legacy_s3_key(cls, data: Any) -> Any:
-        if isinstance(data, dict) and data.get("s3_key") is not None and data.get("remote_key") is None:
-            return {**data, "remote_key": data["s3_key"]}
-        return data
 
     @computed_field
     @property
@@ -155,10 +149,7 @@ class DataframeRef(BaseModel):
         remote_key = f"{ref}/{content_hash}.parquet" if backend is not None else None
 
         if isinstance(dataframe, pd.Series):
-            if dataframe.name is None:
-                dataframe = dataframe.to_frame(name="value")
-            else:
-                dataframe = dataframe.to_frame()
+            dataframe = dataframe.to_frame(name="value") if dataframe.name is None else dataframe.to_frame()
 
         local_path.parent.mkdir(parents=True, exist_ok=True)
         # Coerce object-dtype columns that contain mixed Timestamps/datetimes
@@ -181,10 +172,8 @@ class DataframeRef(BaseModel):
                     continue
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", UserWarning)
-                    try:
+                    with contextlib.suppress(ValueError, TypeError):
                         dataframe[col] = pd.to_datetime(dataframe[col])
-                    except (ValueError, TypeError):
-                        pass
         with tempfile.NamedTemporaryFile(delete=False, dir=local_path.parent, suffix=".parquet") as tmp:
             tmp_path = tmp.name
             dataframe.to_parquet(tmp_path, index=True)
