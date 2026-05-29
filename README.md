@@ -1,35 +1,46 @@
 # parsimony-agents
 
-[![PyPI version](https://img.shields.io/pypi/v/parsimony-agents)](https://pypi.org/project/parsimony-agents/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![Python](https://img.shields.io/pypi/pyversions/parsimony-agents)](https://pypi.org/project/parsimony-agents/)
-[![CI](https://github.com/ockham-sh/parsimony-agents/actions/workflows/test.yml/badge.svg)](https://github.com/ockham-sh/parsimony-agents/actions)
+**Build AI agents that discover, fetch, and analyze data through code**
 
-Build AI agents that discover, fetch, and analyze data.
+[![PyPI version](https://img.shields.io/pypi/v/parsimony-agents.svg)](https://pypi.org/project/parsimony-agents/)
+[![Python](https://img.shields.io/pypi/pyversions/parsimony-agents.svg)](https://pypi.org/project/parsimony-agents/)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![CI](https://github.com/ockham-sh/parsimony-agents/actions/workflows/test.yml/badge.svg)](https://github.com/ockham-sh/parsimony-agents/actions/workflows/test.yml)
 
-### Why parsimony-agents?
+<p align="center">
+  <img src="docs/assets/parsimony-agents-hero.gif" alt="parsimony-agents: a few lines of Python build an Agent and call agent.ask() — the agent reasons in code, runs Python, fetches the UNRATE series from a FRED connector, and returns a typed Dataset and a Chart." width="900" />
+</p>
 
-LLM frameworks are generic by design. `parsimony-agents` is purpose-built for data analysis: agents write and execute Python code against typed data connectors, track provenance for every data fetch, and produce reproducible datasets and Altair visualizations. Works with any LLM provider supported by [LiteLLM](https://docs.litellm.ai/docs/providers) (OpenAI, Anthropic, Google, Azure, local models, and more).
+`parsimony-agents` is a lightweight Python **framework** for building **code-generating data-analysis agents** — something you import, not a platform you adopt. Instead of guessing at answers, the agent reasons in *code*: it discovers the data it needs through pluggable connectors, writes Python to fetch and analyze it, executes that code, inspects the results, and iterates until it has a real answer — returning typed datasets, charts, and reports along the way.
 
-## Quick Start
+You bring the pieces and the framework runs the loop that ties them together: **any LLM** (100+ providers via [LiteLLM](https://docs.litellm.ai/)), your data connectors, and your execution environment. It runs **in-process** — pure async Python, no service to stand up, no vendor lock-in — and exposes both a one-line `ask()` API and a full streaming event API for building custom UIs.
 
 ```python
-from parsimony_agents import Agent
-from parsimony import discover
-
-connectors = discover.load_all()
+from parsimony_agents import Agent, stream_to_display
+from parsimony_fred import CONNECTORS as FRED
 
 agent = Agent(
     model="claude-sonnet-4-6",
-    connectors=connectors,
+    connectors=FRED.bind(api_key="..."),
 )
 
-result = await agent.ask("Show me US GDP trends over the last 20 years")
-
-print(result.text)        # Natural language response
-print(result.datasets)    # {"us_gdp": <DataFrame>}
-print(result.code)        # {"main": Script(...), ...} — named scripts keyed by notebook name
+result = await stream_to_display(
+    agent,
+    "What is the current US unemployment rate? Fetch the data and chart it since 2020.",
+)
 ```
+
+---
+
+## Why parsimony-agents?
+
+- **Code-first, not chat-first.** The agent writes and executes real Python (pandas, numpy, scipy, statsmodels, Altair) against your data. Answers are computed, reproducible, and auditable — every result carries the notebook that produced it.
+- **Bring your own model.** No vendor lock-in. Point it at Claude, GPT, Gemini, a local Ollama model, Bedrock, Azure — anything LiteLLM supports — with one string.
+- **Data sources are pluggable.** Connectors (FRED, SDMX, FMP, or your own) are first-class. The agent discovers what's available and composes them on the fly.
+- **Typed artifacts, not raw text.** Results come back as structured `Dataset`, `Chart`, and `Report` objects with provenance and content-addressed identity — built to persist, refresh, and embed in applications.
+- **A real failure-handling spine.** A structured failure taxonomy and recovery policy (retry / hand off / suspend / terminate) replaces ad-hoc retry loops. The agent can even suspend to ask the user a question and resume later.
+- **Two ways to consume.** Use `ask()` for a complete result in one call, or `run()` to stream every event (text deltas, tool progress, errors) into your own interface.
+- **In-process and lightweight.** Pure async Python — no HTTP server, no web framework, no background workers required to get started.
 
 ## Installation
 
@@ -37,192 +48,231 @@ print(result.code)        # {"main": Script(...), ...} — named scripts keyed b
 pip install parsimony-agents
 ```
 
-Requires [parsimony](../parsimony) (installed automatically as a dependency).
+Optional feature sets (extras):
 
-## Features
+| Extra | Install | Enables |
+|---|---|---|
+| `display` | `parsimony-agents[display]` | Rich terminal output (tables, spinners, syntax-highlighted code) |
+| `rag` | `parsimony-agents[rag]` | Hybrid keyword + semantic retrieval (ChromaDB + Tantivy) for long sessions |
+| `sql` | `parsimony-agents[sql]` | In-agent SQL via DuckDB |
+| `documents` | `parsimony-agents[documents]` | Read PDF, Excel, and PowerPoint files |
+| `all` | `parsimony-agents[all]` | Everything above |
 
-### Code execution with provenance
+Requires Python 3.11 or 3.12.
 
-Agents write Python code that runs in a sandboxed executor. Every data fetch is tracked with full provenance — source, parameters, timestamps.
+## Quick start
 
-```python
-# Agent writes this code automatically:
-result = await client["fred_fetch"](series_id="GDPC1", observation_start="2005-01-01")
-gdp = result.data  # pandas DataFrame with provenance attached
+The example below uses [FRED](https://fred.stlouisfed.org/docs/api/api_key.html) (free API key) as a data source. You can swap in any connector.
+
+```bash
+pip install "parsimony-agents[display]" parsimony-fred
+export ANTHROPIC_API_KEY="sk-ant-..."   # or any LiteLLM-supported provider
+export FRED_API_KEY="..."               # free key from the link above
 ```
 
-### Composable data sources
+```python
+import asyncio
+import os
 
-Plug in any combination of data sources via [parsimony](../parsimony) connectors:
+from parsimony_agents import Agent, stream_to_display
+from parsimony_fred import CONNECTORS as FRED
+
+
+async def main() -> None:
+    agent = Agent(
+        model="claude-sonnet-4-6",
+        connectors=FRED.bind(api_key=os.environ["FRED_API_KEY"]),
+    )
+
+    # Ask a question — renders the agent's work live in the terminal
+    result = await stream_to_display(
+        agent,
+        "What is the current US unemployment rate? Fetch the data and show me.",
+    )
+
+    # Follow up in the same conversation by reusing the context
+    result = await stream_to_display(
+        agent,
+        "Now show me how it has changed since 2020.",
+        ctx=result.context,
+    )
+
+
+asyncio.run(main())
+```
+
+Prefer no terminal rendering? `agent.ask()` returns the same structured result in one line:
 
 ```python
-from parsimony import Connectors, discover
+result = await agent.ask("How has US unemployment changed since 2020?")
+
+print(result.text)                     # the agent's written answer
+print(result.datasets.keys())          # returned Datasets (DataFrames + metadata)
+print(result.charts.keys())            # returned Charts (Vega-Lite specs)
+print(result.ok)                       # True if the run finished without errors
+result.context                          # pass to the next call for multi-turn
+```
+
+## Bring your own model
+
+The `model` argument is a LiteLLM model identifier — switching providers is a one-line change:
+
+```python
+Agent(model="claude-sonnet-4-6", api_key="sk-ant-...")        # Anthropic
+Agent(model="gpt-4o", api_key="sk-...")                        # OpenAI
+Agent(model="gemini/gemini-3-flash-preview", api_key="...")    # Google
+Agent(model="ollama/llama3.1")                                 # local, no key
+```
+
+For advanced control (temperature, max tokens, base URLs, and other LiteLLM
+params) pass a `model_config` dict instead of `model`. See the
+[LiteLLM provider docs](https://docs.litellm.ai/docs/providers) for the full list.
+
+## Composing data sources
+
+Connectors are pluggable and composable. Merge several into a single agent:
+
+```python
+from parsimony import Connectors
 from parsimony_fred import CONNECTORS as FRED
 from parsimony_sdmx import CONNECTORS as SDMX
 from parsimony_fmp import CONNECTORS as FMP
 
-# Either compose explicitly...
 connectors = Connectors.merge(
-    FRED.bind(api_key="..."),
-    SDMX,
-    FMP.bind(api_key="..."),
+    FRED.bind(api_key="..."),   # US economic data (Federal Reserve)
+    SDMX,                       # international statistics (Eurostat, IMF, ...)
+    FMP.bind(api_key="..."),    # company financials & market data
 )
 
-# ...or autodiscover everything installed and bind from env vars.
-connectors = discover.load_all()
-
-agent = Agent(
-    model="claude-sonnet-4-6",
-    connectors=connectors,
-)
+agent = Agent(model="claude-sonnet-4-6", connectors=connectors)
 ```
 
-### Two consumption modes
+The agent auto-discovers the available connectors, picks the right one for each
+question, and memoizes fetches within a session to avoid redundant API calls.
+Connector results are typed and the fetch log is recorded in the produced
+notebook for a full audit trail. Build your own connectors with
+[`parsimony-core`](https://github.com/ockham-sh/parsimony) — see
+[parsimony-connectors](https://github.com/ockham-sh/parsimony-connectors) for examples.
 
-**Simple mode** — ask a question, get a structured result:
+## Streaming events
 
-```python
-result = await agent.ask("Compare Apple and Microsoft revenue growth")
-result.text        # str — natural language analysis
-result.datasets    # dict[str, Dataset] — returned datasets
-result.charts      # dict[str, Chart] — returned charts
-result.code        # dict[str, Script] — named scripts (order preserved)
-result.ok          # bool — True if no errors
-```
-
-**Streaming mode** — consume events as they arrive (see [examples/event_stream.py](examples/event_stream.py) for a runnable version):
+For custom UIs, websockets, or metrics, drive the agent with `run()` and handle
+events as they arrive:
 
 ```python
-async for event in agent.run("Analyze S&P 500 returns"):
+from parsimony_agents import Agent, AgentResult
+
+agent = Agent(model="claude-sonnet-4-6", connectors=...)
+
+result = AgentResult()
+async for event in agent.run("What is the current US unemployment rate?"):
+    result._collect(event)  # accumulate while you process
+
     match event.type:
         case "text_delta":
             print(event.content, end="", flush=True)
+        case "tool_event" if not event.completed:
+            print(f"\n  -> {event.tool_name}...", end="", flush=True)
         case "tool_event" if event.completed:
-            print(f"\n[Tool: {event.tool_name}]")
+            print(f" done ({event.ui_message_completed or 'ok'})")
         case "error":
-            print(f"\nError: {event.message}")
+            print(f"\n[error] {event.message} (recoverable={event.recoverable})")
+
+print(result.datasets.keys(), result.charts.keys(), result.ok)
 ```
 
-### Multi-turn conversations
+See [`examples/`](examples/) for complete, runnable scripts.
 
-State persists across calls — the agent remembers previous data and code:
+## How it works
 
-```python
-await agent.ask("Fetch quarterly US GDP since 2010")
-await agent.ask("Now calculate year-over-year growth rates")
-result = await agent.ask("Plot the growth rates as a bar chart")
+```mermaid
+flowchart TD
+    Q([User question]) --> CTX[Build context<br/>date · connectors · kernel state · prior artifacts]
+    CTX --> LLM[["LLM call — via LiteLLM"]]
+    LLM --> TOOLS{Tool calls}
+    TOOLS -->|write / run code| EXEC[CodeExecutor<br/>pandas · numpy · scipy · statsmodels · Altair]
+    TOOLS -->|fetch data| CONN[Connectors<br/>FRED · SDMX · FMP · your own]
+    TOOLS -->|return artifact| ART[OutputFactory<br/>→ Dataset · Chart · Report]
+    EXEC --> FEED[Feed results back to the LLM]
+    CONN --> FEED
+    ART --> FEED
+    FEED -->|not done| LLM
+    FEED -->|return_done| RESULT([AgentResult<br/>text · datasets · charts · code])
+
+    classDef accent fill:#7c3aed,stroke:#5b21b6,color:#fff;
+    classDef io fill:#0ea5e9,stroke:#0369a1,color:#fff;
+    class LLM accent;
+    class Q,RESULT io;
 ```
 
-### Notebooks and artifacts
+The agent runs a tool-driven loop: it builds a snapshot of the current
+environment, calls the LLM, dispatches the resulting tool calls (write/run code,
+return a dataset or chart, read files or data), feeds the outputs back, and
+repeats until it explicitly finishes. Generated code runs in an **in-process
+Python kernel** (`CodeExecutor`) with a serialized execution lock; outputs are
+classified by an `OutputFactory` into typed artifacts.
 
-Agents organize code into notebooks (editable, re-executable cells) and produce typed artifacts:
+> **Security note:** the built-in executor runs agent-generated Python
+> **in-process** and does **not** sandbox imports. For untrusted workloads, run
+> it inside a container or supply your own isolated executor. See
+> [`SECURITY.md`](SECURITY.md).
 
-- **Dataset** — a curated dataset with metadata, provenance, and version tracking
-- **Chart** — an Altair/Vega-Lite visualization linked to its source dataset
+## Artifacts
 
-### Built-in tools
+Every run can produce typed, persistable artifacts:
 
-| Tool | Description |
-|------|-------------|
-| `return_notebook` | Write notebook cells to disk |
-| `edit_notebook` | Edit individual cells within an existing notebook |
-| `dry_execute_code` | Preview code output without committing to state |
-| `write_file` | Write a file to the working directory |
-| `edit_file` | Apply a patch to an existing file |
-| `read_file` | Read a file from the working directory |
-| `read_data` | Fetch data from a bound connector |
-| `list_files` | List files in the working directory |
-| `restart_kernel` | Clear the executor namespace |
-| `return_dataset` | Finalize a dataset as a deliverable |
-| `return_chart` | Finalize a chart as a deliverable |
-| `return_report` | Finalize a report document as a deliverable |
-| `edit_report` | Edit an in-progress report |
-| `refresh` | Re-fetch connector data |
-| `output_read` | Read a previously returned artifact |
-| `output_search` | Semantic search across outputs (requires `[rag]` extra) |
+- **`Dataset`** — a DataFrame plus metadata and provenance (where the data came from).
+- **`Chart`** — an Altair / Vega-Lite visualization, themed and serializable to spec, image, or HTML (via `vl-convert`).
+- **`Report`** — a composed narrative document combining text, datasets, and charts.
+- **`Script`** — the executable notebook the agent built, so any result is reproducible.
 
-## Architecture
-
-```
-parsimony (connectors, catalog, Result model)
-     |
-parsimony-agents (this package)
-     |
-     +-- Agent                  — LLM loop, tool orchestration
-     +-- CodeExecutor           — in-process Python execution; workspace files are the notebook source of truth
-     +-- Notebooks              — editable, re-executable code cells
-     +-- Artifacts              — typed deliverables (datasets, charts, reports)
-     +-- OutputFactory          — value -> typed output dispatch
-     +-- RAG (optional)         — semantic + keyword search over outputs
-```
-
-## Power Usage
-
-For full control, use `Agent` directly with explicit configuration:
-
-```python
-from parsimony_agents import Agent
-from parsimony_agents.agent.config import AgentGuardrails
-from parsimony_agents.execution.executor import CodeExecutor
-from parsimony_agents.execution.factory import OutputFactory
-
-agent = Agent(
-    model_config={"model": "claude-sonnet-4-6", "api_key": "..."},
-    instructions="You are a specialized economic research agent...",
-    code_executor=CodeExecutor(cwd="/tmp/work", output_factory=OutputFactory(local_dir="/tmp/work")),
-    output_factory=OutputFactory(local_dir="/tmp/work"),
-    guardrails=AgentGuardrails(max_iterations=30, max_execution_time_s=120.0),
-    connectors=my_connectors,
-)
-```
-
-## Optional extras
-
-```bash
-pip install parsimony-agents[rag]       # ChromaDB + Tantivy for semantic search
-pip install parsimony-agents[sql]       # DuckDB for SQL over DataFrames
-pip install parsimony-agents[display]   # Rich terminal output for streaming events
-pip install parsimony-agents[all]       # Everything
-```
-
-## Supported LLM Providers
-
-`parsimony-agents` uses [LiteLLM](https://docs.litellm.ai/docs/providers) for LLM access, which supports 100+ providers:
-
-| Provider | Model example |
-|----------|--------------|
-| Anthropic | `claude-sonnet-4-6` |
-| OpenAI | `gpt-4o` |
-| Google | `gemini/gemini-2.0-flash` |
-| Azure | `azure/gpt-4o` |
-| Local (Ollama) | `ollama/llama3` |
-
-Pass any LiteLLM-compatible model string to `Agent(model="...")`.
-
-## Troubleshooting
-
-**Missing LLM API key**: Set the appropriate environment variable for your provider (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, etc.) or pass `api_key=` to the Agent constructor.
-
-**Code execution errors**: The agent executes Python code in-process. If you see import errors, ensure the required packages are installed in your environment (e.g., `pandas`, `numpy`).
-
-**Timeout errors**: For long-running analyses, increase the guardrails: `Agent(guardrails=AgentGuardrails(max_execution_time_s=600.0))`.
-
-**Streaming not printing**: Use `stream_to_display()` for formatted terminal output, or iterate `agent.run()` events manually.
+Artifacts use a dual-identity model — a stable `logical_id` ("which artifact")
+and a `content_sha` ("what it currently looks like") — so they can be refreshed,
+deduplicated, and tracked across turns. I/O helpers (`read_dataset`,
+`serialize_chart`, `save_notebook`, …) are exported from the top-level package.
 
 ## Documentation
 
-Comprehensive guides for developing, deploying, and operating parsimony-agents:
+| Doc | What's inside |
+|---|---|
+| [docs/INDEX.md](docs/INDEX.md) | Documentation hub — start here |
+| [docs/API.md](docs/API.md) | Full API reference (`Agent`, `AgentResult`, artifacts, tools) |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design, the agent loop, extension points |
+| [docs/RUNBOOK.md](docs/RUNBOOK.md) | Deployment, configuration, monitoring, troubleshooting |
+| [docs/COMMANDS.md](docs/COMMANDS.md) | Development workflow and commands |
+| [examples/](examples/) | Runnable examples (`quickstart.py`, `event_stream.py`) |
 
-**[Start with Documentation Index →](docs/index.md)** — Choose your path by role (API developer, operations, architect, contributor)
+## The Parsimony ecosystem
 
-| Guide | Purpose |
-|-------|---------|
-| [**ARCHITECTURE.md**](docs/ARCHITECTURE.md) | System design, components, data flow, extension points |
-| [**API.md**](docs/API.md) | Complete API reference for Agent, CodeExecutor, artifacts, and tools |
-| [**RUNBOOK.md**](docs/RUNBOOK.md) | Deployment, monitoring, performance tuning, and troubleshooting |
-| [**COMMANDS.md**](docs/COMMANDS.md) | Development commands: testing, linting, building, packaging |
-| [**CODEMAPS.md**](docs/CODEMAPS.md) | Code structure, module organization, and public API exports |
+`parsimony-agents` is part of the open-source **Parsimony** stack for agent-native data analysis:
+
+- **[parsimony](https://github.com/ockham-sh/parsimony)** (`parsimony-core`) — the connector protocol and typed result model.
+- **[parsimony-connectors](https://github.com/ockham-sh/parsimony-connectors)** — ready-made data connectors (FRED, SDMX, FMP, …).
+- **parsimony-agents** *(this repo)* — the code-generating analysis agent.
+- **[Ockham Terminal](https://github.com/ockham-sh/terminal)** — the full agentic data-analysis workspace built on top of this library.
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for development
+setup and guidelines, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community
+standards. In short:
+
+```bash
+git clone https://github.com/ockham-sh/parsimony-agents.git
+cd parsimony-agents
+uv venv && source .venv/bin/activate
+uv pip install -e ".[all]"
+
+uv run pytest tests/ -v        # tests
+uv run ruff check .            # lint
+uv run mypy parsimony_agents/  # type-check
+```
+
+## Security
+
+Found a vulnerability? Please **do not** open a public issue — email
+**security@ockham.sh**. See [SECURITY.md](SECURITY.md) for the full policy.
 
 ## License
 
-Apache 2.0
+Apache License 2.0 — see [LICENSE](LICENSE). Built by [Ockham](https://ockham.sh).
