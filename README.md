@@ -1,4 +1,9 @@
-# parsimony-agents
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/parsimony-agents-brand-dark.png" />
+  <img src="docs/assets/parsimony-agents-brand-light.png" alt="parsimony-agents" width="540" />
+</picture>
 
 **Build AI agents that discover, fetch, and analyze data through code**
 
@@ -6,6 +11,8 @@
 [![Python](https://img.shields.io/pypi/pyversions/parsimony-agents.svg)](https://pypi.org/project/parsimony-agents/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![CI](https://github.com/ockham-sh/parsimony-agents/actions/workflows/test.yml/badge.svg)](https://github.com/ockham-sh/parsimony-agents/actions/workflows/test.yml)
+
+</div>
 
 <p align="center">
   <img src="docs/assets/parsimony-agents-hero.gif" alt="parsimony-agents: a few lines of Python build an Agent and call agent.ask() — the agent reasons in code, runs Python, fetches the UNRATE series from a FRED connector, and returns a typed Dataset and a Chart." width="900" />
