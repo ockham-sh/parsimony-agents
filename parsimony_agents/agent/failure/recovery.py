@@ -103,7 +103,7 @@ def _build_suspension_record(
         pending_question=question,
         pending_question_context=context,
         originating_failure_kind=originating_kind,
-        model_tier=state.model_tier,
+        model_id=state.model_id,
         accumulated_reasoning=state.accumulated_reasoning,
         accumulated_reasoning_duration_s=state.accumulated_reasoning_duration_s,
         last_repeat_counts=dict(state.last_repeat_counts),

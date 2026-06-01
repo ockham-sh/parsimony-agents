@@ -130,7 +130,7 @@ async def test_run_suspends_then_resume_completes(monkeypatch: pytest.MonkeyPatc
     )
     _patch_llm(monkeypatch, script)
 
-    agent = Agent(model="test-model", model_tier="premium")
+    agent = Agent(model="test-model", model_id="premium")
 
     run_events = [event async for event in agent.run("analyze something")]
     suspensions = [e for e in run_events if isinstance(e, UserInputRequested)]
@@ -140,7 +140,7 @@ async def test_run_suspends_then_resume_completes(monkeypatch: pytest.MonkeyPatc
     assert record.pending_question == "Use dataset A or B?"
     # The opaque host model identifier rides along in the record so a resumed
     # run can be rebuilt on the same model the suspended run used.
-    assert record.model_tier == "premium"
+    assert record.model_id == "premium"
 
     resume_events = [
         event async for event in agent.resume(record, "Use dataset A")

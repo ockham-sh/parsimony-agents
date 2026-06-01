@@ -254,10 +254,10 @@ class Agent:
         guardrails: AgentGuardrails | None = None,
         session_id: str | None = None,
         file_store: FileStore | None = None,
-        # Opaque host model identifier (product "tier"). Not interpreted by the
-        # agent — carried into SuspensionRecord so Agent.resume can rebuild on the
-        # same model. The host resolves tier → model_config separately.
-        model_tier: str | None = None,
+        # Opaque host model identifier. Not interpreted by the agent — carried
+        # into SuspensionRecord so Agent.resume can rebuild on the same model.
+        # The host resolves model_id → model_config separately.
+        model_id: str | None = None,
         # --- Failure-handling spine ---
         # ``policy`` drives :func:`handle_failure` retry/backoff/handoff decisions
         # (see :class:`DefaultPolicy`). ``suspension_secret`` is the HMAC key
@@ -312,7 +312,7 @@ class Agent:
 
         self.instructions = resolved_instructions
         self.session_id = session_id or str(uuid4())
-        self.model_tier = model_tier
+        self.model_id = model_id
         self.file_store = file_store
         self._connectors = connectors
         self.code_executor = resolved_executor
@@ -511,7 +511,7 @@ class Agent:
         state = RunState(
             run_id=str(uuid4()),
             session_id=self.session_id,
-            model_tier=self.model_tier,
+            model_id=self.model_id,
             messages=list(ctx.messages),
             started_at=datetime.now(UTC),
         )
