@@ -42,6 +42,7 @@ from parsimony_agents.execution.outputs import (
     KernelOutputType,
 )
 from parsimony_agents.execution.run_scope import OriginLedger, VariableOrigin
+from parsimony_agents.execution.sanitize import assert_safe_code
 from parsimony_agents.theme import register_theme
 
 # ---------------------------------------------------------------------------
@@ -635,6 +636,7 @@ class CodeExecutor(BaseCodeExecutor):
 
             def _sync_eval() -> Any:
                 with self._working_directory(self.cwd):
+                    assert_safe_code(code, filename="workspace.py")
                     compiled = compile(code, "workspace.py", "exec", ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
                     return eval(compiled, exec_locals)  # noqa: S307
 
@@ -781,6 +783,7 @@ class CodeExecutor(BaseCodeExecutor):
 
             def _run_sync() -> Any:
                 with self._working_directory(self.cwd):
+                    assert_safe_code(code, filename="cell.py")
                     compiled = compile(
                         code,
                         "cell.py",
