@@ -62,10 +62,10 @@ class RunState(BaseModel):
     run_id: str
     session_id: str
 
-    # Opaque host-supplied model identifier (e.g. a product "tier"). The agent
-    # does not interpret it — it is carried into :class:`SuspensionRecord` so a
-    # resumed run can be reconstructed on the same model the suspended run used.
-    model_tier: str | None = None
+    # Opaque host-supplied model identifier. The agent does not interpret it —
+    # it is carried into :class:`SuspensionRecord` so a resumed run can be
+    # reconstructed on the same model the suspended run used.
+    model_id: str | None = None
 
     # Conversation transcript. Typed as ``list[Any]`` because the loop accepts
     # both plain litellm-shaped dicts and AgentMessage objects; the renderer
@@ -184,7 +184,7 @@ class RunState(BaseModel):
         return cls(
             run_id=record.run_id,
             session_id=record.session_id,
-            model_tier=record.model_tier,
+            model_id=record.model_id,
             messages=list(record.messages),
             iteration=iteration,
             failure_attempts=dict(record.failure_attempts),
@@ -227,9 +227,9 @@ class SuspensionRecord(BaseModel):
     suspension_token: str
     suspended_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
-    # Opaque host-supplied model identifier (product "tier"). Persisted so
-    # ``Agent.resume`` can rebuild the agent on the same model the run used.
-    model_tier: str | None = None
+    # Opaque host-supplied model identifier. Persisted so ``Agent.resume`` can
+    # rebuild the agent on the same model the run used.
+    model_id: str | None = None
 
     messages: list[Any] = Field(default_factory=list)
     iteration_count: int = 0

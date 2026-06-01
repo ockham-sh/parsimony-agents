@@ -283,7 +283,7 @@ def _build_suspension_record_from_tool(
     return SuspensionRecord(
         run_id=state.run_id,
         session_id=state.session_id,
-        model_tier=state.model_tier,
+        model_id=state.model_id,
         suspension_token=compute_suspension_token(
             run_id=state.run_id,
             session_id=state.session_id,
