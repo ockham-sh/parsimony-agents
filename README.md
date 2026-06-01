@@ -3,13 +3,15 @@
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/parsimony-agents-brand-dark.png" />
   <img src="docs/assets/parsimony-agents-brand-light.png" alt="parsimony-agents" width="540" />
 </picture>
-</div>
+
 
 **An AI agent framework that answers questions about data by writing and executing Python — and returns typed artifacts (datasets, charts, reports), not just prose.**
 
 [![PyPI](https://img.shields.io/pypi/v/parsimony-agents.svg)](https://pypi.org/project/parsimony-agents/)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](https://pypi.org/project/parsimony-agents/)
+
+</div>
 
 <p align="center">
   <img src="docs/assets/parsimony-agents-hero.gif" alt="parsimony-agents: a few lines of Python build an Agent and call agent.ask() — the agent reasons in code, runs Python, fetches the UNRATE series from a FRED connector, and returns a typed Dataset and a Chart." width="900" />
