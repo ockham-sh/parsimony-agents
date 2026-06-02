@@ -1254,7 +1254,7 @@ class Agent:
                 },
                 "kind": {
                     "type": "string",
-                    "enum": ["notebook", "dataset", "chart", "report", "data_object"],
+                    "enum": ["notebook", "dataset", "chart", "report"],
                     "description": "Optional filter to a single artifact kind.",
                 },
                 "limit": {
