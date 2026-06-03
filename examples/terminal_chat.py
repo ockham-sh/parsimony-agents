@@ -3,11 +3,16 @@
 A REPL-style loop that lets you ask questions, see streamed responses
 with tool progress, and maintain multi-turn context across messages.
 
+Uses ``discover.load_all()`` to bind every installed connector plugin (anything
+exposing a ``parsimony.providers`` entry point), so install whichever connector
+packages you want and provide their keys via the connectors' own environment
+variables.
+
 Prerequisites::
 
-    pip install parsimony-agents[display]
+    pip install parsimony-agents[display] parsimony-fred
+    export ANTHROPIC_API_KEY="sk-ant-..."   # or any litellm-supported provider
     export FRED_API_KEY="..."               # free: https://fred.stlouisfed.org/docs/api/api_key.html
-    export FMP_API_KEY="..."                # https://site.financialmodelingprep.com/developer/docs
 
 Run::
 
@@ -44,7 +49,7 @@ async def main() -> None:
     connectors = discover.load_all()
 
     agent = Agent(
-        model="gemini/gemini-3-flash-preview",
+        model="claude-sonnet-4-6",
         connectors=connectors,
     )
 

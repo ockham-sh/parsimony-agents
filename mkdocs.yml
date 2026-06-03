@@ -1,0 +1,36 @@
+# parsimony-agents docs are not published as a standalone site. They are
+# folded into the unified parsimony.dev site at build time via the
+# mkdocs-multirepo-plugin `!import` in parsimony/mkdocs.yml. This file only
+# needs to declare the section nav the parent site renders under "Agents".
+site_name: parsimony-agents
+docs_dir: docs
+
+nav:
+  - Overview: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+      - Configuration: getting-started/configuration.md
+  - Concepts:
+      - How it works: concepts/how-it-works.md
+      - Code execution: concepts/code-execution.md
+      - Connectors: concepts/connectors.md
+      - Events: concepts/events.md
+      - Artifacts: concepts/artifacts.md
+      - Failure and recovery: concepts/failure-and-recovery.md
+  - Guides:
+      - Multi-turn conversations: guides/multi-turn.md
+      - Streaming and displaying results: guides/streaming-and-displaying-results.md
+      - Retrieval (RAG): guides/retrieval-rag.md
+      - SQL and documents: guides/sql-and-documents.md
+      - Saving and loading artifacts: guides/saving-loading-artifacts.md
+      - Suspend and resume: guides/suspend-resume.md
+      - Embedding in a host: guides/embedding-in-a-host.md
+  - Reference:
+      - Agent: reference/agent.md
+      - Agent tools: reference/agent-tools.md
+      - Execution: reference/execution.md
+      - Events: reference/events.md
+      - Artifacts: reference/artifacts.md
+      - I/O: reference/io.md
+  - Architecture: architecture.md
