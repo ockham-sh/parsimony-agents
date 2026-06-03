@@ -3,7 +3,7 @@
 Prerequisites::
 
     pip install parsimony-agents[display]
-    export GEMINI_API_KEY="..."   # or any litellm-supported provider
+    export ANTHROPIC_API_KEY="sk-ant-..."   # or any litellm-supported provider
     export FRED_API_KEY="..."               # free: https://fred.stlouisfed.org/docs/api/api_key.html
 
 Run::
@@ -12,17 +12,12 @@ Run::
 
 For direct event access (custom UIs, websockets), see ``event_stream.py``.
 
-This example uses FRED (free API key) but you can compose any connectors::
+This example uses FRED (free API key) but you can compose any connectors. A
+:class:`~parsimony.Connectors` collection combines with ``+``::
 
-    from parsimony.connector import Connectors
     from parsimony_sdmx import CONNECTORS as SDMX
-    from parsimony_fmp import CONNECTORS as FMP
 
-    connectors = Connectors.merge(
-        FRED.bind(api_key="..."),
-        SDMX,
-        FMP.bind(api_key="..."),
-    )
+    connectors = FRED.bind(api_key="...") + SDMX
 """
 
 from __future__ import annotations
@@ -43,7 +38,7 @@ async def main() -> None:
         return
 
     agent = Agent(
-        model="gemini/gemini-3-flash-preview",
+        model="claude-sonnet-4-6",
         connectors=FRED.bind(api_key=fred_key),
     )
 

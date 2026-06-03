@@ -35,7 +35,7 @@ async def main() -> None:
         return
 
     agent = Agent(
-        model="gemini/gemini-3-flash-preview",
+        model="claude-sonnet-4-6",
         connectors=FRED.bind(api_key=fred_key),
     )
 
