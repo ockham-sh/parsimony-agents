@@ -168,8 +168,16 @@ class AgentResult:
 
     @property
     def ok(self) -> bool:
-        """``True`` if no error events occurred."""
-        return not any(getattr(e, "type", None) == "error" for e in self.events)
+        """``True`` if the run finished without an error or terminal failure.
+
+        ``handoff`` and ``partial_run_summary`` are non-interactive terminal
+        failures (the agent gave up, or ran out of budget). They carry no
+        ``error`` event, so they must be checked explicitly — otherwise a run
+        that handed off on a missing API key or an unrecoverable provider error
+        would report ``ok``.
+        """
+        failed = {"error", "handoff", "partial_run_summary"}
+        return not any(getattr(e, "type", None) in failed for e in self.events)
 
     def _collect(self, event: Any) -> None:
         """Accumulate a single event into this result (called by :meth:`Agent.ask`)."""
@@ -319,6 +327,33 @@ class Agent:
         self._output_factory = output_factory
 
         self.figures = []
+
+        # Standalone artifact discovery. A workspace host (terminal) injects
+        # read/list fns and populates session_state itself. The OSS front door
+        # has no host, so default both to the local ``.ockham/`` tree the
+        # executor already writes — otherwise list_artifacts / read_artifact are
+        # unregistered and <turn_artifacts> is empty, and the agent (instructed
+        # to reuse existing artifacts) loops on a follow-up turn with nothing to
+        # discover. ``_local_discovery`` then also drives session_state rebuild
+        # in :meth:`run` each turn.
+        self._local_discovery = read_artifact_fn is None and list_artifacts_fn is None
+        if read_artifact_fn is None or list_artifacts_fn is None:
+            from parsimony_agents.agent.local_store import (
+                list_local_artifacts,
+                read_local_artifact,
+            )
+
+            def _local_dir() -> Path:
+                return Path(getattr(resolved_executor, "cwd", None) or ".")
+
+            if read_artifact_fn is None:
+                async def read_artifact_fn(live_name, kind, options):  # type: ignore[misc]
+                    return read_local_artifact(_local_dir(), live_name, kind, options)
+
+            if list_artifacts_fn is None:
+                async def list_artifacts_fn(query, kind, limit):  # type: ignore[misc]
+                    return list_local_artifacts(_local_dir(), query, kind, limit)
+
         self._read_artifact_fn = read_artifact_fn
         self._list_artifacts_fn = list_artifacts_fn
 
@@ -500,6 +535,17 @@ class Agent:
         # Connector catalog → stable cached-prefix message (see helper docstring).
         _inject_connector_catalog(ctx, self._connectors)
 
+        # Standalone: rebuild session_state from the local .ockham/ tree at the
+        # start of every turn so <turn_artifacts> lists prior-turn work the agent
+        # can reuse. Within a turn, freshness comes from minted_refs fusion in
+        # the iteration-start hook; this only seeds turn-start discovery. A host
+        # populates session_state itself, so we leave it untouched there.
+        if self._local_discovery:
+            from parsimony_agents.agent.local_store import build_local_session_state
+
+            local_dir = Path(getattr(self.code_executor, "cwd", None) or ".")
+            ctx.session_state = build_local_session_state(self.code_executor, local_dir)
+
         # --- Legacy workspace turn state (still drives ref minting) --------
         turn_state = TurnState()
 
@@ -632,6 +678,16 @@ class Agent:
 
         # Connector catalog → stable cached-prefix message (see helper docstring).
         _inject_connector_catalog(ctx, self._connectors)
+
+        # Standalone: rebuild session_state from the local .ockham/ tree so the
+        # resumed turn sees prior artifacts in <turn_artifacts> (mirrors run();
+        # otherwise a resumed standalone run loops the same way an un-fixed
+        # follow-up turn did). A host populates session_state itself.
+        if self._local_discovery:
+            from parsimony_agents.agent.local_store import build_local_session_state
+
+            local_dir = Path(getattr(self.code_executor, "cwd", None) or ".")
+            ctx.session_state = build_local_session_state(self.code_executor, local_dir)
 
         # --- Turn state carries forward refs minted before suspension -------
         turn_state = TurnState(

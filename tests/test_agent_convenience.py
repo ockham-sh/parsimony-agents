@@ -7,7 +7,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from parsimony_agents.agent.agent import Agent, AgentResult
-from parsimony_agents.agent.events import AgentError, StateSnapshot, TextDelta
+from parsimony_agents.agent.events import (
+    AgentError,
+    Handoff,
+    PartialRunSummary,
+    StateSnapshot,
+    TextDelta,
+)
 from parsimony_agents.agent.prompts import DEFAULT_DATA_ANALYSIS_PROMPT
 
 # ---------------------------------------------------------------------------
@@ -40,6 +46,19 @@ class TestAgentResult:
         r._collect(AgentError(message="timeout", error_type="time_limit"))
         assert r.ok is False
         assert r.text == "partial"
+
+    def test_collect_handoff_makes_not_ok(self):
+        # A handoff is a terminal, non-interactive failure (e.g. missing API
+        # key → capability_gap). It carries no ``error`` event, so ``ok`` must
+        # still flip false — otherwise a failed run reports success.
+        r = AgentResult()
+        r._collect(Handoff(rationale="The AI provider rejected the request."))
+        assert r.ok is False
+
+    def test_collect_partial_run_summary_makes_not_ok(self):
+        r = AgentResult()
+        r._collect(PartialRunSummary(missing=["unemployment series"]))
+        assert r.ok is False
 
     def test_collect_state_snapshot_stores_context(self) -> None:
         r = AgentResult()

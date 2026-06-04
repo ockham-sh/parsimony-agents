@@ -140,9 +140,13 @@ def _classify_litellm_exception(exc: BaseException) -> Failure:
             metadata={"provider_error": cls_name, "detail": str(exc)},
         )
     if cls_name in permanent_classes:
+        # Permanent failures route straight to handoff (no retry), and the
+        # explanation becomes the user-facing Handoff rationale. Include the
+        # provider's own message so the panel names the real cause (e.g. a
+        # missing/invalid API key) instead of a vague generic line.
         return Failure(
             kind=FailureKind.capability_gap,
-            explanation="The AI model could not process this request.",
+            explanation=f"The AI provider rejected the request ({cls_name}): {exc}",
             metadata={"provider_error": cls_name, "detail": str(exc)},
         )
     # Default: treat unknown LLM errors as transient (retryable) but log so we

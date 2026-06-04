@@ -776,6 +776,34 @@ def _make_backend(console: Any | None = None) -> DisplayBackend:
     return _PlainDisplay()  # type: ignore[return-value]
 
 
+def _bullet_section(lines: list[str], title: str, items: list[str]) -> None:
+    """Append a titled bullet block to ``lines`` if ``items`` is non-empty."""
+    if not items:
+        return
+    lines.append("")
+    lines.append(f"{title}:")
+    lines.extend(f"  - {item}" for item in items)
+
+
+def _format_handoff(event: Any) -> str:
+    """Render a ``Handoff`` event into a human-readable error body."""
+    lines = [getattr(event, "rationale", "") or "The agent could not complete the task."]
+    _bullet_section(lines, "Blockers", list(getattr(event, "blockers", None) or []))
+    _bullet_section(lines, "Suggested next steps", list(getattr(event, "suggested_next_steps", None) or []))
+    return "\n".join(lines)
+
+
+def _format_partial_summary(event: Any) -> str:
+    """Render a ``PartialRunSummary`` event into a human-readable error body."""
+    lines = ["The run stopped before completing."]
+    plan = getattr(event, "next_step_plan", None)
+    if plan:
+        lines.extend(["", plan])
+    _bullet_section(lines, "Missing", list(getattr(event, "missing", None) or []))
+    _bullet_section(lines, "What was established", list(getattr(event, "learned_facts", None) or []))
+    return "\n".join(lines)
+
+
 async def stream_to_display(
     agent: Agent,
     message: str,
@@ -864,6 +892,21 @@ async def stream_to_display(
                     getattr(event, "message", "Unknown error"),
                     error_type=getattr(event, "error_type", None),
                 )
+
+            elif etype == "handoff":
+                # Terminal, non-interactive failure: the agent gave up. Carries
+                # no ``error`` event, so surface it explicitly — otherwise the
+                # run renders as a deceptive "ok".
+                error_count += 1
+                display.spinner_stop()
+                display.show_error(_format_handoff(event), error_type="handoff")
+
+            elif etype == "partial_run_summary":
+                # Companion to handoff: the run stopped before completing (e.g.
+                # budget exhausted with policy=stop). Also failure, also silent.
+                error_count += 1
+                display.spinner_stop()
+                display.show_error(_format_partial_summary(event), error_type="incomplete")
 
     finally:
         # Restore logger levels
