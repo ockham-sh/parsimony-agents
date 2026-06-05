@@ -62,6 +62,11 @@ discipline is what makes the loop predictable enough to embed in a product.
 - **Content-addressed lineage.** Artifacts carry a dual identity — a stable `logical_id` (which
   artifact) and a `content_sha` (which snapshot) — so an artifact can be re-derived
   (`refresh_artifact`) bottom-up and only forks a new snapshot when an upstream byte changes.
+- **Persisted deliverables.** Each `return_dataset` / `return_chart` / `return_report` (and its
+  producing notebook) is written by the framework itself to a content-addressed
+  `.ockham/<kind>s/<logical_id>/{curation.json, log.jsonl, <content_sha>.<ext>}` tree through the
+  executor storage seam — so a plain `agent.ask()` with no host still durably persists its
+  artifacts for reuse, refresh, and cross-turn discovery.
 - **Optional extras** for RAG search, SQL over kernel frames, rich terminal display, and PDF /
   Excel / PPTX document readers.
 
@@ -278,6 +283,10 @@ recovered_chart, vega_spec = read_chart("charts/trend.vl.json")
 
 `save()` enforces the right extension (`.parquet` / `.vl.json` / `.qmd`); `Dataset` accepts only
 a `DataFrameObject` payload and `Chart` only a `FigureObject` — anything else raises `TypeError`.
+These codecs are the low-level round-trip primitives; you rarely call `save()` by hand. When the
+agent publishes via `return_dataset` / `return_chart` / `return_report`, the framework persists the
+artifact for you into the structured `.ockham/<kind>s/<logical_id>/<content_sha>.<ext>` layout
+(curation sidecar, append-only log, verify-after-write) using these same codecs.
 
 ### Refresh / re-derivation
 
@@ -285,7 +294,9 @@ a `DataFrameObject` payload and `Chart` only a `FigureObject` — anything else 
 its lineage bottom-up — re-running the producing notebooks from their latest snapshot and
 re-extracting the published variable. It only appends a new `content_sha` (under the unchanged
 `logical_id`) when an upstream byte actually changed; otherwise it is a no-op. It handles
-dataset / chart / report kinds only.
+dataset / chart / report kinds only. The snapshots `refresh` walks are the ones the framework
+wrote at publish time (see **Persisted deliverables** above), and a refreshed report is
+re-validated at write time whenever a host injects a `report_validator`.
 
 ### Suspend / resume
 
@@ -445,6 +456,11 @@ not a raised exception.
   `parsimony-sdmx`, `parsimony-fmp`), which you pass to `Agent(connectors=...)`.
 - It is a normal published PyPI dependency consumed by the **Ockham terminal**, which embeds
   this agent as its analysis engine.
+
+Artifact persistence is identical in both modes: the framework writes the `.ockham/` store through
+the executor seam, so standalone runs persist deliverables exactly as the embedded terminal does —
+the terminal adds only host concerns (multi-tenant routing, archival compaction, sync-back, and a
+write-time report validator).
 
 The dependency direction is one-way: `parsimony-agents` depends on `parsimony-core`; it does not
 depend on any connector at runtime (you bring your own) nor on the terminal.

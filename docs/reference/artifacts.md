@@ -328,6 +328,8 @@ class ScriptPreview(BaseModel):
     data_objects: list[FetchLogEntry]   # default: []
     output: KernelOutput | None = None
     ui_message: str | None = None
+    logical_id: str | None = None     # framework-stamped notebook identity (after persist)
+    content_sha: str | None = None    # framework-stamped snapshot hash (after persist)
     # steps: computed property
 ```
 
@@ -339,6 +341,8 @@ class ScriptPreview(BaseModel):
 | `data_objects` | `list[FetchLogEntry]` | Connector fetches. |
 | `output` | `KernelOutput \| None` | Present only when there is output worth showing. |
 | `ui_message` | `str \| None` | Optional non-technical detail after `>` in Created/… labels (used by `return_notebook`, not `edit_notebook`). |
+| `logical_id` | `str \| None` | Framework-resolved notebook `logical_id`, stamped after the snapshot is persisted. `None` when the preview was built outside a persisted return_notebook/edit_notebook (e.g. a loading placeholder); the host then re-derives. |
+| `content_sha` | `str \| None` | Framework-resolved snapshot hash, stamped alongside `logical_id` after persist. `None` in the same not-yet-persisted case. |
 
 **Computed property:**
 

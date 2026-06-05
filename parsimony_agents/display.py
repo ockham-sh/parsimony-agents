@@ -28,11 +28,13 @@ import pandas as pd
 from parsimony.result import ColumnRole
 
 from parsimony_agents.agent.agent import Agent, AgentResult
-from parsimony_agents.artifacts import Dataset
+from parsimony_agents.artifacts import Dataset, Report
 from parsimony_agents.execution.outputs import FetchLogEntry
 
 try:
     from rich.console import Console
+    from rich.live import Live
+    from rich.markdown import Markdown
     from rich.panel import Panel
     from rich.rule import Rule
     from rich.syntax import Syntax
@@ -46,6 +48,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
+
+logger = logging.getLogger(__name__)
 
 _MAX_WIDTH = 100
 
@@ -211,6 +215,95 @@ def _render_chart_to_png(spec: dict[str, Any]) -> str | None:
         return None
 
 
+def _chart_summary(spec: dict[str, Any]) -> tuple[str, str, pd.DataFrame | None]:
+    """Summarize a Vega-Lite spec for terminal display.
+
+    Returns ``(mark, encodings, preview_df)``:
+    - ``mark``: the mark type (e.g. ``"bar"``), or ``""`` if absent.
+    - ``encodings``: compact ``"x=field, y=field, color=field"`` string built
+      from the spec's ``encoding`` channels (falls back to a channel's
+      ``aggregate`` when it carries no ``field``).
+    - ``preview_df``: a DataFrame of inline ``data.values`` rows, or ``None``
+      when the spec's data is a URL or absent.
+    """
+    mark_raw = spec.get("mark")
+    if isinstance(mark_raw, dict):
+        mark = str(mark_raw.get("type", ""))
+    elif isinstance(mark_raw, str):
+        mark = mark_raw
+    else:
+        mark = ""
+
+    enc_parts: list[str] = []
+    encoding = spec.get("encoding")
+    if isinstance(encoding, dict):
+        for channel, defn in encoding.items():
+            if not isinstance(defn, dict):
+                continue
+            field = defn.get("field")
+            if field is None:
+                field = defn.get("aggregate")
+            if field is not None:
+                enc_parts.append(f"{channel}={field}")
+    encodings = ", ".join(enc_parts)
+
+    preview_df: pd.DataFrame | None = None
+    data = spec.get("data")
+    if isinstance(data, dict):
+        values = data.get("values")
+        if isinstance(values, list) and values and isinstance(values[0], dict):
+            try:
+                preview_df = pd.DataFrame(values)
+            except Exception as exc:  # noqa: BLE001 — display must never crash
+                logger.debug("_chart_summary: could not build preview DataFrame: %s", exc)
+                preview_df = None
+    return mark, encodings, preview_df
+
+
+def _build_preview_table(
+    df: pd.DataFrame,
+    cols: list[str],
+    *,
+    rows: int,
+    tail: bool = False,
+    extra_cols: int = 0,
+) -> Any:
+    """Build a Rich ``Table`` previewing ``rows`` of ``df[cols]``.
+
+    ``tail`` shows the last ``rows`` instead of the first; ``extra_cols`` (> 0)
+    appends a dim ``"+N cols"`` column to signal hidden columns. Rich-only —
+    called from :class:`_RichDisplay`.
+    """
+    table = Table(
+        show_header=True,
+        header_style="bold",
+        show_lines=False,
+        padding=(0, 1),
+        pad_edge=True,
+    )
+    for col in cols:
+        justify = "right" if pd.api.types.is_numeric_dtype(df[col]) else "left"
+        table.add_column(str(col), justify=justify, max_width=30)
+    if extra_cols > 0:
+        table.add_column(f"+{extra_cols} cols", style="dim", max_width=10)
+    preview = df.tail(rows) if tail else df.head(rows)
+    for _, row in preview.iterrows():
+        cells = []
+        for col in cols:
+            val = row[col]
+            if pd.isna(val):
+                cells.append("[dim]--[/]")
+            elif isinstance(val, float):
+                cells.append(f"{val:.2f}")
+            else:
+                s = str(val)
+                cells.append(s[:30] + "..." if len(s) > 30 else s)
+        if extra_cols > 0:
+            cells.append("")
+        table.add_row(*cells)
+    return table
+
+
 def _open_file(path: str) -> None:
     """Best-effort open a file with the OS default viewer. Silent on failure."""
     import os
@@ -260,7 +353,8 @@ class DisplayBackend(Protocol):
     def show_error(self, message: str, error_type: str | None = None) -> None: ...
     def show_datasets(self, datasets: dict[str, Any], max_rows: int, context: Any | None = None) -> None: ...
     def show_code(self, code: dict[str, Any], max_lines: int) -> None: ...
-    def show_charts(self, charts: dict[str, Any]) -> None: ...
+    def show_charts(self, charts: dict[str, Any], *, open_charts: bool = False) -> None: ...
+    def show_reports(self, reports: dict[str, Any], max_lines: int = 40) -> None: ...
     def show_fetches(self, entries: list[FetchLogEntry]) -> None: ...
     def show_status(
         self,
@@ -271,6 +365,7 @@ class DisplayBackend(Protocol):
         chart_count: int,
         notebook_count: int,
         error_count: int,
+        report_count: int = 0,
     ) -> None: ...
 
 
@@ -283,6 +378,8 @@ class _RichDisplay:
     def __init__(self, console: Any | None = None) -> None:
         self._console = console or Console(width=_MAX_WIDTH, highlight=False)
         self._status: Any = None
+        self._live: Any = None
+        self._response_buffer = ""
 
     def banner(self, question: str) -> None:
         q = question[:120] + ("..." if len(question) > 120 else "")
@@ -327,11 +424,52 @@ class _RichDisplay:
         self._console.print()
         self._console.print(Rule("Response", style="bold"))
         self._console.print()
+        # Drive a Live region holding the response as it streams, re-rendered as
+        # Markdown on each chunk. Using Markdown (not console markup) also makes
+        # ``[...]`` in the text render as links/literals instead of being parsed
+        # as Rich markup tags. ``vertical_overflow="visible"`` keeps long
+        # responses in scrollback rather than cropping to terminal height.
+        self._response_buffer = ""
+        try:
+            self._live = Live(
+                Markdown(""),
+                console=self._console,
+                refresh_per_second=8,
+                vertical_overflow="visible",
+            )
+            self._live.start()
+        except Exception:
+            self._live = None
 
     def stream_text(self, chunk: str) -> None:
-        self._console.print(chunk, end="", highlight=False)
+        self._response_buffer += chunk
+        if self._live is not None:
+            try:
+                self._live.update(Markdown(self._response_buffer))
+                return
+            except Exception:
+                # Live failed mid-stream — drop to raw passthrough for the rest.
+                try:
+                    self._live.stop()
+                except Exception:
+                    pass
+                self._live = None
+        # Fallback path: raw text, markup disabled so brackets are not mangled.
+        self._console.print(chunk, end="", markup=False, highlight=False)
 
     def end_response(self, full_text: str) -> None:
+        text = full_text or self._response_buffer
+        if self._live is not None:
+            try:
+                self._live.update(Markdown(text))
+            except Exception:
+                pass
+            try:
+                self._live.stop()
+            except Exception:
+                pass
+            self._live = None
+        self._response_buffer = ""
         self._console.print()
 
     def show_datasets(self, datasets: dict[str, Any], max_rows: int = 5, context: Any | None = None) -> None:
@@ -363,34 +501,13 @@ class _RichDisplay:
             # Table
             rows, cols = df.shape
             display_cols = _pick_display_columns(df)
-            has_extra = len(display_cols) < cols
-            table = Table(
-                show_header=True,
-                header_style="bold",
-                show_lines=False,
-                padding=(0, 1),
-                pad_edge=True,
+            table = _build_preview_table(
+                df,
+                display_cols,
+                rows=max_rows,
+                tail=True,
+                extra_cols=cols - len(display_cols),
             )
-            for col in display_cols:
-                justify = "right" if pd.api.types.is_numeric_dtype(df[col]) else "left"
-                table.add_column(str(col), justify=justify, max_width=30)
-            if has_extra:
-                table.add_column(f"+{cols - len(display_cols)} cols", style="dim", max_width=10)
-            preview = df.tail(max_rows)
-            for _, row in preview.iterrows():
-                cells = []
-                for col in display_cols:
-                    val = row[col]
-                    if pd.isna(val):
-                        cells.append("[dim]--[/]")
-                    elif isinstance(val, float):
-                        cells.append(f"{val:.2f}")
-                    else:
-                        s = str(val)
-                        cells.append(s[:30] + "..." if len(s) > 30 else s)
-                if has_extra:
-                    cells.append("")
-                table.add_row(*cells)
             self._console.print(table)
             earlier = rows - max_rows
             if earlier > 0:
@@ -458,41 +575,20 @@ class _RichDisplay:
 
             if preview_df is not None and not preview_df.empty:
                 display_cols = _pick_display_columns(preview_df, column_schema=entry.columns, max_cols=5)
-                has_extra = len(display_cols) < len(preview_df.columns)
-                table = Table(
-                    show_header=True,
-                    header_style="bold",
-                    show_lines=False,
-                    padding=(0, 1),
-                    pad_edge=True,
-                )
-                for col in display_cols:
-                    justify = "right" if pd.api.types.is_numeric_dtype(preview_df[col]) else "left"
-                    table.add_column(str(col), justify=justify, max_width=30)
-                if has_extra:
-                    table.add_column(f"+{len(preview_df.columns) - len(display_cols)} cols", style="dim", max_width=10)
                 max_preview_rows = 3
-                for _, row in preview_df.head(max_preview_rows).iterrows():
-                    cells = []
-                    for col in display_cols:
-                        val = row[col]
-                        if pd.isna(val):
-                            cells.append("[dim]--[/]")
-                        elif isinstance(val, float):
-                            cells.append(f"{val:.2f}")
-                        else:
-                            s = str(val)
-                            cells.append(s[:30] + "..." if len(s) > 30 else s)
-                    if has_extra:
-                        cells.append("")
-                    table.add_row(*cells)
+                table = _build_preview_table(
+                    preview_df,
+                    display_cols,
+                    rows=max_preview_rows,
+                    extra_cols=len(preview_df.columns) - len(display_cols),
+                )
                 self._console.print(table)
                 remaining = rows - max_preview_rows
                 if remaining > 0:
                     self._console.print(f"  [dim]... {remaining:,} more rows[/]")
             self._console.print()
 
-    def show_charts(self, charts: dict[str, Any]) -> None:
+    def show_charts(self, charts: dict[str, Any], *, open_charts: bool = False) -> None:
         if not charts:
             return
         self._console.print()
@@ -517,13 +613,82 @@ class _RichDisplay:
             for note in getattr(chart, "notes", []):
                 self._console.print(f"  [dim]  - {note}[/]")
 
-            # Render and open
+            # Textual summary — always shown, so the chart's content survives even
+            # when image rendering is unavailable.
+            mark, encodings, preview_df = _chart_summary(spec)
+            summary_bits = [b for b in (mark, encodings) if b]
+            if summary_bits:
+                self._console.print(f"  [green]{' · '.join(summary_bits)}[/]")
+            self._console.print()
+            if preview_df is not None and not preview_df.empty:
+                display_cols = _pick_display_columns(preview_df, max_cols=5)
+                if display_cols:
+                    table = _build_preview_table(
+                        preview_df,
+                        display_cols,
+                        rows=3,
+                        extra_cols=len(preview_df.columns) - len(display_cols),
+                    )
+                    self._console.print(table)
+                    remaining = len(preview_df) - 3
+                    if remaining > 0:
+                        self._console.print(f"  [dim]... {remaining:,} more rows[/]")
+
+            # Image is a convenience: save the PNG and only pop the OS viewer when
+            # explicitly requested via ``open_charts``.
             path = _render_chart_to_png(spec)
             if path:
-                self._console.print(f"  [dim]→ {path}[/]")
-                _open_file(path)
+                self._console.print(f"  [dim]→ saved: {path}[/]")
+                if open_charts:
+                    _open_file(path)
             else:
-                self._console.print("  [dim]~ render failed[/]")
+                self._console.print("  [dim]~ image render unavailable[/]")
+            self._console.print()
+
+    def show_reports(self, reports: dict[str, Any], max_lines: int = 40) -> None:
+        if not reports:
+            return
+        self._console.print()
+        self._console.print(Rule("Reports", style="yellow"))
+        self._console.print()
+        for rid, report in reports.items():
+            title = getattr(report, "title", "") or rid
+            self._console.print(f"  [bold yellow]# {title}[/]")
+            subtitle = getattr(report, "subtitle", "")
+            if subtitle:
+                self._console.print(f"  [dim]{subtitle}[/]")
+            desc = getattr(report, "description", "")
+            if desc:
+                self._console.print(f"  [dim]{desc}[/]")
+            tags = list(getattr(report, "tags", []) or [])
+            if tags:
+                self._console.print(f"  [dim]{' · '.join(tags)}[/]")
+            for note in getattr(report, "notes", []):
+                self._console.print(f"  [dim]  - {note}[/]")
+
+            # Meta line: requested formats + embedded-artifact count.
+            formats = list(getattr(report, "formats", []) or [])
+            try:
+                embeds = len(getattr(report, "embedded_refs", []) or [])
+            except Exception:
+                embeds = 0
+            meta_bits = []
+            if formats:
+                meta_bits.append(f"formats: {', '.join(formats)}")
+            meta_bits.append(f"embeds: {embeds}")
+            self._console.print(f"  [dim]{' · '.join(meta_bits)}[/]")
+            self._console.print()
+
+            # Body rendered as Markdown, truncated by source lines. Truncation may
+            # clip a trailing code fence — acceptable for a terminal preview.
+            body = getattr(report, "markdown", "") or ""
+            lines = body.splitlines()
+            hidden = max(0, len(lines) - max_lines)
+            shown = "\n".join(lines[:max_lines]) if hidden else body
+            if shown.strip():
+                self._console.print(Markdown(shown))
+            if hidden > 0:
+                self._console.print(f"  [dim]... {hidden} more lines[/]")
             self._console.print()
 
     def show_error(self, message: str, error_type: str | None = None) -> None:
@@ -545,6 +710,7 @@ class _RichDisplay:
         chart_count: int,
         notebook_count: int,
         error_count: int,
+        report_count: int = 0,
     ) -> None:
         label = "ok" if ok else "!!"
         style = "green" if ok else "red"
@@ -556,6 +722,8 @@ class _RichDisplay:
             parts.append(f"{dataset_count} dataset{'s' if dataset_count != 1 else ''}")
         if chart_count:
             parts.append(f"{chart_count} chart{'s' if chart_count != 1 else ''}")
+        if report_count:
+            parts.append(f"{report_count} report{'s' if report_count != 1 else ''}")
         if notebook_count:
             parts.append(f"{notebook_count} notebook{'s' if notebook_count != 1 else ''}")
         if error_count:
@@ -701,12 +869,16 @@ class _PlainDisplay:
                     print(f"  ... {remaining:,} more rows")
             print()
 
-    def show_charts(self, charts: dict[str, Any]) -> None:
+    def show_charts(self, charts: dict[str, Any], *, open_charts: bool = False) -> None:
         if not charts:
             return
         print()
         print("--- Charts " + "-" * 49)
         print()
+        try:
+            from tabulate import tabulate as _tab
+        except ImportError:
+            _tab = None
         for name, chart in charts.items():
             figure = getattr(chart, "figure", None)
             if figure is None:
@@ -722,14 +894,72 @@ class _PlainDisplay:
                 print(f"  {desc}")
             for note in getattr(chart, "notes", []):
                 print(f"    - {note}")
+
+            mark, encodings, preview_df = _chart_summary(spec)
+            summary_bits = [b for b in (mark, encodings) if b]
+            if summary_bits:
+                print(f"  {' · '.join(summary_bits)}")
+            if preview_df is not None and not preview_df.empty:
+                display_cols = _pick_display_columns(preview_df, max_cols=5)
+                if display_cols:
+                    preview = preview_df[display_cols].head(3)
+                    if _tab:
+                        print(_tab(preview, headers="keys", tablefmt="simple", showindex=False))
+                    else:
+                        print(preview.to_string(index=False))
+                    remaining = len(preview_df) - 3
+                    if remaining > 0:
+                        print(f"  ... {remaining:,} more rows")
+
             path = _render_chart_to_png(spec)
             if path:
-                print(f"  → {path}")
-                _open_file(path)
+                print(f"  → saved: {path}")
+                if open_charts:
+                    _open_file(path)
             else:
-                print("  ~ render failed")
+                print("  ~ image render unavailable")
             print()
         print()
+
+    def show_reports(self, reports: dict[str, Any], max_lines: int = 40) -> None:
+        if not reports:
+            return
+        print()
+        print("--- Reports " + "-" * 48)
+        print()
+        for rid, report in reports.items():
+            title = getattr(report, "title", "") or rid
+            print(f"  # {title}")
+            subtitle = getattr(report, "subtitle", "")
+            if subtitle:
+                print(f"  {subtitle}")
+            desc = getattr(report, "description", "")
+            if desc:
+                print(f"  {desc}")
+            tags = list(getattr(report, "tags", []) or [])
+            if tags:
+                print(f"  {' · '.join(tags)}")
+            for note in getattr(report, "notes", []):
+                print(f"    - {note}")
+            formats = list(getattr(report, "formats", []) or [])
+            try:
+                embeds = len(getattr(report, "embedded_refs", []) or [])
+            except Exception:
+                embeds = 0
+            meta_bits = []
+            if formats:
+                meta_bits.append(f"formats: {', '.join(formats)}")
+            meta_bits.append(f"embeds: {embeds}")
+            print(f"  {' · '.join(meta_bits)}")
+            print()
+            body = getattr(report, "markdown", "") or ""
+            lines = body.splitlines()
+            hidden = max(0, len(lines) - max_lines)
+            for line in lines[:max_lines]:
+                print(f"  {line}")
+            if hidden > 0:
+                print(f"  ... {hidden} more lines")
+            print()
 
     def show_error(self, message: str, error_type: str | None = None) -> None:
         header = f"--- Error ({error_type}) " if error_type else "--- Error "
@@ -747,6 +977,7 @@ class _PlainDisplay:
         chart_count: int,
         notebook_count: int,
         error_count: int,
+        report_count: int = 0,
     ) -> None:
         label = "ok" if ok else "!!"
         parts = [f"Completed in {elapsed:.1f}s"]
@@ -756,6 +987,8 @@ class _PlainDisplay:
             parts.append(f"{dataset_count} dataset{'s' if dataset_count != 1 else ''}")
         if chart_count:
             parts.append(f"{chart_count} chart{'s' if chart_count != 1 else ''}")
+        if report_count:
+            parts.append(f"{report_count} report{'s' if report_count != 1 else ''}")
         if notebook_count:
             parts.append(f"{notebook_count} notebook{'s' if notebook_count != 1 else ''}")
         if error_count:
@@ -776,6 +1009,34 @@ def _make_backend(console: Any | None = None) -> DisplayBackend:
     return _PlainDisplay()  # type: ignore[return-value]
 
 
+def _bullet_section(lines: list[str], title: str, items: list[str]) -> None:
+    """Append a titled bullet block to ``lines`` if ``items`` is non-empty."""
+    if not items:
+        return
+    lines.append("")
+    lines.append(f"{title}:")
+    lines.extend(f"  - {item}" for item in items)
+
+
+def _format_handoff(event: Any) -> str:
+    """Render a ``Handoff`` event into a human-readable error body."""
+    lines = [getattr(event, "rationale", "") or "The agent could not complete the task."]
+    _bullet_section(lines, "Blockers", list(getattr(event, "blockers", None) or []))
+    _bullet_section(lines, "Suggested next steps", list(getattr(event, "suggested_next_steps", None) or []))
+    return "\n".join(lines)
+
+
+def _format_partial_summary(event: Any) -> str:
+    """Render a ``PartialRunSummary`` event into a human-readable error body."""
+    lines = ["The run stopped before completing."]
+    plan = getattr(event, "next_step_plan", None)
+    if plan:
+        lines.extend(["", plan])
+    _bullet_section(lines, "Missing", list(getattr(event, "missing", None) or []))
+    _bullet_section(lines, "What was established", list(getattr(event, "learned_facts", None) or []))
+    return "\n".join(lines)
+
+
 async def stream_to_display(
     agent: Agent,
     message: str,
@@ -786,12 +1047,13 @@ async def stream_to_display(
     show_data: bool = True,
     max_table_rows: int = 5,
     max_code_lines: int = 30,
+    open_charts: bool = False,
 ) -> AgentResult:
     """Run the agent with live terminal display, returning an :class:`AgentResult`.
 
     Wraps ``agent.run()`` with polished terminal output: a spinner during
-    analysis, numbered tool progress lines, streamed response text, dataset
-    tables, and syntax-highlighted code.
+    analysis, numbered tool progress lines, streamed Markdown response, dataset
+    tables, syntax-highlighted code, chart previews, and rendered reports.
 
     Args:
         agent: The Agent instance.
@@ -802,9 +1064,11 @@ async def stream_to_display(
         show_data: Display dataset previews (default True).
         max_table_rows: Max rows per dataset preview (default 5).
         max_code_lines: Max lines per code notebook (default 30).
+        open_charts: Also open each chart's rendered PNG in the OS image viewer
+            (default False — the in-terminal summary is always shown).
 
     Returns:
-        AgentResult with ``.text``, ``.datasets``, ``.code``, ``.charts``, ``.context``.
+        AgentResult with ``.text``, ``.datasets``, ``.code``, ``.charts``, ``.reports``, ``.context``.
     """
     # Suppress noisy internal logging during display
     _quiet_loggers = [
@@ -865,19 +1129,34 @@ async def stream_to_display(
                     error_type=getattr(event, "error_type", None),
                 )
 
+            elif etype == "handoff":
+                # Terminal, non-interactive failure: the agent gave up. Carries
+                # no ``error`` event, so surface it explicitly — otherwise the
+                # run renders as a deceptive "ok".
+                error_count += 1
+                display.spinner_stop()
+                display.show_error(_format_handoff(event), error_type="handoff")
+
+            elif etype == "partial_run_summary":
+                # Companion to handoff: the run stopped before completing (e.g.
+                # budget exhausted with policy=stop). Also failure, also silent.
+                error_count += 1
+                display.spinner_stop()
+                display.show_error(_format_partial_summary(event), error_type="incomplete")
+
     finally:
         # Restore logger levels
         for lg, level in _saved_levels:
             lg.setLevel(level)
+        # Always tear down the live regions (spinner + the Markdown ``Live``), even
+        # if ``run()`` raised mid-stream. A leaked ``Live`` keeps Rich's render
+        # thread writing to the terminal and corrupts any output the caller emits
+        # after catching the exception.
+        display.spinner_stop()
+        if response_started:
+            display.end_response(result.text)
 
-    # Ensure spinner is stopped even if no response text was emitted
-    display.spinner_stop()
-
-    # Finish response section
-    if response_started:
-        display.end_response(result.text)
-
-    # Post-response sections
+    # Post-response sections (normal completion only — skipped if ``run()`` raised)
     if show_data:
         fetch_entries = _collect_fetch_entries(result)
         display.show_fetches(fetch_entries)
@@ -888,7 +1167,9 @@ async def stream_to_display(
     if show_data:
         display.show_datasets(result.datasets, max_rows=max_table_rows, context=result.context)
 
-    display.show_charts(result.charts)
+    display.show_charts(result.charts, open_charts=open_charts)
+
+    display.show_reports(result.reports)
 
     elapsed = time.monotonic() - start
     display.show_status(
@@ -899,6 +1180,7 @@ async def stream_to_display(
         chart_count=len(result.charts),
         notebook_count=len(result.code),
         error_count=error_count,
+        report_count=len(result.reports),
     )
 
     return result
@@ -912,6 +1194,7 @@ def display_result(
     show_data: bool = True,
     max_table_rows: int = 5,
     max_code_lines: int = 30,
+    open_charts: bool = False,
 ) -> None:
     """Render a completed :class:`AgentResult` to the terminal.
 
@@ -935,7 +1218,9 @@ def display_result(
     if show_data:
         display.show_datasets(result.datasets, max_rows=max_table_rows, context=result.context)
 
-    display.show_charts(result.charts)
+    display.show_charts(result.charts, open_charts=open_charts)
+
+    display.show_reports(result.reports)
 
     display.show_status(
         ok=result.ok,
@@ -949,4 +1234,5 @@ def display_result(
         chart_count=len(result.charts),
         notebook_count=len(result.code),
         error_count=sum(1 for e in result.events if getattr(e, "type", None) == "error"),
+        report_count=len(result.reports),
     )

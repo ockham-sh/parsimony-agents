@@ -155,6 +155,13 @@ loading files into a session.
 > survive across `ask()`/`run()` calls within one process, but they are not
 > something you persist by pickling a context.
 
+The file/vector/keyword stores above hold session-scoped *retrieval indexes* and live only
+in-process — they are distinct from your returned deliverables. `return_dataset` /
+`return_chart` / `return_report` / `return_notebook` results are written to the on-disk `.ockham/`
+store by the framework itself (no host required) and rediscovered on the next turn, so a follow-up
+turn can reuse a prior turn's deliverable — even across process restarts — by `logical_id`, unlike
+the in-memory stores here.
+
 ## Capturing context from a StateSnapshot
 
 When you drive the agent with `Agent.run()` (the streaming generator) instead of

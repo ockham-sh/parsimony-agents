@@ -116,8 +116,11 @@ async def resume(
     *,
     cancellation: CancellationRequest | None = None,
     max_suspension_age_s: float | None = 86400.0,
+    configure_ctx: Callable[[AgentContext], Awaitable[None]] | None = None,
 ) -> AsyncGenerator[Any, None]
 ```
+
+`configure_ctx` is an optional async callback the host uses to re-apply runtime-only `AgentContext` seams (`report_validator`, `notebook_logical_id_resolver`, `session_state`) onto the rebuilt context. These seams are not carried in the `SuspensionRecord`, so without re-applying them a run resumed by a host would revert them to `None` — a report authored on the resumed turn would skip the write-time validator, etc. The callback runs on the rebuilt ctx before the first iteration. The standalone agent leaves these seams unset, so it does not need `configure_ctx`.
 
 A resumed run can suspend again (the agent may ask a follow-up question) — handle `UserInputRequested` in the resume stream exactly as you did the first time, persisting the *new* record each time.
 
@@ -186,6 +189,8 @@ agent.resume(record, reply, max_suspension_age_s=None)
 - If `originating_failure_kind == iteration_limit`, the iteration count resets to 0 on resume.
 
 For any other suspension (including a direct `ask_user`, where `originating_failure_kind` is `None`), both budgets are preserved.
+
+**Host seams must be re-applied.** Runtime-only `AgentContext` seams a host injected on the fresh turn — `report_validator`, `notebook_logical_id_resolver`, `session_state` — are not stored in the `SuspensionRecord`. `resume()` rebuilds `ctx` without them, so a host must re-apply them via the `configure_ctx=` callback (see the signature above). If it does not, those seams silently revert to `None` on resume — e.g. a `return_report` authored on the resumed turn would skip the write-time validator. The standalone agent injects none of these (it rebuilds standalone `session_state` from its own local `.ockham/` tree), so it needs no `configure_ctx`.
 
 ## Cancellation with `CancellationRequest` and `RunCancelled`
 

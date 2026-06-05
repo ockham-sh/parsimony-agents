@@ -140,9 +140,21 @@ def _classify_litellm_exception(exc: BaseException) -> Failure:
             metadata={"provider_error": cls_name, "detail": str(exc)},
         )
     if cls_name in permanent_classes:
+        # Permanent failures route straight to handoff (no retry), and the
+        # explanation becomes the user-facing Handoff rationale (and lands in the
+        # host's audit ledger). Name the error CLASS (safe) and a generic hint, but
+        # NOT str(exc): litellm auth/bad-request messages routinely embed the request
+        # payload, model/org identifiers, and redacted-but-present auth fragments.
+        # The raw provider message is logged server-side and kept in metadata for
+        # recorders only — never surfaced verbatim to the user.
+        _logger.warning("permanent LLM failure class=%s exc=%s", cls_name, exc)
         return Failure(
             kind=FailureKind.capability_gap,
-            explanation="The AI model could not process this request.",
+            explanation=(
+                f"The AI provider rejected the request ({cls_name}). This usually "
+                "means the model is misconfigured — e.g. a missing or invalid API "
+                "key. Check the server logs for the provider's full message."
+            ),
             metadata={"provider_error": cls_name, "detail": str(exc)},
         )
     # Default: treat unknown LLM errors as transient (retryable) but log so we

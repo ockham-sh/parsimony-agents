@@ -699,3 +699,55 @@ async def test_refresh_dataset_data_object_source_uses_fresh_fetch(tmp_path: Pat
     # log entry pins the new data_object content_sha.
     log_text = (tmp_path / f".ockham/datasets/{ref.logical_id}/log.jsonl").read_text()
     assert "new-csha-from-fresh-fetch" in log_text
+
+
+@pytest.mark.asyncio
+async def test_refresh_report_enforces_report_validator(tmp_path: Path) -> None:
+    """Refresh routes through the same write-time trust boundary as return_report.
+
+    A host-injected ``report_validator`` must gate the refreshed report body too —
+    otherwise refresh would be a back door that re-persists an unvalidated body
+    onto a host-trusted snapshot. The rejection surfaces as ReportValidationError
+    and nothing new is written.
+    """
+    from parsimony_agents.execution.artifact_store import ReportValidationError
+
+    executor = _StubExecutor(tmp_path)
+    nb_code_ds = "ds = ...\n"
+    nb_code_chart = "fig = ...\n"
+    _write_notebook(executor, "ds_nb", nb_code_ds)
+    _write_notebook(executor, "chart_nb", nb_code_chart)
+    nb_ds_ref = _nb_ref("ds_nb", nb_code_ds)
+    nb_chart_ref = _nb_ref("chart_nb", nb_code_chart)
+
+    ds_ref, _ = _persist_dataset(
+        executor,
+        notebook_refs=[nb_ds_ref], source_refs=[],
+        variable_name="ds", title="Source",
+        df=pd.DataFrame({"x": [1]}),
+    )
+    chart_ref, _ = _persist_chart(
+        executor,
+        notebook_ref=nb_chart_ref,
+        source_dataset_refs=[ds_ref], source_refs=[],
+        variable_name="fig", title="Trend", spec=_vega_spec(1),
+    )
+    markdown = "# Q1 review\n\n![chart](file://./charts/trend.vl.json)\n"
+    report_ref, _ = _persist_report(
+        executor,
+        pin_map={"trend": chart_ref},
+        title="Q1 review", markdown=markdown,
+    )
+
+    fresh_ds = DataFrameObject.from_pandas(pd.DataFrame({"x": [99]}), local_dir=tmp_path / "_dfo")
+    executor.next_variables = {"ds": fresh_ds, "fig": _vega_spec(99)}
+    executor.next_executes = [
+        KernelOutput(outputs=[], fetch_log=[]),
+        KernelOutput(outputs=[], fetch_log=[]),
+    ]
+
+    def _reject(body: str, *, pin_map_keys: frozenset[str] | None = None) -> None:
+        raise ValueError("unsafe on refresh")
+
+    with pytest.raises(ReportValidationError, match="unsafe on refresh"):
+        await refresh_artifact(report_ref, executor=executor, report_validator=_reject)

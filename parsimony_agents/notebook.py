@@ -155,6 +155,14 @@ class ScriptPreview(BaseModel):
             "(return_notebook only; not used for edit_notebook)."
         ),
     )
+    #: Framework-resolved notebook identity, stamped by the agent loop after the
+    #: snapshot is persisted (see ``workspace_hooks``). A workspace host consumes
+    #: these to build the wire ref without re-deriving the logical_id, keeping the
+    #: producer (framework) the single source of truth. ``None`` when the preview
+    #: was built outside a persisted return_notebook/edit_notebook (e.g. a loading
+    #: placeholder), in which case the host falls back to re-derivation.
+    logical_id: str | None = None
+    content_sha: str | None = None
 
     @computed_field
     @property

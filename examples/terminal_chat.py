@@ -11,7 +11,7 @@ variables.
 Prerequisites::
 
     pip install parsimony-agents[display] parsimony-fred
-    export ANTHROPIC_API_KEY="sk-ant-..."   # or any litellm-supported provider
+    export GEMINI_API_KEY="..."   # or any litellm-supported provider
     export FRED_API_KEY="..."               # free: https://fred.stlouisfed.org/docs/api/api_key.html
 
 Run::
@@ -49,7 +49,7 @@ async def main() -> None:
     connectors = discover.load_all()
 
     agent = Agent(
-        model="claude-sonnet-4-6",
+        model="gemini/gemini-3-flash-preview",
         connectors=connectors,
     )
 

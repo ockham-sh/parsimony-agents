@@ -9,7 +9,7 @@ For the high-level display experience, see ``quickstart.py``.
 Prerequisites::
 
     pip install parsimony-agents
-    export ANTHROPIC_API_KEY="sk-ant-..."   # or any litellm-supported provider
+    export GEMINI_API_KEY="..."   # or any litellm-supported provider
     export FRED_API_KEY="..."               # free: https://fred.stlouisfed.org/docs/api/api_key.html
 
 Run::

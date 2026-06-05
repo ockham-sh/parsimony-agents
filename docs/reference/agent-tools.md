@@ -360,8 +360,11 @@ continue. Declared `idempotent=True`. See [Suspend and resume](../guides/suspend
 The remaining tools let the agent read and write raw workspace files, inspect kernel state, and
 discover existing artifacts. Several are `tool_type="system"` (workspace reads / discovery), a
 couple are `tool_type="utility"` (file mutations), and `refresh` (re-running lineage) is
-`tool_type="return"`. System reads that depend on host-supplied closures (`read_artifact`,
-`list_artifacts`) are registered only when the corresponding function is provided to the `Agent`.
+`tool_type="return"`. The discovery tools `read_artifact` and `list_artifacts` are always
+registered: a host can inject `read_artifact_fn` / `list_artifacts_fn`, but when neither is
+supplied the standalone `Agent` falls back to a local backend that scans the on-disk `.ockham/`
+artifact tree (`parsimony_agents.agent.local_store`). It is all-or-nothing — a host that provides
+one must provide both.
 
 ### File tools
 
@@ -393,9 +396,10 @@ async def restart_kernel(self, *, context: AgentContext) -> SystemToolOutput
 
 ### Artifact discovery tools
 
-`read_artifact` and `list_artifacts` are `tool_type="system"`. They are registered **only** when
-the host supplies `read_artifact_fn` / `list_artifacts_fn` to the `Agent`, since they reach into
-the workspace's artifact index (including sibling-terminal artifacts).
+`read_artifact` and `list_artifacts` are `tool_type="system"`. They are always registered. With a
+host they reach into the host's artifact index (which can span sibling-terminal artifacts) via the
+supplied `read_artifact_fn` / `list_artifacts_fn`. Standalone, they are backed by the local
+`.ockham/` tree the framework writes — single-terminal, summary-level reads only.
 
 ```python
 # Read a typed artifact by live_name + kind. Optional view (summary|outline|page|full),
@@ -407,7 +411,7 @@ async def read_artifact(
 ) -> SystemToolOutput
 
 # Discover artifacts by topical query keyword. Optional kind filter; limit 1-100 (default 20).
-# Cross-terminal: returns sibling-terminal artifacts too.
+# With a host backend, can return sibling-terminal artifacts; standalone (local .ockham/) is single-terminal.
 async def list_artifacts(
     self, *, context: AgentContext,
     query: str | None = None, kind: str | None = None, limit: int = 20,

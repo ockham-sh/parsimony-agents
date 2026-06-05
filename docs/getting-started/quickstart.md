@@ -94,7 +94,7 @@ async def main() -> None:
     print(result.text)                  # assistant's final text
     print(list(result.datasets))        # logical_ids of returned datasets
     print(list(result.charts))          # logical_ids of returned charts
-    print(result.ok)                    # True if no error events occurred
+    print(result.ok)                    # True if no error/handoff/partial-run events occurred
 
 
 if __name__ == "__main__":
@@ -112,12 +112,13 @@ if __name__ == "__main__":
 | `text` | `str` | Concatenated assistant text (every `TextDelta`). |
 | `datasets` | `dict[str, Dataset]` | Returned `Dataset` objects keyed by `logical_id`. |
 | `charts` | `dict[str, Chart]` | Returned `Chart` objects keyed by `logical_id`. |
+| `reports` | `dict[str, Report]` | Returned `Report` objects keyed by `logical_id` (via `return_report`). |
 | `code` | `dict[str, Script]` | Reserved for `Script` artifacts, but **currently always empty** — see note below. |
 | `context` | `AgentContext \| None` | Final conversation context — pass back as `ctx=` to continue. |
 | `events` | `list[Any]` | The full event log yielded during the run. |
-| `ok` | `bool` (property) | `True` when no error event occurred. |
+| `ok` | `bool` (property) | `True` when the run produced no error, handoff, or partial_run_summary event. |
 
-`ok` is a computed property: it is `True` exactly when none of the collected events were errors, so `assert result.ok` is a quick check that the run completed cleanly.
+`ok` is a computed property: it is `True` only if the run produced none of `error`, `handoff`, or `partial_run_summary` events — so it is `False` on an error, a handoff (the agent gave up), or a partial/incomplete run (e.g. budget exhausted), even though handoff and partial-run summaries carry no separate error event. `assert result.ok` is a quick check that the run completed cleanly.
 
 > **`code` is not yet wired.** The `code` field is declared on `AgentResult`, but the collection step that builds the result (`AgentResult._collect`, shared by both `ask()` and `stream_to_display`) only ever populates `text`, `context`, `datasets`, and `charts`. Nothing assigns to `code`, so after a run `result.code` is **always an empty dict**. Treat it as reserved/not-yet-implemented — do not rely on it to recover the notebook source the agent ran.
 
@@ -170,16 +171,19 @@ result = await stream_to_display(
 
 `stream_to_display` requires the `display` extra (`pip install parsimony-agents[display]`); without `rich` installed it falls back to plain text. See [Streaming and displaying results](../guides/streaming-and-displaying-results.md) and the full [Events](../concepts/events.md) catalogue.
 
-## Where the results live (datasets, charts)
+## Where the results live (datasets, charts, reports)
 
 When the agent fetches data and analyzes it, it does not just describe the answer in prose — it publishes typed **artifacts**, which is what populates `AgentResult`:
 
 - **Datasets** (`result.datasets`) — each value is a `Dataset` artifact wrapping a tabular result, keyed by its content-derived `logical_id`. Returned via the agent's `return_dataset` tool.
 - **Charts** (`result.charts`) — each value is a `Chart` artifact (a Vega-Lite spec), keyed by `logical_id`. Returned via `return_chart`.
+- **Reports** (`result.reports`) — each value is a `Report` artifact (a Quarto `.qmd` body), keyed by `logical_id`. Returned via `return_report`.
 
-These are the two artifact types `AgentResult` actually surfaces today. (`result.code` is declared for `Script` artifacts but is not yet populated — see the note under [`AgentResult` fields](#agentresult-fields).)
+These are the deliverable artifact types `AgentResult` surfaces today. (`result.code` is declared for `Script` artifacts but is not yet populated — see the note under [`AgentResult` fields](#agentresult-fields).)
 
-`Dataset` and `Chart` are both importable from the top-level package (`from parsimony_agents import Dataset, Chart`). Because the keys are content-addressed `logical_id`s, the same content always lands under the same key, which is what makes lineage and re-use automatic. The deeper model — logical identity versus content hash — is covered in [Artifacts, identity & lineage](../concepts/artifacts.md).
+`Dataset`, `Chart`, and `Report` are all importable from the top-level package (`from parsimony_agents import Dataset, Chart, Report`). Because the keys are content-addressed `logical_id`s, the same content always lands under the same key, which is what makes lineage and re-use automatic. The deeper model — logical identity versus content hash — is covered in [Artifacts, identity & lineage](../concepts/artifacts.md).
+
+Results also live durably on disk, not just in memory. As each deliverable is returned, the framework persists it (and the notebook that produced it) to a content-addressed `.ockham/<kind>s/<logical_id>/` tree — `curation.json`, an append-only `log.jsonl`, and an immutable `<content_sha>.<ext>` snapshot — written through the code executor's storage seam. This happens standalone, with no host: a plain `agent.ask()` produces reusable, refreshable artifacts on disk, which is what lets a follow-up turn discover and re-use them.
 
 ## Next steps
 

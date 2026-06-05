@@ -54,6 +54,13 @@ from parsimony_agents.agent.outputs import (
 )
 from parsimony_agents.agent.tracing import trace_tool_execution
 from parsimony_agents.artifacts import Chart, Dataset, Report
+from parsimony_agents.execution.artifact_store import (
+    ReportValidationError,
+    log_inputs_for,
+    persist_artifact,
+    persist_notebook,
+    render_artifact_bytes,
+)
 from parsimony_agents.execution.outputs import KernelOutput
 from parsimony_agents.identity import (
     ArtifactRef,
@@ -200,9 +207,7 @@ class WorkspaceRunHooks:
             minted_refs=self.turn_state.minted_refs,
             minted_live_names=self.turn_state.minted_live_names,
         )
-        self.ctx.messages = [
-            m for m in self.ctx.messages if m.metadata.get("context_snapshot", False) is False
-        ]
+        self.ctx.messages = [m for m in self.ctx.messages if m.metadata.get("context_snapshot", False) is False]
         self.ctx.messages.append(
             Message(
                 role="user",
@@ -266,14 +271,10 @@ class WorkspaceRunHooks:
     # ------------------------------------------------------------------
     # Hook 4: on_llm_complete
     # ------------------------------------------------------------------
-    async def on_llm_complete(
-        self, state: Any, response: Any, *, latency_ms: int
-    ) -> AsyncIterator[Any]:
+    async def on_llm_complete(self, state: Any, response: Any, *, latency_ms: int) -> AsyncIterator[Any]:
         # --- Emit LLMCallCompleted (legacy event, reconstructed) --------
         _assembled_message = (
-            response.raw.choices[0].message
-            if response.raw and getattr(response.raw, "choices", None)
-            else None
+            response.raw.choices[0].message if response.raw and getattr(response.raw, "choices", None) else None
         )
         _usage_obj = getattr(response.raw, "usage", None) if response.raw else None
         _usage_dict: dict[str, Any] | None = None
@@ -314,22 +315,12 @@ class WorkspaceRunHooks:
                 _args = json.loads(_raw_args)
             except json.JSONDecodeError as _exc:
                 _args = {"_raw": _raw_args, "_decode_error": str(_exc)}
-            _tool_calls_payload.append(
-                {"id": _tc.id, "name": _tc.function.name, "args": _args}
-            )
+            _tool_calls_payload.append({"id": _tc.id, "name": _tc.function.name, "args": _args})
 
         yield LLMCallCompletedEvent(
             iteration=state.iteration,
-            response_text=(
-                (getattr(_assembled_message, "content", None) or "")
-                if _assembled_message
-                else ""
-            ),
-            reasoning_text=(
-                getattr(_assembled_message, "reasoning_content", None)
-                if _assembled_message
-                else None
-            ),
+            response_text=((getattr(_assembled_message, "content", None) or "") if _assembled_message else ""),
+            reasoning_text=(getattr(_assembled_message, "reasoning_content", None) if _assembled_message else None),
             tool_calls=_tool_calls_payload,
             usage=_usage_dict,
             latency_ms=latency_ms,
@@ -458,9 +449,7 @@ class WorkspaceRunHooks:
                 continue
             llm_ui_message = tool_args.pop("_ui_message", None)
 
-            if tool_name == "dry_execute_code" and not (
-                isinstance(llm_ui_message, str) and llm_ui_message.strip()
-            ):
+            if tool_name == "dry_execute_code" and not (isinstance(llm_ui_message, str) and llm_ui_message.strip()):
                 obs = _append_tool_msg_and_observe(
                     ctx,
                     content=(
@@ -519,9 +508,7 @@ class WorkspaceRunHooks:
                 elif tool_name == "edit_notebook" and tool_args.get("execute") is True:
                     loading_label = "Editing and running notebook"
                 if tool_name in ("return_notebook", "edit_notebook"):
-                    preview = ScriptPreview(
-                        path=notebook_path, code=tool_args.get("code", "") or ""
-                    )
+                    preview = ScriptPreview(path=notebook_path, code=tool_args.get("code", "") or "")
                 else:
                     preview = ScriptPreview(path=notebook_path, code="")
                 preview.ui_message = loading_label
@@ -543,8 +530,7 @@ class WorkspaceRunHooks:
                         ui_message=loading_label or f"Executing {tool_name}",
                         metadata=self.agent._utility_tool_metadata(
                             tool_name=tool_name,
-                            tool_description=tools[tool_name].ui_description
-                            or tools[tool_name].description,
+                            tool_description=tools[tool_name].ui_description or tools[tool_name].description,
                             tool_args=tool_args,
                         ),
                     ),
@@ -583,9 +569,7 @@ class WorkspaceRunHooks:
                     continue
                 tool_args = json.loads(tool_call.function.arguments)
                 tool_args.pop("_ui_message", None)
-                for tev in self.agent._emit_cancelled_tool_events(
-                    tools, tool_name, tool_args, tool_call
-                ):
+                for tev in self.agent._emit_cancelled_tool_events(tools, tool_name, tool_args, tool_call):
                     yield tev
                 obs = _append_tool_msg_and_observe(
                     ctx,
@@ -597,8 +581,7 @@ class WorkspaceRunHooks:
                 yield obs
             logger.info(
                 "Run cancelled",
-                extra={"phase": "pre_tool_batch", "reason": cancellation.reason,
-                       "iteration": state.iteration},
+                extra={"phase": "pre_tool_batch", "reason": cancellation.reason, "iteration": state.iteration},
             )
             yield RunCancelled(
                 message="The run was cancelled before the remaining tools could finish.",
@@ -619,17 +602,13 @@ class WorkspaceRunHooks:
         # request so the surrounding loop exits after the batch finishes.
         pending_termination: tuple[str, Any] | None = None
 
-        for (tool_call, _sig_str, repeat_count, _), raw_result in zip(
-            tool_executions, raw_results, strict=True
-        ):
+        for (tool_call, _sig_str, repeat_count, _), raw_result in zip(tool_executions, raw_results, strict=True):
             tool_name = tool_call.function.name
             tool_args = json.loads(tool_call.function.arguments)
             llm_ui_message = tool_args.pop("_ui_message", None)
 
             if isinstance(raw_result, asyncio.CancelledError):
-                for tev in self.agent._emit_cancelled_tool_events(
-                    tools, tool_name, tool_args, tool_call
-                ):
+                for tev in self.agent._emit_cancelled_tool_events(tools, tool_name, tool_args, tool_call):
                     yield tev
                 obs = _append_tool_msg_and_observe(
                     ctx,
@@ -694,9 +673,7 @@ class WorkspaceRunHooks:
             match tools[tool_name].tool_type:
                 case "utility":
                     ui_message = tools[tool_name].ui_message or f"Executing {tool_name}"
-                    ui_message_completed = (
-                        llm_ui_message or tools[tool_name].ui_message_completed
-                    )
+                    ui_message_completed = llm_ui_message or tools[tool_name].ui_message_completed
 
                     if tool_result.data:
                         tool_call_output = tool_result.data
@@ -717,8 +694,7 @@ class WorkspaceRunHooks:
                             ui_message_completed=ui_message_completed,
                             metadata=self.agent._utility_tool_metadata(
                                 tool_name=tool_name,
-                                tool_description=tools[tool_name].ui_description
-                                or tools[tool_name].description,
+                                tool_description=tools[tool_name].ui_description or tools[tool_name].description,
                                 tool_args=tool_args,
                             ),
                             content=Text(content=f"Error: {tool_result.exception_message}"),
@@ -738,42 +714,92 @@ class WorkspaceRunHooks:
                         tool_call_output = tool_result.data
                         return_types = (Dataset, Chart, Report)
                         if isinstance(tool_call_output, return_types):
-                            yield ToolEvent(
-                                tool_name=tool_name,
-                                tool_call_id=tool_call.id,
-                                tool_type="return",
-                                completed=True,
-                                result=tool_call_output,
-                                ui_message=return_loading,
-                                ui_message_completed=llm_ui_message,
-                            )
-                            if tool_call_output.logical_id and tool_call_output.content_sha:
-                                turn_state.minted_refs.append(
-                                    ArtifactRef(
-                                        kind=tool_call_output.type,
-                                        logical_id=tool_call_output.logical_id,
-                                        content_sha=tool_call_output.content_sha,
+                            artifact = tool_call_output
+                            kind = artifact.type
+                            # Persist the deliverable to the workspace tree so it
+                            # is durable, discoverable (<turn_artifacts> /
+                            # list_artifacts), and reusable (load_dataset / refresh
+                            # / lineage). This also stamps ``content_sha``, which
+                            # the mint check below requires. Without it the agent
+                            # loops on follow-up turns with nothing on disk.
+                            # Gated on logical_id (the same identity gate the mint
+                            # uses): real return_* always set it; an identity-less
+                            # artifact has nothing to persist under and passes
+                            # through unpersisted, exactly as before.
+                            # Host trust boundary: a workspace host may inject a
+                            # report_validator that rejects unsafe report bodies
+                            # (active HTML, executable fences, out-of-allowlist
+                            # refs). It runs INSIDE persist_artifact, before any
+                            # bytes are written — the single write-time chokepoint
+                            # every report writer (here and refresh) routes through,
+                            # so unsafe bytes never reach the tree (every read/render
+                            # path then trusts the snapshot) and the agent can
+                            # self-correct. A rejection surfaces as
+                            # ReportValidationError, distinct from a storage failure.
+                            # The standalone agent injects nothing, so this is inert.
+                            validation_exc: Exception | None = None
+                            persist_exc: Exception | None = None
+                            if artifact.logical_id:
+                                validator = getattr(ctx, "report_validator", None)
+                                try:
+                                    await persist_artifact(
+                                        self.agent.code_executor,
+                                        kind=kind,
+                                        artifact=artifact,
+                                        blob=render_artifact_bytes(artifact, kind),
+                                        log_inputs=log_inputs_for(artifact, kind),
+                                        report_validator=validator,
                                     )
+                                except ReportValidationError as exc:
+                                    validation_exc = exc
+                                except Exception as exc:  # noqa: BLE001 — surface, don't crash the turn
+                                    logger.exception("Failed to persist %s artifact", tool_name)
+                                    persist_exc = exc
+                            if validation_exc is not None:
+                                tool_call_output = (
+                                    f"The {tool_name} call produced a {kind} that FAILED validation "
+                                    f"and was NOT published: {validation_exc}. Fix the report body "
+                                    "(remove active HTML / executable code fences / disallowed file "
+                                    "refs) and publish again."
                                 )
-                                ln = getattr(tool_call_output, "live_name", None)
-                                if ln:
-                                    turn_state.minted_live_names[
-                                        f"{tool_call_output.type}:{tool_call_output.logical_id}"
-                                    ] = ln
+                            elif persist_exc is not None:
+                                tool_call_output = (
+                                    f"The {tool_name} call produced a valid {kind} but it could "
+                                    f"not be saved to the workspace: {persist_exc}. Nothing was "
+                                    "published; the deliverable does not exist for reuse."
+                                )
+                            else:
+                                yield ToolEvent(
+                                    tool_name=tool_name,
+                                    tool_call_id=tool_call.id,
+                                    tool_type="return",
+                                    completed=True,
+                                    result=artifact,
+                                    ui_message=return_loading,
+                                    ui_message_completed=llm_ui_message,
+                                )
+                                if artifact.logical_id and artifact.content_sha:
+                                    turn_state.minted_refs.append(
+                                        ArtifactRef(
+                                            kind=artifact.type,
+                                            logical_id=artifact.logical_id,
+                                            content_sha=artifact.content_sha,
+                                        )
+                                    )
+                                    ln = getattr(artifact, "live_name", None)
+                                    if ln:
+                                        turn_state.minted_live_names[f"{artifact.type}:{artifact.logical_id}"] = ln
                     else:
                         tool_call_output = tool_result.exception_message
 
                 case "code":
-                    tool_call_output = (
-                        tool_result.data if tool_result.data else tool_result.exception_message
-                    )
+                    tool_call_output = tool_result.data if tool_result.data else tool_result.exception_message
                     if tool_result.success:
                         notebook_path = self.agent._resolve_code_tool_path(tool_args)
                         if notebook_path is None:
                             raise ValueError("code tools require a non-empty 'path'.")
                         ran_kernel = (
-                            tool_name in ("return_notebook", "edit_notebook")
-                            and tool_args.get("execute") is True
+                            tool_name in ("return_notebook", "edit_notebook") and tool_args.get("execute") is True
                         )
                         script = await self.agent._notebook_script_after_tool(
                             tool_name=tool_name,
@@ -784,9 +810,7 @@ class WorkspaceRunHooks:
                         if ran_kernel:
                             ko = tool_result.data
                             if not isinstance(ko, KernelOutput):
-                                raise TypeError(
-                                    f"{tool_name} with kernel run did not return KernelOutput"
-                                )
+                                raise TypeError(f"{tool_name} with kernel run did not return KernelOutput")
                             script.output = ko
                             script.data_objects = stamp_fetch_log_to_script(ko)
                         notebook = script
@@ -795,43 +819,81 @@ class WorkspaceRunHooks:
                             preview.ui_message = (llm_ui_message or "").strip() or None
                         else:
                             preview.ui_message = None
-                        yield ToolEvent(
-                            tool_name=tool_name,
-                            tool_call_id=tool_call.id,
-                            tool_type="code",
-                            completed=True,
-                            result={"notebook": notebook, "preview": preview},
-                            ui_message_completed=llm_ui_message,
-                            also_executed=ran_kernel,
-                        )
+                        # Persist the recipe snapshot BEFORE emitting the event.
+                        # ``yield`` hands control to the consumer, and the
+                        # workspace host reads the snapshot back the instant it
+                        # processes this event (to build the file-ref chunk) — so
+                        # it must already be on disk. This mirrors the
+                        # return-artifact case above (persist-before-yield).
+                        # Persisting also feeds downstream return_dataset lineage
+                        # and cross-turn discovery. On failure we skip the event
+                        # (the host would have nothing to read back) and surface a
+                        # warning to the LLM so it can self-correct.
+                        emit_code_event = True
                         if tool_name in ("return_notebook", "edit_notebook"):
                             try:
-                                nb_ref = await self.agent._notebook_ref_for(
-                                    script.code, notebook_path, ctx
-                                )
+                                nb_ref = await self.agent._notebook_ref_for(script.code, notebook_path, ctx)
                             except LiveNameCollisionError as exc:
                                 nb_ref = ArtifactRef(
                                     kind="notebook",
                                     logical_id=exc.existing_logical_id,
                                     content_sha=notebook_content_sha(script.code),
                                 )
-                            turn_state.minted_refs.append(nb_ref)
                             try:
-                                nb_live_name = notebook_logical_id(notebook_path)
-                            except ValueError:
-                                nb_live_name = None
-                            if nb_live_name:
-                                turn_state.minted_live_names[
-                                    f"notebook:{nb_ref.logical_id}"
-                                ] = nb_live_name
+                                await persist_notebook(
+                                    self.agent.code_executor,
+                                    ref=nb_ref,
+                                    code=script.code,
+                                    notebook_path=notebook_path,
+                                )
+                            except Exception as exc:  # noqa: BLE001 — surface, don't crash the turn
+                                logger.exception("Failed to persist notebook %s", notebook_path)
+                                # Prepend the warning to the kernel output rather
+                                # than replacing it: the LLM still needs the run
+                                # result (stdout / errors) to decide next steps.
+                                tool_call_output = [
+                                    {
+                                        "type": "text",
+                                        "text": (
+                                            "WARNING: the notebook ran but its snapshot "
+                                            f"could not be saved ({exc}); publishing "
+                                            "datasets/charts from it will fail until this "
+                                            "is resolved.\n\n"
+                                        ),
+                                    },
+                                    *Message._normalize_content(tool_call_output),
+                                ]
+                                emit_code_event = False
+                            else:
+                                # Stamp the framework-resolved identity onto the
+                                # preview so the host reads it back directly instead
+                                # of re-deriving logical_id/content_sha (which would
+                                # duplicate the resolver and miss the content_sha
+                                # fallback). Symmetric with the return-artifact seam,
+                                # where content_sha/logical_id ride on the artifact.
+                                preview.logical_id = nb_ref.logical_id
+                                preview.content_sha = nb_ref.content_sha
+                                turn_state.minted_refs.append(nb_ref)
+                                try:
+                                    nb_live_name = notebook_logical_id(notebook_path)
+                                except ValueError:
+                                    nb_live_name = None
+                                if nb_live_name:
+                                    turn_state.minted_live_names[f"notebook:{nb_ref.logical_id}"] = nb_live_name
+                        if emit_code_event:
+                            yield ToolEvent(
+                                tool_name=tool_name,
+                                tool_call_id=tool_call.id,
+                                tool_type="code",
+                                completed=True,
+                                result={"notebook": notebook, "preview": preview},
+                                ui_message_completed=llm_ui_message,
+                                also_executed=ran_kernel,
+                            )
 
                 case "system":
                     tool_call_output = tool_result.data
-                    system_ui = (
-                        llm_ui_message
-                        or tools[tool_name].ui_message_completed
-                        or tools[tool_name].ui_message
-                    )
+                    system_ui = llm_ui_message or tools[tool_name].ui_message_completed or tools[tool_name].ui_message
                     if system_ui is not None:
                         yield ToolEvent(
                             tool_name=tool_name,
@@ -873,13 +935,10 @@ class WorkspaceRunHooks:
             yield obs
 
         if any(isinstance(r, asyncio.CancelledError) for r in raw_results) and not state.done:
-            cancel_reason = (
-                cancellation.reason if cancellation is not None else "user_request"
-            )
+            cancel_reason = cancellation.reason if cancellation is not None else "user_request"
             logger.info(
                 "Run cancelled",
-                extra={"phase": "tool_execution", "reason": cancel_reason,
-                       "iteration": state.iteration},
+                extra={"phase": "tool_execution", "reason": cancel_reason, "iteration": state.iteration},
             )
             yield RunCancelled(
                 message="The run was cancelled while tools were executing.",
