@@ -20,8 +20,13 @@ package:
 | --- | --- | --- |
 | **The loop** | Drives one run end-to-end: render state, call the LLM once, dispatch tools, repeat until a termination tool or a hard failure sets `state.done`. | `parsimony_agents/agent/loop.py` (`run_loop`) |
 | **Code execution** | Runs the agent's Python in a stateful kernel namespace, captures typed outputs, attributes variable lineage. | `parsimony_agents/execution/` (`BaseCodeExecutor`, `CodeExecutor`, `OutputFactory`) |
-| **Artifact identity** | Gives every notebook/dataset/chart/report/data_object two stable IDs (`logical_id` + `content_sha`) and a uniform on-disk layout. | `parsimony_agents/identity.py` |
+| **Artifact identity** | Gives every notebook/dataset/chart/report/data_object two stable IDs (`logical_id` + `content_sha`) and a uniform on-disk layout, and persists `return_*` deliverables into that layout through the executor storage seam. | `parsimony_agents/identity.py`, `parsimony_agents/execution/artifact_store.py` |
 | **Failure spine** | Classifies every failure into a closed `FailureKind`, funnels it through a `RecoveryPolicy`, and turns it into an instruction, a suspension, or a handoff. | `parsimony_agents/agent/failure/` (`handle_failure`, `RecoveryPolicy`) |
+
+The framework persists deliverables itself: when the agent returns a dataset, chart, report, or
+notebook, `execution/artifact_store.py` writes the `.ockham/` snapshot triplet through the executor
+seam — so standalone `parsimony-agents` needs no host for durability, and report bodies are
+validated at this single write-time chokepoint.
 
 The design rule that ties them together is documented at the top of
 `loop.py`: **one LLM chokepoint, one failure funnel, one pure renderer, three
@@ -172,7 +177,19 @@ class BaseCodeExecutor(ABC):
 
     @abstractmethod
     async def clear_namespace(self) -> None: ...
+
+    @abstractmethod
+    async def read_workspace_file(self, path: str) -> bytes: ...
+
+    @abstractmethod
+    async def write_workspace_file(self, path: str, data: bytes) -> None: ...
 ```
+
+`BaseCodeExecutor` is also the **storage seam**: artifact persistence
+(`execution/artifact_store.py`) writes the `.ockham/` triplet exclusively through
+`read_workspace_file` / `write_workspace_file`, so the same registry persists deliverables whether
+the executor is in-process (local fs) or a remote sandbox. Subclassing the executor therefore also
+redirects where deliverables are persisted.
 
 The default `CodeExecutor`:
 
@@ -224,8 +241,11 @@ hash their identity inputs; a data_object hashes its provenance minus
 
 (`data_object` bytes are the exception: they are immutable pool entries addressed
 only by `content_sha` under `.ockham/objects/<sha[:2]>/<sha[2:]>.parquet`.) A
-logical artifact accumulates immutable snapshots over time; a `log.jsonl` next to
-the snapshots is the version history.
+logical artifact accumulates immutable snapshots over time. Alongside the snapshots,
+`.ockham/<kind>s/<logical_id>/` holds two sidecars: `log.jsonl` (the append-only,
+`content_sha`-deduped version history) and `curation.json` (the editable metadata
+sidecar — title/description/tags/notes/live_name, with the first-publish `created_at`
+preserved).
 
 The frozen `ArtifactRef` dataclass pins one `content_sha` of one `logical_id`,
 and `workspace_file_path` computes the canonical path:
@@ -314,6 +334,12 @@ validates the token, checks staleness (`max_suspension_age_s`, default 24h),
 rebuilds the state via `RunState.from_suspension`, appends the user reply as a
 normal user message, and re-enters the loop:
 
+A host passes `configure_ctx=` to `Agent.resume` to re-apply runtime-only `AgentContext` seams
+(`report_validator`, the notebook resolver, `session_state`) — these runtime-only seams are not
+carried in the `SuspensionRecord`; without the callback they revert to `None` on resume (a report
+authored on a resumed turn would skip its write-time validator). The standalone CLI user injects no
+seams, so the plain `agent.resume(record, reply)` form below is unaffected.
+
 ```python
 import asyncio
 
@@ -375,7 +401,10 @@ parsimony_agents/
 │       ├── recovery.py    # handle_failure — the one recovery funnel
 │       └── suspension.py  # compute/verify_suspension_token (HMAC), SuspensionRequest
 └── execution/
-    ├── executor.py        # BaseCodeExecutor (swap point), CodeExecutor (in-process)
+    ├── artifact_store.py  # persist_artifact / persist_notebook / render_artifact_bytes —
+    │                      #   writes the .ockham triplet via the executor storage seam;
+    │                      #   ReportValidator / ReportValidationError / SnapshotIntegrityError
+    ├── executor.py        # BaseCodeExecutor (swap point + storage seam), CodeExecutor (in-process)
     ├── factory.py         # OutputFactory
     └── outputs.py         # KernelOutput, DataFrameObject, FigureObject,
                            #   PrimitiveObject, ExceptionObject, FetchLogEntry
@@ -395,4 +424,3 @@ the only place that wires all four pillars together.
 - [Failure handling & recovery](concepts/failure-and-recovery.md) — the spine in detail.
 - [Embedding in a host application](guides/embedding-in-a-host.md) — hooks, custom executors, custom policies.
 - [Agent, AgentResult, AgentConfig, AgentGuardrails](reference/agent.md) — the API reference.
-```

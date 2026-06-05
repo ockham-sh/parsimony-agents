@@ -157,6 +157,9 @@ class AgentResult:
     charts: dict[str, Chart] = field(default_factory=dict)
     """Returned :class:`Chart` objects keyed by ``logical_id``."""
 
+    reports: dict[str, Report] = field(default_factory=dict)
+    """Returned :class:`Report` objects keyed by ``logical_id``."""
+
     code: dict[str, Script] = field(default_factory=dict)
     """Returned :class:`Script` objects keyed by notebook path (execution order preserved)."""
 
@@ -195,6 +198,8 @@ class AgentResult:
                 self.datasets[result.logical_id] = result
             elif isinstance(result, Chart) and result.logical_id:
                 self.charts[result.logical_id] = result
+            elif isinstance(result, Report) and result.logical_id:
+                self.reports[result.logical_id] = result
 
 
 def _inject_connector_catalog(ctx: AgentContext, connectors: Any) -> None:
@@ -336,8 +341,12 @@ class Agent:
         # to reuse existing artifacts) loops on a follow-up turn with nothing to
         # discover. ``_local_discovery`` then also drives session_state rebuild
         # in :meth:`run` each turn.
+        # All-or-nothing: local discovery engages only when the host injects
+        # neither fn. A host that provides its own surface must provide both
+        # (read + list) plus its own session_state — we never half-fill, which
+        # would give a local list_artifacts with no <turn_artifacts>.
         self._local_discovery = read_artifact_fn is None and list_artifacts_fn is None
-        if read_artifact_fn is None or list_artifacts_fn is None:
+        if self._local_discovery:
             from parsimony_agents.agent.local_store import (
                 list_local_artifacts,
                 read_local_artifact,
@@ -346,13 +355,11 @@ class Agent:
             def _local_dir() -> Path:
                 return Path(getattr(resolved_executor, "cwd", None) or ".")
 
-            if read_artifact_fn is None:
-                async def read_artifact_fn(live_name, kind, options):  # type: ignore[misc]
-                    return read_local_artifact(_local_dir(), live_name, kind, options)
+            async def read_artifact_fn(live_name, kind, options):  # type: ignore[misc]
+                return read_local_artifact(_local_dir(), live_name, kind, options)
 
-            if list_artifacts_fn is None:
-                async def list_artifacts_fn(query, kind, limit):  # type: ignore[misc]
-                    return list_local_artifacts(_local_dir(), query, kind, limit)
+            async def list_artifacts_fn(query, kind, limit):  # type: ignore[misc]
+                return list_local_artifacts(_local_dir(), query, kind, limit)
 
         self._read_artifact_fn = read_artifact_fn
         self._list_artifacts_fn = list_artifacts_fn
@@ -545,6 +552,7 @@ class Agent:
 
             local_dir = Path(getattr(self.code_executor, "cwd", None) or ".")
             ctx.session_state = build_local_session_state(self.code_executor, local_dir)
+            ctx.local_discovery = True
 
         # --- Legacy workspace turn state (still drives ref minting) --------
         turn_state = TurnState()
@@ -603,6 +611,7 @@ class Agent:
         *,
         cancellation: CancellationRequest | None = None,
         max_suspension_age_s: float | None = 24 * 3600.0,
+        configure_ctx: Callable[[AgentContext], Awaitable[None]] | None = None,
     ) -> AsyncGenerator[Any, None]:
         """Resume a run that suspended via ``ask_user``.
 
@@ -612,6 +621,16 @@ class Agent:
         :class:`WorkspaceRunHooks` — the same path :meth:`run` uses, so a resumed
         run gets context snapshots, rich tool dispatch, and event emission
         identically to a fresh run.
+
+        ``configure_ctx`` re-applies the host's ctx seams to the rebuilt context.
+        On a fresh turn the host sets these (``report_validator``,
+        ``notebook_logical_id_resolver``, ``session_state``, …) on the ``ctx`` it
+        passes to :meth:`run`; resume rebuilds ``ctx`` from the record, which is
+        ``exclude=True`` for the runtime-only seams, so without this hook every
+        host seam would silently revert to ``None`` on resume (a report authored on
+        a resumed turn would skip the trust-boundary validator, etc.). The callback
+        runs on the rebuilt ctx before the first iteration, so any seam the host
+        adds is covered without changing this signature again.
 
         :raises SuspensionTokenMismatch: the record's token fails HMAC verification.
         :raises SuspensionExpired: the record is older than ``max_suspension_age_s``.
@@ -688,6 +707,17 @@ class Agent:
 
             local_dir = Path(getattr(self.code_executor, "cwd", None) or ".")
             ctx.session_state = build_local_session_state(self.code_executor, local_dir)
+            ctx.local_discovery = True
+
+        # Re-apply the host's runtime-only ctx seams (report_validator,
+        # notebook_logical_id_resolver, session_state, …) onto the rebuilt ctx.
+        # None of them are carried in the suspension record (report_validator and
+        # notebook_logical_id_resolver are exclude=True; session_state simply is
+        # not a SuspensionRecord field), so without this the host loses every seam
+        # on resume. Runs after the standalone local_discovery block so a host
+        # (which leaves local_discovery False) is unaffected by it.
+        if configure_ctx is not None:
+            await configure_ctx(ctx)
 
         # --- Turn state carries forward refs minted before suspension -------
         turn_state = TurnState(
@@ -2153,7 +2183,11 @@ class Agent:
             live_name, seen_live_names=seen
         )
 
-        new_ref = await refresh_artifact(target_ref, executor=self.code_executor)
+        new_ref = await refresh_artifact(
+            target_ref,
+            executor=self.code_executor,
+            report_validator=getattr(context, "report_validator", None),
+        )
 
         # Read the freshly persisted snapshot back into a typed model so
         # the streaming layer can emit the standard pill card and

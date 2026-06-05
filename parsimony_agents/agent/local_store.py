@@ -165,8 +165,11 @@ def list_local_artifacts(
             )
             if q not in haystack:
                 continue
-        # Non-notebook kinds need a snapshot on disk for the read path to work.
-        if k != "notebook" and _latest_snapshot_file(logical_dir) is None:
+        # Every kind needs a snapshot on disk for the read path to work — a
+        # curation-only entry (e.g. a partial write) would list but then 404 on
+        # read_artifact, which can re-trigger a rebuild loop. Notebooks included:
+        # read_local_artifact resolves them through the same _latest_snapshot_file.
+        if _latest_snapshot_file(logical_dir) is None:
             continue
         try:
             mtime = (logical_dir / "curation.json").stat().st_mtime
@@ -252,7 +255,7 @@ def build_local_session_state(executor: Any, local_dir: Path) -> SessionState:
 
 def _resolve_live_name(local_dir: Path, kind: str, live_name: str) -> tuple[Path, Path] | None:
     """Resolve ``(kind, live_name)`` to ``(logical_dir, snapshot_path)``."""
-    for k, logical_dir, _data, name in _iter_curations(local_dir, (kind,)):
+    for _k, logical_dir, _data, name in _iter_curations(local_dir, (kind,)):
         if name == live_name:
             snapshot = _latest_snapshot_file(logical_dir)
             if snapshot is not None:

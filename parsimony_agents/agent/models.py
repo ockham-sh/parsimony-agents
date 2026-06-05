@@ -78,8 +78,7 @@ class AgentContextSnapshot(MessageContent):
         )
 
         _parts = [
-            "\n"
-            "<modules>",
+            "\n<modules>",
             ", ".join(
                 [
                     f"pandas {pandas.__version__}",
@@ -104,11 +103,7 @@ class AgentContextSnapshot(MessageContent):
             chunks.append(
                 {
                     "type": "text",
-                    "text": (
-                        "<available_connectors>\n"
-                        f"{self.connectors_catalog}\n"
-                        "</available_connectors>\n"
-                    ),
+                    "text": (f"<available_connectors>\n{self.connectors_catalog}\n</available_connectors>\n"),
                 }
             )
 
@@ -181,6 +176,33 @@ class AgentContext(MessageContent):
     #: (``notebook_logical_id``).
     notebook_logical_id_resolver: Any | None = Field(default=None, exclude=True)
 
+    #: Optional host-injected report validator implementing the
+    #: :class:`~parsimony_agents.execution.artifact_store.ReportValidator` protocol
+    #: (``(body, *, pin_map_keys) -> None``, raising on unsafe content: active HTML,
+    #: executable fences, out-of-allowlist refs). ``persist_artifact`` calls it
+    #: BEFORE writing a ``return_report`` / refresh snapshot, so unsafe bytes never
+    #: reach the workspace tree and the agent gets a self-correct error. The
+    #: standalone agent leaves this None (the author is the user, who reads their
+    #: own output); a workspace host (terminal) injects its validator so the
+    #: persisted snapshot is trusted by every read/render path.
+    #:
+    #: Typed ``Any`` (not the Protocol) only because it is an ``exclude=True``
+    #: runtime-only field — like the other injected services on this model — so it
+    #: never enters Pydantic's schema; the real type is enforced at the
+    #: ``persist_artifact(report_validator=...)`` boundary.
+    report_validator: Any | None = Field(default=None, exclude=True)
+
+    #: Single-terminal standalone mode. When True, the cross-terminal seen-set
+    #: filter is meaningless (every ``.ockham/`` artifact belongs to this one
+    #: agent), so ``to_snapshot`` pre-seeds the seen-set with the agent's own
+    #: ``session_state`` artifacts. Without this, a follow-up turn that does not
+    #: carry forward the prior turn's messages (fresh ctx / one-shot ``ask``)
+    #: would have an empty seen-set and the filter would drop every
+    #: disk-discovered artifact from ``<turn_artifacts>`` — re-triggering the
+    #: reuse loop the persistence fix is meant to end. The host leaves this
+    #: False so its cross-terminal hiding stays intact.
+    local_discovery: bool = Field(default=False, exclude=True)
+
     async def to_snapshot(
         self,
         *,
@@ -195,7 +217,14 @@ class AgentContext(MessageContent):
         # graph. The snapshot stores it as a JSON-friendly list of pairs;
         # :meth:`AgentContextSnapshot.to_llm` rehydrates it back into a
         # set before passing to the session_state renderer.
-        seen_pairs = sorted(extract_seen_live_names(self.messages))
+        seen = set(extract_seen_live_names(self.messages))
+        if self.local_discovery and self.session_state is not None:
+            # Standalone: the agent's own on-disk artifacts are, by definition,
+            # ones it has interacted with — admit them past the filter.
+            for a in self.session_state.workspace_artifacts:
+                if a.live_name:
+                    seen.add((a.kind, a.live_name))
+        seen_pairs = sorted(seen)
         return AgentContextSnapshot(
             connectors_catalog=render_connector_catalog(connectors),
             session_state=self.session_state,

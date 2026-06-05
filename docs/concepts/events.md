@@ -211,6 +211,7 @@ class AgentResult:
     text: str = ""                          # concatenated TextDelta content
     datasets: dict[str, Dataset] = ...       # keyed by logical_id
     charts: dict[str, Chart] = ...           # keyed by logical_id
+    reports: dict[str, Report] = ...         # keyed by logical_id
     code: dict[str, Script] = ...            # keyed by notebook path
     context: AgentContext | None = None      # final context, for multi-turn
     events: list[Any] = ...                   # full event log
@@ -223,8 +224,8 @@ accumulation rules are exactly:
 - **`state_snapshot`** → set `result.context = event.context` (the latest snapshot wins, so the
   final value is the up-to-date `AgentContext` for your next turn).
 - **`tool_event`** with `completed=True` → inspect `event.result`: a `Dataset` (with a
-  `logical_id`) lands in `result.datasets`, a `Chart` lands in `result.charts`, both keyed by
-  `logical_id`.
+  `logical_id`) lands in `result.datasets`, a `Chart` lands in `result.charts`, and a `Report`
+  lands in `result.reports`, all keyed by `logical_id`.
 - **Every** event is appended to `result.events`, so the full stream is available for
   inspection or replay.
 
@@ -233,12 +234,20 @@ The `ok` property is derived from that event log:
 ```python
 @property
 def ok(self) -> bool:
-    """True if no error events occurred."""
-    return not any(getattr(e, "type", None) == "error" for e in self.events)
+    """True if the run finished without an error or terminal failure.
+
+    handoff and partial_run_summary are non-interactive terminal failures
+    (the agent gave up, or ran out of budget). They carry no error event,
+    so they must be checked explicitly.
+    """
+    failed = {"error", "handoff", "partial_run_summary"}
+    return not any(getattr(e, "type", None) in failed for e in self.events)
 ```
 
-So `result.ok` is `True` exactly when no `AgentError` (`type == "error"`) was emitted during the
-run.
+So `result.ok` is `True` exactly when none of the three failure events — `AgentError`
+(`type == "error"`), `Handoff` (`type == "handoff"`), or `PartialRunSummary`
+(`type == "partial_run_summary"`) — was emitted during the run. The latter two are non-interactive
+terminal failures that carry no error event, so they are checked explicitly.
 
 Because `_collect` is just an accumulator, you can drive it yourself while still streaming —
 get live events *and* a fully populated `AgentResult` at the end:

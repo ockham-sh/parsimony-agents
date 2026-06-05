@@ -175,3 +175,50 @@ def test_read_missing_artifact_raises(tmp_path: Path) -> None:
 def test_read_unknown_kind_raises(tmp_path: Path) -> None:
     with pytest.raises(ArtifactNotFound):
         read_local_artifact(tmp_path, "x", "banana", {})
+
+
+# ---------------------------------------------------------------------------
+# local_discovery composition with the cross-turn seen-set filter
+# ---------------------------------------------------------------------------
+
+
+def _ctx_with_artifact(*, local_discovery: bool):
+    from parsimony_agents.agent.models import AgentContext
+    from parsimony_agents.agent.session_state import SessionState, WorkspaceArtifactLine
+
+    return AgentContext(
+        session_id="s",
+        messages=[],  # no prior-turn messages → empty extracted seen-set
+        session_state=SessionState(
+            workspace_artifacts=[
+                WorkspaceArtifactLine(
+                    path=".ockham/datasets/d1/x.parquet", kind="dataset",
+                    live_name="unrate", summary="US Unemployment",
+                )
+            ]
+        ),
+        local_discovery=local_discovery,
+    )
+
+
+def _snapshot_text(snap) -> str:
+    return "".join(c["text"] for c in snap.to_llm() if c.get("type") == "text")
+
+
+@pytest.mark.asyncio
+async def test_local_discovery_preseeds_seen_set_so_disk_artifact_survives_filter() -> None:
+    # With local_discovery, a disk-discovered artifact is admitted past the
+    # cross-turn filter even though messages carry no seen-set — this is what
+    # stops the reuse loop when ctx is not threaded between turns.
+    snap = await _ctx_with_artifact(local_discovery=True).to_snapshot()
+    assert ("dataset", "unrate") in {tuple(p) for p in snap.seen_live_names_pairs}
+    assert "unrate" in _snapshot_text(snap)
+
+
+@pytest.mark.asyncio
+async def test_without_local_discovery_empty_seen_set_filters_artifact_out() -> None:
+    # Contrast: in host (multi-terminal) mode the same empty seen-set drops the
+    # cross-turn row — the sibling-terminal hiding the fix must not disturb.
+    snap = await _ctx_with_artifact(local_discovery=False).to_snapshot()
+    assert ("dataset", "unrate") not in {tuple(p) for p in snap.seen_live_names_pairs}
+    assert "unrate" not in _snapshot_text(snap)

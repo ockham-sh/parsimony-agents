@@ -153,7 +153,7 @@ async def main() -> None:
     result = await agent.ask("Show me US GDP trends")
     print(result.text)        # assistant's text response
     print(result.datasets)    # {"us_gdp": Dataset, ...}
-    print(result.ok)          # True if no error events
+    print(result.ok)          # True if no error/handoff/partial-run events
 
 
 if __name__ == "__main__":
@@ -207,10 +207,13 @@ async def resume(
     *,
     cancellation: CancellationRequest | None = None,
     max_suspension_age_s: float | None = 24 * 3600.0,
+    configure_ctx: Callable[[AgentContext], Awaitable[None]] | None = None,
 ) -> AsyncGenerator[Any, None]
 ```
 
 `resume` continues a run that suspended via the `ask_user` tool (or via the recovery funnel). It validates the HMAC suspension token, checks staleness, rebuilds the `AgentContext` and `RunState` from the `SuspensionRecord`, appends `user_reply` as the next user message, and re-enters the loop — yielding events exactly like `run`. Pass `max_suspension_age_s=None` to disable the staleness check.
+
+`configure_ctx` is an optional async callback a host uses to re-apply runtime-only `AgentContext` seams (`report_validator`, `notebook_logical_id_resolver`, `session_state`) onto the context that `resume` rebuilds from the `SuspensionRecord`. Those seams are not stored in the record, so without re-applying them they revert to `None` on resume — e.g. a report authored on a resumed turn would skip the write-time validator. The callback runs on the rebuilt ctx before the first iteration; the standalone agent injects none of these seams and can omit it.
 
 It raises:
 
@@ -262,6 +265,7 @@ class AgentResult:
     text: str = ""
     datasets: dict[str, Dataset] = field(default_factory=dict)
     charts: dict[str, Chart] = field(default_factory=dict)
+    reports: dict[str, Report] = field(default_factory=dict)
     code: dict[str, Script] = field(default_factory=dict)
     context: AgentContext | None = None
     events: list[Any] = field(default_factory=list)
@@ -272,7 +276,8 @@ class AgentResult:
 | `text` | `str` | Concatenated assistant text (all `TextDelta` content). |
 | `datasets` | `dict[str, Dataset]` | Returned `Dataset` objects keyed by `logical_id`. |
 | `charts` | `dict[str, Chart]` | Returned `Chart` objects keyed by `logical_id`. |
-| `code` | `dict[str, Script]` | Declared for returned `Script` objects keyed by notebook path, but **not populated today** — `AgentResult._collect` only fills `text`, `context`, `datasets`, and `charts`. This field stays empty. |
+| `reports` | `dict[str, Report]` | Returned `Report` objects keyed by `logical_id`. |
+| `code` | `dict[str, Script]` | Declared for returned `Script` objects keyed by notebook path, but **not populated today** — `AgentResult._collect` only fills `text`, `context`, `datasets`, `charts`, and `reports`. This field stays empty. |
 | `context` | `AgentContext \| None` | The final `AgentContext` — pass it back as `ctx=` for multi-turn continuation. |
 | `events` | `list[Any]` | The full event log (every `AgentEvent` yielded during the run). |
 
@@ -281,10 +286,10 @@ class AgentResult:
 ```python
 @property
 def ok(self) -> bool:
-    """True if no error events occurred."""
+    """True if the run finished without an error or terminal failure."""
 ```
 
-`ok` returns `True` when no event in `events` has `type == "error"` (i.e. no `AgentError` was emitted). Use it as a quick success check:
+`ok` returns `True` only when no event in `events` has `type` in `{"error", "handoff", "partial_run_summary"}`. `handoff` and `partial_run_summary` are non-interactive terminal failures (the agent gave up, or ran out of budget) that carry no `error` event, so they are checked explicitly — otherwise a run that handed off on a missing API key would falsely report `ok`. Use it as a quick success check:
 
 ```python
 result = await agent.ask("Create a chart and a dataset")
@@ -317,6 +322,8 @@ if result.context is not None:
 | `keyword_store` | `Any \| None` | `None` | Keyword store for retrieval (runtime only, not serialized). |
 | `session_state` | `SessionState \| None` | `None` | Host-filled workspace state, populated before `to_snapshot`. |
 | `notebook_logical_id_resolver` | `Any \| None` | `None` | Host resolver mapping a notebook working-copy path to its current `logical_id`; when `None`, the agent derives `logical_id` from the path directly. |
+| `report_validator` | `Any \| None` | `None` | Optional host-injected report validator (`(body, *, pin_map_keys) -> None`, raising on unsafe content). `persist_artifact` calls it **before** writing a `return_report`/refresh snapshot, so unsafe report bytes never reach the workspace tree and the agent self-corrects. Standalone leaves this `None` (the author reads their own output); a workspace host injects its validator. Runtime only, not serialized. |
+| `local_discovery` | `bool` | `False` | Single-terminal standalone mode. When `True`, `to_snapshot` pre-seeds the seen-set with the agent's own on-disk `.ockham/` artifacts so a follow-up/one-shot turn still surfaces them in `<turn_artifacts>`. Hosts leave this `False`. Runtime only, not serialized. |
 
 ```python
 async def to_snapshot(

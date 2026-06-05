@@ -226,7 +226,11 @@ live `AgentContext` — grab it if you're driving `run()` directly and want to
 continue later. Suspension and resumption use a different vehicle: on `ask_user`,
 the relevant parts of the run (messages, accumulators, minted artifact refs) are
 snapshotted into a `SuspensionRecord`, and `Agent.resume` rebuilds a fresh
-`AgentContext` + `RunState` from it before re-entering the loop. See
+`AgentContext` + `RunState` from it before re-entering the loop. Because the
+host-injected runtime seams (the report validator, the notebook logical-id
+resolver, `session_state`) are not carried in the `SuspensionRecord`,
+`Agent.resume` accepts an optional `configure_ctx` callback so a host
+can re-apply them to the rebuilt context. See
 [Multi-turn conversations](../guides/multi-turn.md).
 
 ## Connector catalog injection and the cached prefix

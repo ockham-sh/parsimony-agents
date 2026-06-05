@@ -22,9 +22,10 @@ result = await agent.ask("Show me US GDP trends")
 - `result.text` — the assistant's concatenated text response
 - `result.datasets` — `dict[str, Dataset]` keyed by logical id (the dataframes the agent built)
 - `result.charts` — `dict[str, Chart]` keyed by logical id (the figures it rendered)
-- `result.ok` — `True` if no error event occurred during the run
+- `result.reports` — `dict[str, Report]` keyed by logical id (the reports it published)
+- `result.ok` — `True` if the run finished without a terminal failure: `False` if any `error`, `handoff`, or `partial_run_summary` event occurred (handoff and partial_run_summary are non-interactive terminal failures that carry no separate `error` event)
 
-`Agent` also exposes `result.context` (state for the next turn) and `result.events` (the full event log). (`result.code` is declared on `AgentResult` but is **not** currently populated — datasets and charts are the artifacts surfaced today; see the [Quickstart](getting-started/quickstart.md).) Models are addressed in [litellm](https://docs.litellm.ai/) format, so `model="claude-sonnet-4-6"` (the value used throughout these docs), `model="gemini/gemini-3-flash-preview"`, and any other litellm-supported provider all work; the provider key comes from the environment (`ANTHROPIC_API_KEY`, etc.) or `Agent(api_key=...)`.
+`Agent` also exposes `result.context` (state for the next turn) and `result.events` (the full event log). (`result.code` is declared on `AgentResult` but is **not** currently populated — datasets, charts, and reports are the artifacts surfaced today; see the [Quickstart](getting-started/quickstart.md).) Models are addressed in [litellm](https://docs.litellm.ai/) format, so `model="claude-sonnet-4-6"` (the value used throughout these docs), `model="gemini/gemini-3-flash-preview"`, and any other litellm-supported provider all work; the provider key comes from the environment (`ANTHROPIC_API_KEY`, etc.) or `Agent(api_key=...)`.
 
 ## When to use it (and when not to)
 

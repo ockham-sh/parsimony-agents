@@ -64,7 +64,18 @@ class BaseCodeExecutor(ABC): ...
 
 The base class also provides four abstract workspace-file methods
 (`read_workspace_file`, `write_workspace_file`, `delete_workspace_file`,
-`list_workspace_files`) and an abstract `execute_workspace` (see below).
+`list_workspace_files`) and an abstract `execute_workspace` (see below). These
+four methods are also the storage seam the framework uses to persist `return_*`
+deliverables: `parsimony_agents.execution.artifact_store` writes each
+dataset/chart/report (and its notebook recipe) as the
+`.ockham/<kind>s/<logical_id>/{curation.json, log.jsonl, <content_sha>.<ext>}`
+triplet through `write_workspace_file`, so the same persistence works whether the
+executor is in-process (local fs) or a remote sandbox. A custom executor must
+therefore implement these methods to accept `.ockham/` dotpaths and write
+atomically (tmp-write + replace), since `artifact_store` reads each snapshot
+straight back to verify it (`SnapshotIntegrityError`). See
+[Artifacts, identity & lineage](../concepts/artifacts.md) for the persistence
+layout.
 
 `set_connectors` and `get_origin` are **not** abstract — `BaseCodeExecutor`
 ships concrete defaults (`set_connectors` is a no-op; `get_origin` reads the

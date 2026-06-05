@@ -4,9 +4,12 @@ Parsimony Agents is built to be embedded. The default `Agent(model="...")`
 construction runs everything in-process — a local kernel, a temporary
 workspace, no remote storage — which is exactly what you want for scripts and
 notebooks. A host application (an IDE, a multi-user product, a sandboxed
-deployment) needs more: its own code executor, its own file storage, its own
-artifact registry, and a way to persist suspended runs across process
-restarts.
+deployment) needs more: its own code executor, its own file storage, and a way
+to persist suspended runs across process restarts. (Persisting `return_*`
+deliverables to the `.ockham/` tree is handled by the framework itself, routed
+through the executor's `write_workspace_file` seam — the host no longer writes
+those artifacts; see [Deliverable persistence rides the executor
+seam](#deliverable-persistence-rides-the-executor-seam) below.)
 
 This guide is the integrator's master reference for the **host seams** — the
 constructor hooks that let you swap each subsystem without forking the agent
@@ -73,10 +76,14 @@ must pass together:
   executor's `_output_factory`. If you pass neither, it builds a temporary
   `OutputFactory` and a local in-process executor rooted at the factory's
   `_local_dir`.
-- **`read_artifact` and `list_artifacts` are off unless wired.** If
-  `read_artifact_fn` / `list_artifacts_fn` are `None`, those tools are not
-  registered, and calling them raises `RuntimeError`. A host that wants the
-  agent to discover and reuse existing artifacts must supply both.
+- **`read_artifact` / `list_artifacts` default to a local-filesystem
+  registry.** If you pass *neither* `read_artifact_fn` nor `list_artifacts_fn`,
+  the agent installs default implementations backed by the local `.ockham/` tree
+  (read/list against the executor's workspace), so a standalone agent discovers
+  and reuses its own artifacts with no wiring. A host overrides this by supplying
+  *both* callbacks to back the tools against its own registry. Supplying exactly
+  one is unsupported — the other tool is then unregistered, and calling it raises
+  `RuntimeError`.
 
 The remaining sections take each seam in turn.
 
@@ -208,6 +215,29 @@ outputs, the safe-builtins sandbox, memoization — see
 [Code execution](../concepts/code-execution.md) and the
 [Execution reference](../reference/execution.md).
 
+### Deliverable persistence rides the executor seam
+
+Your executor's `write_workspace_file` / `read_workspace_file` are not just for
+code I/O — they are now the storage seam through which the framework persists
+**every `return_*` deliverable**. When the agent returns a dataset, chart,
+report, or notebook, `parsimony_agents.execution.artifact_store`
+(`persist_artifact` / `persist_notebook`) writes the
+`.ockham/<kind>s/<logical_id>/{curation.json, log.jsonl, <content_sha>.<ext>}`
+triplet through `write_workspace_file`, then reads the snapshot straight back to
+verify it byte-for-byte (`SnapshotIntegrityError` on mismatch). This is
+backend-agnostic: the same registry runs whether the executor is in-process
+(local fs) or a remote sandbox.
+
+Two consequences for a host:
+
+- **Implement the seam faithfully.** `write_workspace_file` must accept
+  `.ockham/` dotpaths and write atomically (tmp-write + replace), since the
+  verify-after-write step reads the bytes back immediately.
+- **Do not re-implement deliverable writing.** The framework owns it now (the
+  old host-side persist step is retired). A host *reads the framework-written
+  triplet back* — by the stamped `logical_id`/`content_sha` — rather than
+  writing its own copy.
+
 ## `output_factory` and registering custom output types
 
 `OutputFactory` (importable from `parsimony_agents.execution`) converts raw
@@ -333,9 +363,11 @@ those files.
 
 Two system tools let the agent discover and inspect artifacts that already
 exist in the workspace — including ones produced by sibling terminal sessions.
-A host backs them with two async callbacks. **If either is `None`, the
-corresponding tool is not registered, and an attempt to call it raises
-`RuntimeError`.** Wire both to enable match-and-reuse.
+A host backs them with two async callbacks. **Pass *both* to route discovery
+against your own registry. Pass *neither* and the agent uses a built-in
+local-filesystem registry over the `.ockham/` tree, so standalone reuse works
+out of the box. Supplying exactly one is unsupported: the un-supplied tool is
+not registered, and calling it raises `RuntimeError`.**
 
 ### `read_artifact_fn`
 
@@ -603,6 +635,7 @@ async def resume(
     *,
     cancellation: CancellationRequest | None = None,
     max_suspension_age_s: float | None = 86400.0,
+    configure_ctx: Callable[[AgentContext], Awaitable[None]] | None = None,
 ) -> AsyncGenerator[Any, None]: ...
 ```
 
@@ -616,6 +649,13 @@ What a host must handle:
   `max_suspension_age_s` (default 24 h). Pass a larger value, or `None` to
   disable the check.
 - **Empty reply** → `ValueError`.
+- **Re-applying host ctx seams** → `resume` rebuilds the `AgentContext` from the
+  record, but the runtime-only seams a host sets on `ctx` (`report_validator`,
+  `notebook_logical_id_resolver`, `session_state`) are not carried in the
+  record. Pass `configure_ctx` — an async callback run on the
+  rebuilt ctx before the first iteration — to re-apply them; otherwise they
+  revert to `None` on resume (e.g. a report authored on a resumed turn would
+  skip the write-time report validator).
 
 Budgets resume honestly: a suspension that originated from `time_limit` resets
 the elapsed-time accumulator, and one from `iteration_limit` resets the

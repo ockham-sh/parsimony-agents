@@ -138,6 +138,7 @@ async def main() -> None:
     # The result is now fully populated — same as agent.ask() would return.
     print("Datasets:", list(result.datasets.keys()))
     print("Charts:  ", list(result.charts.keys()))
+    print("Reports: ", list(result.reports.keys()))
     print("Success: ", result.ok)
 
     # Reuse result.context for a multi-turn follow-up.
@@ -154,11 +155,14 @@ if __name__ == "__main__":
 
 `_collect` is the same routine `stream_to_display` and `display_result` use
 internally. It concatenates `TextDelta.content` into `result.text`, extracts
-`Dataset` and `Chart` objects from completed `ToolEvent`s into `result.datasets`
-and `result.charts` (keyed by logical id), and updates `result.context` from
-each `StateSnapshot`. (`result.code` is declared on `AgentResult` but is not
-populated by `_collect` today.) After the
-loop, `result.ok` is `True` if no error events were emitted, and `result.events`
+`Dataset`, `Chart`, and `Report` objects from completed `ToolEvent`s into
+`result.datasets`, `result.charts`, and `result.reports` (each keyed by logical
+id), and updates `result.context` from each `StateSnapshot`. (`result.code` is
+declared on `AgentResult` but is not populated by `_collect` today.) After the
+loop, `result.ok` is `True` only if the run produced no `error`, `handoff`, or
+`partial_run_summary` events — handoff and partial-run-summary are
+non-interactive terminal failures (the agent gave up or ran out of budget) and
+carry no `error` event, so `ok` checks for them explicitly. `result.events`
 holds the raw event log for inspection or replay.
 
 > If you don't need per-event control at all, skip the loop and call

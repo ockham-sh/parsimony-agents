@@ -43,16 +43,15 @@ __all__ = [
 
 import json
 import re
-from datetime import UTC, datetime
 from typing import Any, Protocol
 
 from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.chart_io import deserialize_chart, write_chart_bytes
 from parsimony_agents.dataset_io import deserialize_dataset, write_dataset_bytes
+from parsimony_agents.execution.artifact_store import ReportValidator, persist_artifact
 from parsimony_agents.identity import (
     ArtifactRef,
     SnapshotKind,
-    content_sha,
     notebook_content_sha,
 )
 from parsimony_agents.notebook_io import deserialize_notebook, read_latest_notebook
@@ -77,12 +76,18 @@ async def refresh_artifact(
     ref: ArtifactRef,
     *,
     executor: _Executor,
+    report_validator: ReportValidator | None = None,
 ) -> ArtifactRef:
     """Refresh ``ref`` and every upstream artifact it depends on.
 
     Returns the latest :class:`ArtifactRef` for ``ref``'s
     ``logical_id`` — same ``logical_id`` always, fresh ``content_sha``
     when any byte in the lineage changed.
+
+    ``report_validator`` (host-injected) is enforced when a refreshed report is
+    re-persisted, so refresh is held to the same trust boundary as
+    ``return_report`` — a report authored without validation (e.g. standalone)
+    cannot be laundered onto a host-trusted snapshot via refresh.
 
     Raises :class:`ValueError` for unsupported kinds, missing upstream
     snapshots, or artifacts published before R2 (no ``variable_name``
@@ -95,7 +100,7 @@ async def refresh_artifact(
             "(re-publish via return_notebook(execute=True)); data_objects refresh implicitly "
             "via the notebook that produced them."
         )
-    return await _refresh(ref, executor=executor)
+    return await _refresh(ref, executor=executor, report_validator=report_validator)
 
 
 # ---------------------------------------------------------------------------
@@ -103,13 +108,18 @@ async def refresh_artifact(
 # ---------------------------------------------------------------------------
 
 
-async def _refresh(ref: ArtifactRef, *, executor: _Executor) -> ArtifactRef:
+async def _refresh(
+    ref: ArtifactRef,
+    *,
+    executor: _Executor,
+    report_validator: ReportValidator | None = None,
+) -> ArtifactRef:
     if ref.kind == "dataset":
         return await _refresh_dataset(ref, executor=executor)
     if ref.kind == "chart":
         return await _refresh_chart(ref, executor=executor)
     if ref.kind == "report":
-        return await _refresh_report(ref, executor=executor)
+        return await _refresh_report(ref, executor=executor, report_validator=report_validator)
     raise AssertionError(f"refresh: unreachable kind {ref.kind!r}")
 
 
@@ -158,7 +168,7 @@ async def _refresh_dataset(ref: ArtifactRef, *, executor: _Executor) -> Artifact
         variable_name=dataset.variable_name,
     )
     new_blob = write_dataset_bytes(new_dataset, out_obj)
-    return await _persist_layer(
+    return await persist_artifact(
         executor=executor,
         kind="dataset",
         artifact=new_dataset,
@@ -223,7 +233,7 @@ async def _refresh_chart(ref: ArtifactRef, *, executor: _Executor) -> ArtifactRe
         variable_name=chart.variable_name,
     )
     new_blob = write_chart_bytes(new_chart, fig_obj)
-    return await _persist_layer(
+    return await persist_artifact(
         executor=executor,
         kind="chart",
         artifact=new_chart,
@@ -236,7 +246,12 @@ async def _refresh_chart(ref: ArtifactRef, *, executor: _Executor) -> ArtifactRe
     )
 
 
-async def _refresh_report(ref: ArtifactRef, *, executor: _Executor) -> ArtifactRef:
+async def _refresh_report(
+    ref: ArtifactRef,
+    *,
+    executor: _Executor,
+    report_validator: ReportValidator | None = None,
+) -> ArtifactRef:
     from parsimony_agents.report_format import parse_snapshot
 
     blob = await _read_snapshot(executor, ref)
@@ -271,12 +286,20 @@ async def _refresh_report(ref: ArtifactRef, *, executor: _Executor) -> ArtifactR
         formats=snap.formats,
     )
     new_blob = new_report.snapshot_bytes()
-    return await _persist_layer(
+    return await persist_artifact(
         executor=executor,
         kind="report",
         artifact=new_report,
         blob=new_blob,
-        log_inputs={"embedded": [r.content_sha for r in new_embedded]},
+        # Schema matches artifact_store.log_inputs_for("report") so report log
+        # entries are identical whether minted via return_report or refresh.
+        log_inputs={
+            "embedded": [r.content_sha for r in new_embedded],
+            "formats": list(new_report.formats),
+        },
+        # Same write-time trust boundary as return_report: refresh must not be a
+        # back door that persists an unvalidated body onto a host-trusted snapshot.
+        report_validator=report_validator,
     )
 
 
@@ -500,184 +523,3 @@ def embedded_refs_from_markdown(
             )
         out.append(ref)
     return out
-
-
-async def _persist_layer(
-    *,
-    executor: _Executor,
-    kind: SnapshotKind,
-    artifact: Dataset | Chart | Report,
-    blob: bytes,
-    log_inputs: dict[str, Any],
-) -> ArtifactRef:
-    """Write snapshot + curation + log entry; return the new ArtifactRef.
-
-    Mirrors :func:`server.api.workspace.artifact_registry.persist_return_artifact`
-    but in-process so refresh doesn't need a terminal-side import. All
-    writes are idempotent: same bytes → no-op snapshot write, dedup'd
-    log line. Same identity model — ``logical_id`` from the artifact,
-    ``content_sha`` from the rendered bytes.
-    """
-    csha = content_sha(blob)
-    artifact.content_sha = csha
-    ref = ArtifactRef(kind=kind, logical_id=artifact.logical_id, content_sha=csha)
-
-    # 1. Snapshot — idempotent (same path = same bytes under
-    #    content-addressing).
-    snapshot_path = ref.workspace_file_path
-    if not await _file_exists(executor, snapshot_path):
-        await executor.write_workspace_file(snapshot_path, blob)
-
-    # 2. Curation sidecar — overwrite with the latest fields.
-    curation_path = f".ockham/{kind}s/{artifact.logical_id}/curation.json"
-    await _write_curation(
-        executor=executor,
-        curation_path=curation_path,
-        artifact=artifact,
-        kind=kind,
-    )
-
-    # 3. Log entry — append-deduplicate on content_sha.
-    log_path = f".ockham/{kind}s/{artifact.logical_id}/log.jsonl"
-    await _append_log_dedup(
-        executor=executor,
-        log_path=log_path,
-        content_sha=csha,
-        inputs=log_inputs,
-    )
-    return ref
-
-
-async def _file_exists(executor: _Executor, path: str) -> bool:
-    try:
-        await executor.read_workspace_file(path)
-        return True
-    except FileNotFoundError:
-        return False
-
-
-async def _write_curation(
-    *,
-    executor: _Executor,
-    curation_path: str,
-    artifact: Dataset | Chart | Report,
-    kind: SnapshotKind,
-) -> None:
-    """Write the curation sidecar.
-
-    Schema mirrors :class:`server.api.workspace.snapshot_store.Curation`
-    (the canonical wire format on disk). Preserves ``created_at`` from
-    any pre-existing record so the user's first-publish timestamp
-    sticks across refreshes.
-    """
-    now = _now_iso_z()
-    created_at = now
-    try:
-        prior = await executor.read_workspace_file(curation_path)
-        prior_data = json.loads(prior.decode("utf-8"))
-        if isinstance(prior_data, dict):
-            existing_created = prior_data.get("created_at")
-            if isinstance(existing_created, str) and existing_created:
-                created_at = existing_created
-    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError):
-        pass
-
-    live_name = artifact.live_name
-    if live_name is None:
-        from parsimony_agents.artifacts import derive_live_name
-
-        live_name = derive_live_name(artifact.title or kind)
-
-    payload: dict[str, Any] = {
-        "kind": kind,
-        "logical_id": artifact.logical_id,
-        "title": artifact.title,
-        "description": artifact.description,
-        "tags": list(artifact.tags),
-        "notes": list(artifact.notes),
-        "live_name": live_name,
-        "variable_name": getattr(artifact, "variable_name", None) or None,
-        "created_at": created_at,
-        "updated_at": now,
-    }
-    blob = json.dumps(payload, sort_keys=True).encode("utf-8")
-    await executor.write_workspace_file(curation_path, blob)
-
-
-async def _append_log_dedup(
-    *,
-    executor: _Executor,
-    log_path: str,
-    content_sha: str,
-    inputs: dict[str, Any],
-) -> int:
-    """Append a log line, dedup'd on ``content_sha``.
-
-    Read-modify-write under the executor's serialized FS — refreshes
-    are turn-serial in the agent. Returns the entry's 1-based version.
-    """
-    existing_text = ""
-    try:
-        existing = await executor.read_workspace_file(log_path)
-        existing_text = existing.decode("utf-8")
-    except FileNotFoundError:
-        pass
-
-    shas = _content_shas_from_jsonl(existing_text)
-    if content_sha in shas:
-        return shas.index(content_sha) + 1
-
-    entry = {
-        "ts": _now_iso_z(),
-        "content_sha": content_sha,
-        "inputs": inputs,
-    }
-    line = json.dumps(entry, sort_keys=True)
-    if existing_text and not existing_text.endswith("\n"):
-        new_text = existing_text + "\n" + line + "\n"
-    else:
-        new_text = existing_text + line + "\n"
-    await executor.write_workspace_file(log_path, new_text.encode("utf-8"))
-    return len(shas) + 1
-
-
-async def _read_log(
-    executor: _Executor, kind: SnapshotKind, logical_id: str
-) -> list[dict[str, Any]]:
-    log_path = f".ockham/{kind}s/{logical_id}/log.jsonl"
-    try:
-        raw = await executor.read_workspace_file(log_path)
-    except FileNotFoundError:
-        return []
-    out: list[dict[str, Any]] = []
-    for line in raw.decode("utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
-            out.append(data)
-    return out
-
-
-def _content_shas_from_jsonl(jsonl_text: str) -> list[str]:
-    out: list[str] = []
-    for line in jsonl_text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        try:
-            data = json.loads(stripped)
-        except json.JSONDecodeError:
-            continue
-        sha = data.get("content_sha")
-        if isinstance(sha, str):
-            out.append(sha)
-    return out
-
-
-def _now_iso_z() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
