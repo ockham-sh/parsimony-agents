@@ -36,9 +36,7 @@ LLMViewConfigType = DataFrameViewConfig | PrimitiveViewConfig | SearchViewConfig
 LLM_VIEW_DEFAULTS: dict[str, dict[str, LLMViewConfigType]] = {
     "dataframe": {
         "default": DataFrameViewConfig(),
-        "minimal": DataFrameViewConfig(
-            show_sample_unique_values=False, display_pages=[0]
-        ),
+        "minimal": DataFrameViewConfig(show_sample_unique_values=False, display_pages=[0]),
     },
     "search": {
         "default": SearchViewConfig(),

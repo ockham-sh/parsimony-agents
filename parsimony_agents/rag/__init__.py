@@ -129,9 +129,7 @@ async def hybrid_search(
     _add(vector_results)
 
     # Stage 1: RRF ordering (recall)
-    candidates = sorted(result_map.values(), key=lambda r: r.rrf_score, reverse=True)[
-        :recall_k
-    ]
+    candidates = sorted(result_map.values(), key=lambda r: r.rrf_score, reverse=True)[:recall_k]
 
     if not candidates:
         return candidates
@@ -140,9 +138,7 @@ async def hybrid_search(
     content_embeddings = await embed_texts([r.content for r in candidates])
     for result, content_embedding in zip(candidates, content_embeddings, strict=True):
         emb = np.array(content_embedding)
-        similarity = np.dot(query_embedding, emb) / (
-            np.linalg.norm(query_embedding) * np.linalg.norm(emb)
-        )
+        similarity = np.dot(query_embedding, emb) / (np.linalg.norm(query_embedding) * np.linalg.norm(emb))
         result.semantic_similarity = float(similarity)
 
     candidates.sort(key=lambda r: r.semantic_similarity or 0.0, reverse=True)

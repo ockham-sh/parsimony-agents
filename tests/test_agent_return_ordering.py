@@ -47,10 +47,9 @@ class _FakeCodeExecutor:
             code = f"# {path}\nresult = 1\n"
             csha = notebook_content_sha(code)
             lid = notebook_logical_id(path)
-            self._files[f".ockham/notebooks/{lid}/{csha}.py"] = (
-                serialize_notebook(Script(path=path, code=code))
-            )
+            self._files[f".ockham/notebooks/{lid}/{csha}.py"] = serialize_notebook(Script(path=path, code=code))
             import json as _json
+
             self._files[f".ockham/notebooks/{lid}/log.jsonl"] = (
                 _json.dumps({"ts": "t1", "content_sha": csha, "inputs": {}}) + "\n"
             ).encode("utf-8")
@@ -79,7 +78,10 @@ class _FakeCodeExecutor:
         return None
 
     async def execute(  # noqa: ARG002
-        self, code: str, dry_run: bool = False, timeout_seconds: float | None = None,
+        self,
+        code: str,
+        dry_run: bool = False,
+        timeout_seconds: float | None = None,
         producer_notebook_path: str | None = None,
     ) -> KernelOutput:
         return KernelOutput(outputs=[])
@@ -104,7 +106,10 @@ class _FakeCodeExecutor:
         return [(p, len(d)) for p, d in self._files.items() if p.startswith(prefix)]
 
     async def execute_workspace(  # noqa: ARG002
-        self, code: str, dry_run: bool = False, timeout_seconds: float | None = None,
+        self,
+        code: str,
+        dry_run: bool = False,
+        timeout_seconds: float | None = None,
         producer_notebook_path: str | None = None,
     ) -> KernelOutput:
         return KernelOutput(outputs=[])
@@ -288,11 +293,7 @@ async def test_return_dataset_then_return_chart_same_response_succeeds(
 
     events = [e async for e in agent.run("finish", ctx=ctx)]
 
-    return_events = [
-        e
-        for e in events
-        if getattr(e, "tool_type", None) == "return" and getattr(e, "completed", False)
-    ]
+    return_events = [e for e in events if getattr(e, "tool_type", None) == "return" and getattr(e, "completed", False)]
     assert len(return_events) == 2, f"expected two successful return tool events, got {return_events!r}"
     names = [e.tool_name for e in return_events]
     assert names == ["return_dataset", "return_chart"]

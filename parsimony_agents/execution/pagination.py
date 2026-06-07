@@ -9,9 +9,7 @@ from typing import Literal
 import pandas as pd
 
 
-def get_output_header(
-    type: Literal["dataframe", "primitive"], mode: Literal["default", "minimal"] = "default"
-) -> str:
+def get_output_header(type: Literal["dataframe", "primitive"], mode: Literal["default", "minimal"] = "default") -> str:
     ret_str = f'type="{type}"'
     if mode != "default":
         ret_str += f' mode="{mode}"'
@@ -138,9 +136,7 @@ class TablePaginator:
             page_df = self.df.iloc[start:end].set_axis(display_columns, axis=1, copy=False)
             truncate = max_cell_length and max_cell_length > 0
             page_df_str = page_df.astype(str).map(
-                lambda x, _t=truncate, _m=max_cell_length: (
-                    f"{x[:_m]} ..." if _t and len(x) > _m else x
-                )
+                lambda x, _t=truncate, _m=max_cell_length: f"{x[:_m]} ..." if _t and len(x) > _m else x
             )
 
             csv = page_df_str.to_csv(index=False, na_rep=na_rep, header=first_page).rstrip("\n")

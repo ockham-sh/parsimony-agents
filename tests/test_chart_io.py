@@ -85,9 +85,7 @@ def test_chart_save_from_dict_roundtrips(sample_spec: dict, tmp_path: Path) -> N
     assert spec["mark"] == "bar"
 
 
-def test_write_chart_bytes_persists_variable_name(
-    sample_spec: dict, tmp_path: Path
-) -> None:
+def test_write_chart_bytes_persists_variable_name(sample_spec: dict, tmp_path: Path) -> None:
     """R2: ``variable_name`` survives the vl.json round-trip via ``usermeta.parsimony_agents``."""
     chart = Chart(
         title="Trend",
@@ -105,9 +103,7 @@ def test_write_chart_bytes_persists_variable_name(
 
 
 def test_chart_save_from_altair(sample_alt_chart: alt.Chart, tmp_path: Path) -> None:
-    chart = Chart(title="Lines", notebook_ref=_nb_ref()).with_payload(
-        FigureObject(value=sample_alt_chart)
-    )
+    chart = Chart(title="Lines", notebook_ref=_nb_ref()).with_payload(FigureObject(value=sample_alt_chart))
 
     target = tmp_path / "alt.vl.json"
     chart.save(target)
@@ -165,9 +161,7 @@ def test_chart_save_preserves_pre_existing_usermeta(sample_spec: dict, tmp_path:
     """Other usermeta keys must be preserved alongside the parsimony_agents namespace."""
 
     spec = {**sample_spec, "usermeta": {"editor": "vega-editor"}}
-    chart = Chart(title="Co-existence", notebook_ref=_nb_ref()).with_payload(
-        FigureObject(value=spec)
-    )
+    chart = Chart(title="Co-existence", notebook_ref=_nb_ref()).with_payload(FigureObject(value=spec))
     target = tmp_path / "demo.vl.json"
     chart.save(target)
 
@@ -190,9 +184,7 @@ def test_write_chart_bytes_rejects_raw_dict(sample_spec: dict) -> None:
         write_chart_bytes(chart, sample_spec)  # type: ignore[arg-type]
 
 
-def test_deserialize_chart_ignores_unknown_fields(
-    sample_spec: dict, tmp_path: Path
-) -> None:
+def test_deserialize_chart_ignores_unknown_fields(sample_spec: dict, tmp_path: Path) -> None:
     """``Chart`` uses ``extra='ignore'`` so unknown fields in usermeta
     deserialize without error. This is the escape hatch when adding new
     chart fields without breaking older snapshots."""

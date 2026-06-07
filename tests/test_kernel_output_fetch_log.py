@@ -59,13 +59,9 @@ def test_kernel_output_to_llm_passes_mode_to_fetch_log():
     """End-to-end: to_llm(mode='minimal') propagates to the fetch_log block."""
     output = KernelOutput(outputs=[], fetch_log=[_entry()])
     blocks = output.to_llm(mode="minimal")
-    fetch_text = next(
-        (b["text"] for b in blocks if "fetch_log" in b.get("text", "")), None
-    )
+    fetch_text = next((b["text"] for b in blocks if "fetch_log" in b.get("text", "")), None)
     assert fetch_text == '<fetch_log entries="1"/>\n'
 
     blocks_default = output.to_llm(mode="default")
-    fetch_text_default = next(
-        (b["text"] for b in blocks_default if "fetch_log" in b.get("text", "")), None
-    )
+    fetch_text_default = next((b["text"] for b in blocks_default if "fetch_log" in b.get("text", "")), None)
     assert "<entry " in fetch_text_default

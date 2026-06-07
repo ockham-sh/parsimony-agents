@@ -110,8 +110,7 @@ def pre_step(state: RunState, guardrails: AgentGuardrails) -> Failure | None:
         return Failure(
             kind=FailureKind.iteration_limit,
             explanation=(
-                f"The run reached its limit of {guardrails.max_iterations} steps "
-                "before the task was finished."
+                f"The run reached its limit of {guardrails.max_iterations} steps before the task was finished."
             ),
             metadata={"max_iterations": guardrails.max_iterations, "iteration": state.iteration},
         )
@@ -176,10 +175,7 @@ def post_llm(
     if finish_reason in ("content_filter", "refusal"):
         return Failure(
             kind=FailureKind.output_refused,
-            explanation=(
-                "The AI model declined to answer the request, "
-                "most likely because of a safety filter."
-            ),
+            explanation=("The AI model declined to answer the request, most likely because of a safety filter."),
             metadata={"finish_reason": finish_reason},
         )
 
@@ -208,10 +204,7 @@ def post_llm(
         if projected >= guardrails.loop_hard_threshold:
             return Failure(
                 kind=FailureKind.loop_detected,
-                explanation=(
-                    f"The agent repeated the same action ({name}) "
-                    f"{projected} times without making progress."
-                ),
+                explanation=(f"The agent repeated the same action ({name}) {projected} times without making progress."),
                 metadata={
                     "signature": sig,
                     "repeat_count": projected,

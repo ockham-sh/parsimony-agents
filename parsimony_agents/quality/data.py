@@ -1,4 +1,3 @@
-
 import numpy as np
 import pandas as pd
 
@@ -78,9 +77,7 @@ def inspect_object(obj: pd.DataFrame | pd.Series) -> str | None:
     Inspect a pandas DataFrame or Series and return a data quality inspection report.
     """
     if isinstance(obj, pd.DataFrame):
-        return "\n".join(
-            [f"Column '{c}': {series_na_report(obj[c])}" for c in obj.columns]
-        )
+        return "\n".join([f"Column '{c}': {series_na_report(obj[c])}" for c in obj.columns])
     elif isinstance(obj, pd.Series):
         return series_na_report(obj)
 

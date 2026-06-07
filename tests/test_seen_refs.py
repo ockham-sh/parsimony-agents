@@ -23,12 +23,7 @@ def test_single_self_closing_artifact_ref_is_extracted() -> None:
 
 
 def test_artifact_tag_with_body_is_extracted() -> None:
-    msgs = [
-        _msg(
-            '<artifact kind="dataset" live_name="us_gdp" new="true">'
-            "GDP series (1947-2024)</artifact>"
-        )
-    ]
+    msgs = [_msg('<artifact kind="dataset" live_name="us_gdp" new="true">GDP series (1947-2024)</artifact>')]
     assert extract_seen_live_names(msgs) == {("dataset", "us_gdp")}
 
 
@@ -202,9 +197,7 @@ def test_agent_context_snapshot_round_trip_picks_up_minted_pair() -> None:
 
     snap = AgentContextSnapshot(
         session_state=SessionState(kernel=[], workspace_artifacts=[]),
-        minted_refs=[
-            ArtifactRef(kind="notebook", logical_id="us_gdp", content_sha="cs")
-        ],
+        minted_refs=[ArtifactRef(kind="notebook", logical_id="us_gdp", content_sha="cs")],
         minted_live_names={"notebook:us_gdp": "us_gdp"},
     )
     assert extract_seen_live_names([snap]) == {("notebook", "us_gdp")}

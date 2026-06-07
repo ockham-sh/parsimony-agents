@@ -43,9 +43,7 @@ def _chunk(
     tool_calls = None
     if tool_call is not None:
         name, tc_id = tool_call
-        tool_calls = [
-            SimpleNamespace(id=tc_id, function=SimpleNamespace(name=name, arguments=""))
-        ]
+        tool_calls = [SimpleNamespace(id=tc_id, function=SimpleNamespace(name=name, arguments=""))]
     delta = SimpleNamespace(
         content=content,
         reasoning_content=reasoning,
@@ -193,7 +191,8 @@ async def test_call_llm_heartbeat_fires_after_silence() -> None:
 
     with (
         patch("litellm.acompletion", return_value=fake_stream),
-        patch("litellm.stream_chunk_builder", return_value=assembled),pytest.raises(FailureRaised) as excinfo
+        patch("litellm.stream_chunk_builder", return_value=assembled),
+        pytest.raises(FailureRaised) as excinfo,
     ):
         async for _ in call_llm(
             messages=[{"role": "user", "content": "x"}],

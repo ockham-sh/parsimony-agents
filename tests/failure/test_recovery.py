@@ -70,17 +70,13 @@ async def test_narrow_scope_instruction_is_kind_specific() -> None:
     """no_progress gets the act/ask_user/end prompt; scope_too_large keeps shrink-the-step."""
     from parsimony_agents.agent.failure.recovery import _narrow_scope_instruction
 
-    no_prog = _narrow_scope_instruction(
-        Failure(kind=FailureKind.no_progress, explanation="text only")
-    )
+    no_prog = _narrow_scope_instruction(Failure(kind=FailureKind.no_progress, explanation="text only"))
     assert "ask_user" in no_prog
     # The no_progress prompt must NOT push toward "make progress" — that bias is
     # what previously buried ask_user when the agent meant to ask the user.
     assert "smallest piece of work" not in no_prog
 
-    scope = _narrow_scope_instruction(
-        Failure(kind=FailureKind.scope_too_large, explanation="too broad")
-    )
+    scope = _narrow_scope_instruction(Failure(kind=FailureKind.scope_too_large, explanation="too broad"))
     assert "smallest piece of work" in scope
 
 

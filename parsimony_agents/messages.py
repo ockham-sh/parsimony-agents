@@ -37,9 +37,7 @@ class Message(BaseModel):
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
     refusal: str | None = None
-    metadata: dict[str, Any] = Field(
-        default_factory=dict, description="Metadata of the message", exclude=True
-    )
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata of the message", exclude=True)
 
     class Config:
         extra = "allow"

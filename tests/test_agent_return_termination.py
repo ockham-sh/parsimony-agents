@@ -167,6 +167,4 @@ async def test_return_tools_do_not_hard_stop_the_run(
     assert len(return_events) == 1
     assert return_events[0].tool_name == tool_name
     # Two LLM calls: one to emit the tool, one to signal completion.
-    assert calls["count"] == 2, (
-        f"expected exactly 2 LLM calls (tool emit + natural termination), got {calls['count']}"
-    )
+    assert calls["count"] == 2, f"expected exactly 2 LLM calls (tool emit + natural termination), got {calls['count']}"

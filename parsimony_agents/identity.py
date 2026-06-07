@@ -207,11 +207,7 @@ class ArtifactRef:
         Use when composing a tag that needs additional attributes
         (e.g. ``<artifact path="…" {ref.to_xml_attrs()}>summary</artifact>``).
         """
-        return (
-            f'kind="{self.kind}" '
-            f'logical_id="{self.logical_id}" '
-            f'content_sha="{self.content_sha}"'
-        )
+        return f'kind="{self.kind}" logical_id="{self.logical_id}" content_sha="{self.content_sha}"'
 
     def to_self_closing_tag(self, tag: str = "ref") -> str:
         """Self-closing ``<{tag} kind="…" logical_id="…" content_sha="…"/>``.
@@ -251,9 +247,7 @@ def _hash_canonical(payload: Any) -> str:
 
     Sort keys, sort lists where order is irrelevant *before* calling.
     """
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
 def notebook_content_sha(code: str) -> str:
@@ -282,18 +276,12 @@ def notebook_logical_id(path: str) -> str:
     """
     cleaned = path.strip().strip("/")
     if not cleaned.startswith("notebooks/"):
-        raise ValueError(
-            f"notebook path must start with 'notebooks/', got {path!r}"
-        )
-    rest = cleaned[len("notebooks/"):]
+        raise ValueError(f"notebook path must start with 'notebooks/', got {path!r}")
+    rest = cleaned[len("notebooks/") :]
     if "/" in rest:
-        raise ValueError(
-            f"notebook path must be flat (no subdirectories), got {path!r}"
-        )
+        raise ValueError(f"notebook path must be flat (no subdirectories), got {path!r}")
     if not rest.endswith(".py"):
-        raise ValueError(
-            f"notebook path must end with '.py', got {path!r}"
-        )
+        raise ValueError(f"notebook path must end with '.py', got {path!r}")
     name = rest[: -len(".py")]
     if not name:
         raise ValueError("notebook live_name must be non-empty")
@@ -353,9 +341,7 @@ def chart_logical_id(
     ordering at the call site doesn't perturb identity.
     """
     if notebook_ref.kind != "notebook":
-        raise ValueError(
-            f"chart_logical_id: notebook_ref must be kind='notebook', got {notebook_ref.kind!r}"
-        )
+        raise ValueError(f"chart_logical_id: notebook_ref must be kind='notebook', got {notebook_ref.kind!r}")
     if not chart_variable_name:
         raise ValueError("chart_logical_id: chart_variable_name must be non-empty")
     datasets = sorted(r.logical_id for r in source_dataset_refs)

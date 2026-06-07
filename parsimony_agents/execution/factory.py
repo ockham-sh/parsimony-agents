@@ -120,9 +120,7 @@ class OutputFactory:
                 vlc.vegalite_to_png(json.dumps(spec))
             except Exception as e:
                 error_msg = str(e).split("\n")[0]
-                return ExceptionObject(
-                    value=ValueError(f"Invalid Altair/Vega-Lite specification: {error_msg}")
-                )
+                return ExceptionObject(value=ValueError(f"Invalid Altair/Vega-Lite specification: {error_msg}"))
 
             return FigureObject(value=value)
         except Exception as e:

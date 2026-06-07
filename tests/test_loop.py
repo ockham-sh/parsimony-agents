@@ -64,9 +64,7 @@ def _stream_chunk(
     tool_calls = None
     if tool_call is not None:
         tc_id, name, args = tool_call
-        tool_calls = [
-            SimpleNamespace(id=tc_id, function=SimpleNamespace(name=name, arguments=args))
-        ]
+        tool_calls = [SimpleNamespace(id=tc_id, function=SimpleNamespace(name=name, arguments=args))]
     return SimpleNamespace(
         choices=[
             SimpleNamespace(
@@ -85,9 +83,7 @@ def _assembled(
     """Build the assembled response that ``litellm.stream_chunk_builder`` would return."""
     calls = []
     for tc_id, name, args in tool_calls or []:
-        calls.append(
-            SimpleNamespace(id=tc_id, function=SimpleNamespace(name=name, arguments=args))
-        )
+        calls.append(SimpleNamespace(id=tc_id, function=SimpleNamespace(name=name, arguments=args)))
     return SimpleNamespace(
         choices=[
             SimpleNamespace(
@@ -362,7 +358,5 @@ async def test_ask_user_tool_suspends_with_valid_record() -> None:
     assert len(suspensions) == 1
     assert suspensions[0].question == "which dataset?"
     # The suspension record's token must verify under the same secret.
-    assert verify_suspension_token(
-        record=suspensions[0].suspension_record, secret="topsecret"
-    ) is True
+    assert verify_suspension_token(record=suspensions[0].suspension_record, secret="topsecret") is True
     assert state.done is True

@@ -62,8 +62,8 @@ class AgentConfig:
 
     model_config: dict[str, Any] | None = None
     instructions: str | None = None
-    code_executor: Any | None = None   # BaseCodeExecutor — typed as Any to avoid circular import
+    code_executor: Any | None = None  # BaseCodeExecutor — typed as Any to avoid circular import
     output_factory: Any | None = None  # OutputFactory — typed as Any to avoid circular import
     guardrails: AgentGuardrails = dc_field(default_factory=AgentGuardrails)
     session_id: str | None = None
-    file_store: Any | None = None      # FileStore — typed as Any to avoid circular import
+    file_store: Any | None = None  # FileStore — typed as Any to avoid circular import

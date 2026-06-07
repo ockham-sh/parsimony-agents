@@ -188,10 +188,7 @@ async def _next_chunk_with_heartbeat(
         raise FailureRaised(
             Failure(
                 kind=FailureKind.transient_provider,
-                explanation=(
-                    f"The AI model stopped responding partway through "
-                    f"(no output for {heartbeat_s:.0f}s)."
-                ),
+                explanation=(f"The AI model stopped responding partway through (no output for {heartbeat_s:.0f}s)."),
                 metadata={"reason": "heartbeat_timeout", "heartbeat_s": heartbeat_s},
             )
         ) from exc
@@ -231,9 +228,7 @@ async def call_llm(
     # No-op on every non-Anthropic route; on Claude routes it caches the
     # system prompt, tool catalog, and stable history prefix so the volatile
     # per-iteration context snapshot is the only uncached tail.
-    messages, tools = apply_anthropic_cache_markers(
-        model_config.get("model"), messages, tools
-    )
+    messages, tools = apply_anthropic_cache_markers(model_config.get("model"), messages, tools)
 
     try:
         response_stream = await litellm.acompletion(
@@ -260,9 +255,7 @@ async def call_llm(
                 raise asyncio.CancelledError("cancellation requested during stream")
 
             try:
-                chunk = await _next_chunk_with_heartbeat(
-                    aiter, heartbeat_s=stream_heartbeat_s
-                )
+                chunk = await _next_chunk_with_heartbeat(aiter, heartbeat_s=stream_heartbeat_s)
             except StopAsyncIteration:
                 break
             except asyncio.CancelledError:
@@ -282,15 +275,15 @@ async def call_llm(
             except (AttributeError, IndexError):
                 continue
 
-            if (content := getattr(delta, "content", None)):
+            if content := getattr(delta, "content", None):
                 yield LLMTextDelta(content=content)
 
-            if (reasoning := getattr(delta, "reasoning_content", None)):
+            if reasoning := getattr(delta, "reasoning_content", None):
                 yield LLMReasoningDelta(content=reasoning)
 
             # Tool calls in the stream show up incrementally. The first chunk
             # with .name is the "start" signal; subsequent chunks accumulate args.
-            for tc_chunk in (getattr(delta, "tool_calls", None) or []):
+            for tc_chunk in getattr(delta, "tool_calls", None) or []:
                 fn = getattr(tc_chunk, "function", None)
                 if fn is None:
                     continue

@@ -80,9 +80,7 @@ async def test_resolve_artifact_slug_empty_seen_raises() -> None:
     agent = _agent_with_executor(ex)
 
     with pytest.raises(LiveNameCollisionError) as info:
-        await agent._resolve_artifact_slug(
-            "us_report", kind="report", seen_live_names=set()
-        )
+        await agent._resolve_artifact_slug("us_report", kind="report", seen_live_names=set())
     assert info.value.existing_logical_id == "rep1"
     assert info.value.kind == "report"
     assert "read_artifact" in str(info.value)
@@ -123,9 +121,7 @@ async def test_resolve_artifact_slug_none_seen_skips_gate() -> None:
     _seed_report_curation(ex, lid="rep1", live_name="us_report")
     agent = _agent_with_executor(ex)
 
-    lid = await agent._resolve_artifact_slug(
-        "us_report", kind="report", seen_live_names=None
-    )
+    lid = await agent._resolve_artifact_slug("us_report", kind="report", seen_live_names=None)
     assert lid == "rep1"
 
 
@@ -136,24 +132,18 @@ async def test_resolve_artifact_slug_no_match_raises_value_error() -> None:
     agent = _agent_with_executor(ex)
 
     with pytest.raises(ValueError, match="No report has live_name"):
-        await agent._resolve_artifact_slug(
-            "missing", kind="report", seen_live_names=set()
-        )
+        await agent._resolve_artifact_slug("missing", kind="report", seen_live_names=set())
 
 
 @pytest.mark.asyncio
 async def test_resolve_slug_to_latest_ref_surfaces_collision() -> None:
     ex = _Executor()
     _seed_dataset_curation(ex, lid="ds1", live_name="us_gdp")
-    ex.files[".ockham/datasets/ds1/log.jsonl"] = (
-        json.dumps({"content_sha": "csha_a"}) + "\n"
-    ).encode("utf-8")
+    ex.files[".ockham/datasets/ds1/log.jsonl"] = (json.dumps({"content_sha": "csha_a"}) + "\n").encode("utf-8")
     agent = _agent_with_executor(ex)
 
     with pytest.raises(LiveNameCollisionError) as info:
-        await agent._resolve_slug_to_latest_ref(
-            "us_gdp", seen_live_names=set()
-        )
+        await agent._resolve_slug_to_latest_ref("us_gdp", seen_live_names=set())
     assert info.value.kind == "dataset"
     assert info.value.existing_logical_id == "ds1"
 
@@ -162,14 +152,10 @@ async def test_resolve_slug_to_latest_ref_surfaces_collision() -> None:
 async def test_resolve_slug_to_latest_ref_seen_returns_ref() -> None:
     ex = _Executor()
     _seed_dataset_curation(ex, lid="ds1", live_name="us_gdp")
-    ex.files[".ockham/datasets/ds1/log.jsonl"] = (
-        json.dumps({"content_sha": "csha_a"}) + "\n"
-    ).encode("utf-8")
+    ex.files[".ockham/datasets/ds1/log.jsonl"] = (json.dumps({"content_sha": "csha_a"}) + "\n").encode("utf-8")
     agent = _agent_with_executor(ex)
 
-    ref = await agent._resolve_slug_to_latest_ref(
-        "us_gdp", seen_live_names={("dataset", "us_gdp")}
-    )
+    ref = await agent._resolve_slug_to_latest_ref("us_gdp", seen_live_names={("dataset", "us_gdp")})
     assert ref.kind == "dataset"
     assert ref.logical_id == "ds1"
     assert ref.content_sha == "csha_a"
@@ -179,9 +165,7 @@ def _seed_filesystem_dataset(tmp_path: Path, *, lid: str, live_name: str, csha: 
     """Materialise a dataset curation + log on disk under tmp_path."""
     root = tmp_path / ".ockham" / "datasets" / lid
     root.mkdir(parents=True)
-    (root / "curation.json").write_text(
-        json.dumps({"kind": "dataset", "logical_id": lid, "live_name": live_name})
-    )
+    (root / "curation.json").write_text(json.dumps({"kind": "dataset", "logical_id": lid, "live_name": live_name}))
     (root / "log.jsonl").write_text(json.dumps({"content_sha": csha}) + "\n")
 
 
@@ -197,9 +181,7 @@ def test_resolve_dataset_slug_empty_seen_raises(tmp_path: Path) -> None:
 def test_resolve_dataset_slug_seen_returns_ref(tmp_path: Path) -> None:
     _seed_filesystem_dataset(tmp_path, lid="ds1", live_name="us_gdp", csha="csha_a")
 
-    ref = resolve_dataset_slug(
-        tmp_path, "us_gdp", seen_live_names={("dataset", "us_gdp")}
-    )
+    ref = resolve_dataset_slug(tmp_path, "us_gdp", seen_live_names={("dataset", "us_gdp")})
     assert ref.logical_id == "ds1"
     assert ref.content_sha == "csha_a"
 

@@ -29,8 +29,8 @@ from parsimony_agents.views import get_llm_view_defaults
 # Named constants
 # ---------------------------------------------------------------------------
 _DATAFRAME_FULL_SHOW_THRESHOLD = 10  # Rows at or below this count: show all; above: show head + tail
-_DATAFRAME_HEAD_TAIL_SIZE = 5        # Number of rows in head/tail preview slices
-_DEFAULT_MAX_CELL_LENGTH = 1000      # Fallback max characters per cell in LLM output
+_DATAFRAME_HEAD_TAIL_SIZE = 5  # Number of rows in head/tail preview slices
+_DEFAULT_MAX_CELL_LENGTH = 1000  # Fallback max characters per cell in LLM output
 
 
 class BaseOutputObject(MessageContent):
@@ -99,9 +99,7 @@ class DataFrameObject(BaseOutputObject):
         is the only one anything in the codebase ever has to manufacture.
         """
 
-        return cls(
-            ref=DataframeRef.from_pandas(dataframe, ref=ref, local_dir=local_dir)
-        )
+        return cls(ref=DataframeRef.from_pandas(dataframe, ref=ref, local_dir=local_dir))
 
     @computed_field
     @property
@@ -127,9 +125,7 @@ class DataFrameObject(BaseOutputObject):
         overrides = overrides or {}
         view_cfg = get_llm_view_defaults("dataframe")[mode].model_copy(update=overrides)
 
-        blocks: list[dict[str, Any]] = [
-            {"type": "text", "text": f"DataFrame {get_output_header(self.type, mode)}\n"}
-        ]
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": f"DataFrame {get_output_header(self.type, mode)}\n"}]
 
         if self.value.shape[0] == 0:
             blocks.append({"type": "text", "text": "DataFrame is empty."})
@@ -139,9 +135,7 @@ class DataFrameObject(BaseOutputObject):
         max_cell = getattr(view_cfg, "max_cell_length", None)
         if max_cell is None:
             max_cell = _DEFAULT_MAX_CELL_LENGTH
-        page_blocks = "\n".join(
-            paginator.iter_pages(view_cfg.display_pages, na_rep="<NULL>", max_cell_length=max_cell)
-        )
+        page_blocks = "\n".join(paginator.iter_pages(view_cfg.display_pages, na_rep="<NULL>", max_cell_length=max_cell))
 
         if view_cfg.show_dtypes:
             blocks.extend(
@@ -172,9 +166,7 @@ class DataFrameObject(BaseOutputObject):
                     unique_vals = self.value[col].unique().tolist()
                 except TypeError:
                     unique_vals = "(complex type - list/array)"
-                blocks.append(
-                    {"type": "text", "text": f"- {col}: {truncate_text(str(unique_vals), max_length=100)}\n"}
-                )
+                blocks.append({"type": "text", "text": f"- {col}: {truncate_text(str(unique_vals), max_length=100)}\n"})
 
         return blocks
 
@@ -402,9 +394,7 @@ class KernelOutput(MessageContent):
             return f'<fetch_log entries="{len(self.fetch_log)}"/>\n'
         lines: list[str] = ["<fetch_log>"]
         for entry in self.fetch_log:
-            params_inline = escape_attr(
-                json.dumps(entry.params or {}, sort_keys=True, default=str)
-            )
+            params_inline = escape_attr(json.dumps(entry.params or {}, sort_keys=True, default=str))
             v_attr = f' version="{escape_attr(entry.version)}"' if entry.version is not None else ""
             lines.append(
                 f'  <entry source="{escape_attr(entry.source)}" '
@@ -426,7 +416,5 @@ def _fetch_entry_safe_dump(entry: FetchLogEntry) -> dict[str, Any]:
     """Wire-safe projection: replace ``provenance`` with its ``safe_dump`` and serialize ref."""
     raw = entry.model_dump(mode="json", exclude={"data_object_ref"})
     raw["provenance"] = entry.provenance.safe_dump()
-    raw["data_object_ref"] = (
-        entry.data_object_ref.to_dict() if entry.data_object_ref is not None else None
-    )
+    raw["data_object_ref"] = entry.data_object_ref.to_dict() if entry.data_object_ref is not None else None
     return raw

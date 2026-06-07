@@ -213,8 +213,9 @@ def collect_local_artifact_lines(local_dir: Path, *, max_items: int = 48) -> lis
             # Snapshot filename has no recognised extension (stray partial
             # write, etc.). Without a ref the <turn_artifacts> row can't be
             # pinned — skip rather than emit a half-row.
-            logger.info("local session_state: skip %s/%s — unrecognised snapshot %s",
-                        kind, logical_dir.name, snapshot.name)
+            logger.info(
+                "local session_state: skip %s/%s — unrecognised snapshot %s", kind, logical_dir.name, snapshot.name
+            )
             continue
         try:
             mtime = snapshot.stat().st_mtime
