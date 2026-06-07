@@ -100,9 +100,7 @@ def parse_snapshot(text: str) -> ParsedSnapshot:
     """
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].rstrip("\n") != _FRONTMATTER_DELIM:
-        raise ValueError(
-            "report snapshot: missing leading '---' YAML frontmatter delimiter."
-        )
+        raise ValueError("report snapshot: missing leading '---' YAML frontmatter delimiter.")
 
     end_idx = -1
     for i in range(1, len(lines)):
@@ -110,9 +108,7 @@ def parse_snapshot(text: str) -> ParsedSnapshot:
             end_idx = i
             break
     if end_idx < 0:
-        raise ValueError(
-            "report snapshot: YAML frontmatter has no closing '---' delimiter."
-        )
+        raise ValueError("report snapshot: YAML frontmatter has no closing '---' delimiter.")
 
     yaml_text = "".join(lines[1:end_idx])
     body_start = end_idx + 1
@@ -129,17 +125,13 @@ def parse_snapshot(text: str) -> ParsedSnapshot:
         raise ValueError("report snapshot: frontmatter must be a YAML mapping.")
     parsimony_block = meta.get("parsimony")
     if not isinstance(parsimony_block, dict):
-        raise ValueError(
-            "report snapshot: frontmatter must contain a 'parsimony:' mapping."
-        )
+        raise ValueError("report snapshot: frontmatter must contain a 'parsimony:' mapping.")
 
     title = _parse_str_field(parsimony_block.get("title"), field="title", required=True)
     subtitle = _parse_str_field(parsimony_block.get("subtitle"), field="subtitle", required=False)
     formats = _parse_formats(parsimony_block.get("formats"))
     pins = _parse_pins(parsimony_block.get("pins"))
-    return ParsedSnapshot(
-        formats=formats, pins=pins, body=body, title=title, subtitle=subtitle
-    )
+    return ParsedSnapshot(formats=formats, pins=pins, body=body, title=title, subtitle=subtitle)
 
 
 def compose_snapshot(
@@ -163,10 +155,7 @@ def compose_snapshot(
     if not title:
         raise ValueError("compose_snapshot: title is required and must be non-empty.")
     fmts = list(formats) if formats else list(DEFAULT_FORMATS)
-    pin_dump: dict[str, dict[str, str]] = {
-        live_name: ref.to_dict()
-        for live_name, ref in sorted(pins.items())
-    }
+    pin_dump: dict[str, dict[str, str]] = {live_name: ref.to_dict() for live_name, ref in sorted(pins.items())}
     parsimony_block: dict[str, Any] = {"title": title}
     if subtitle:
         parsimony_block["subtitle"] = subtitle
@@ -185,19 +174,13 @@ def _parse_str_field(raw: Any, *, field: str, required: bool) -> str:
     """Normalize a string-valued frontmatter field."""
     if raw is None:
         if required:
-            raise ValueError(
-                f"report snapshot: parsimony.{field} is required."
-            )
+            raise ValueError(f"report snapshot: parsimony.{field} is required.")
         return ""
     if not isinstance(raw, str):
-        raise ValueError(
-            f"report snapshot: parsimony.{field} must be a string, got {type(raw).__name__}."
-        )
+        raise ValueError(f"report snapshot: parsimony.{field} must be a string, got {type(raw).__name__}.")
     s = raw.strip()
     if required and not s:
-        raise ValueError(
-            f"report snapshot: parsimony.{field} is required and must be non-empty."
-        )
+        raise ValueError(f"report snapshot: parsimony.{field} is required and must be non-empty.")
     return s
 
 
@@ -206,16 +189,12 @@ def _parse_formats(raw: Any) -> list[str]:
     if raw is None:
         return list(DEFAULT_FORMATS)
     if not isinstance(raw, list):
-        raise ValueError(
-            f"report snapshot: parsimony.formats must be a list, got {type(raw).__name__}."
-        )
+        raise ValueError(f"report snapshot: parsimony.formats must be a list, got {type(raw).__name__}.")
     seen: set[str] = set()
     out: list[str] = []
     for item in raw:
         if not isinstance(item, str):
-            raise ValueError(
-                f"report snapshot: parsimony.formats items must be strings, got {item!r}."
-            )
+            raise ValueError(f"report snapshot: parsimony.formats items must be strings, got {item!r}.")
         s = item.strip()
         if not s or s in seen:
             continue
@@ -229,24 +208,17 @@ def _parse_pins(raw: Any) -> dict[str, ArtifactRef]:
     if raw is None:
         return {}
     if not isinstance(raw, dict):
-        raise ValueError(
-            f"report snapshot: parsimony.pins must be a mapping, got {type(raw).__name__}."
-        )
+        raise ValueError(f"report snapshot: parsimony.pins must be a mapping, got {type(raw).__name__}.")
     out: dict[str, ArtifactRef] = {}
     for live_name, ref_dict in raw.items():
         if not isinstance(live_name, str) or not live_name:
-            raise ValueError(
-                f"report snapshot: pin key must be a non-empty string, got {live_name!r}."
-            )
+            raise ValueError(f"report snapshot: pin key must be a non-empty string, got {live_name!r}.")
         if not isinstance(ref_dict, dict):
             raise ValueError(
-                f"report snapshot: pin value for {live_name!r} must be a mapping, "
-                f"got {type(ref_dict).__name__}."
+                f"report snapshot: pin value for {live_name!r} must be a mapping, got {type(ref_dict).__name__}."
             )
         try:
             out[live_name] = ArtifactRef.from_dict(ref_dict)
         except (KeyError, ValueError) as e:
-            raise ValueError(
-                f"report snapshot: invalid ArtifactRef for pin {live_name!r}: {e}"
-            ) from e
+            raise ValueError(f"report snapshot: invalid ArtifactRef for pin {live_name!r}: {e}") from e
     return out

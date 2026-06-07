@@ -126,10 +126,7 @@ def _format_list_artifacts(
             parts.append(f"kind={kind!r}")
         scope = (" matching " + ", ".join(parts)) if parts else ""
         return f"No artifacts found in this workspace{scope}."
-    lines = [
-        f"{len(items)} artifact(s) (most recent first). "
-        "Inspect with read_artifact(live_name=…, kind=…):"
-    ]
+    lines = [f"{len(items)} artifact(s) (most recent first). Inspect with read_artifact(live_name=…, kind=…):"]
     for item in items:
         kind_label = item.get("kind", "?")
         live_name = item.get("live_name", "?")
@@ -214,9 +211,7 @@ def _inject_connector_catalog(ctx: AgentContext, connectors: Any) -> None:
     content is otherwise byte-identical, which is what keeps the cached prefix
     stable. No-op when there are no connectors.
     """
-    ctx.messages = [
-        m for m in ctx.messages if not m.metadata.get("connectors_catalog", False)
-    ]
+    ctx.messages = [m for m in ctx.messages if not m.metadata.get("connectors_catalog", False)]
     catalog = render_connector_catalog(connectors)
     if catalog:
         ctx.messages.insert(
@@ -279,12 +274,8 @@ class Agent:
         # resume will require a real shared secret).
         policy: Any | None = None,
         suspension_secret: str | None = None,
-        read_artifact_fn: Callable[
-            [str, str, dict[str, Any]], Awaitable[ArtifactLlmResult]
-        ] | None = None,
-        list_artifacts_fn: Callable[
-            [str | None, str | None, int], Awaitable[list[dict[str, Any]]]
-        ] | None = None,
+        read_artifact_fn: Callable[[str, str, dict[str, Any]], Awaitable[ArtifactLlmResult]] | None = None,
+        list_artifacts_fn: Callable[[str | None, str | None, int], Awaitable[list[dict[str, Any]]]] | None = None,
     ):
         from parsimony_agents.agent.prompts import DEFAULT_DATA_ANALYSIS_PROMPT
         from parsimony_agents.execution.executor import CodeExecutor as _LocalExecutor
@@ -295,9 +286,7 @@ class Agent:
         elif model is not None:
             resolved_config = {"model": model, **({"api_key": api_key} if api_key else {})}
         else:
-            raise TypeError(
-                "Agent requires either model_config={...} or model='model-name'"
-            )
+            raise TypeError("Agent requires either model_config={...} or model='model-name'")
 
         # Resolve instructions: explicit > default prompt. The connector catalog
         # is *not* appended here — connectors live in the executor namespace and
@@ -306,8 +295,7 @@ class Agent:
         resolved_instructions = instructions if instructions is not None else DEFAULT_DATA_ANALYSIS_PROMPT
         if connectors is not None and not isinstance(connectors, (Connectors, Mapping)):
             raise TypeError(
-                "connectors must be a Connectors or Mapping[str, Connectors]; "
-                f"got {type(connectors).__name__}"
+                f"connectors must be a Connectors or Mapping[str, Connectors]; got {type(connectors).__name__}"
             )
 
         # Resolve output_factory first (executor depends on it)
@@ -492,7 +480,6 @@ class Agent:
             return
         await self.code_executor.set_connectors(self._connectors)
 
-
     async def run(
         self,
         user_message: str | Text,
@@ -533,9 +520,7 @@ class Agent:
             ctx.files = self.file_store
             ctx.vector_store = get_or_create_session_vector_store(self.session_id)
             ctx.keyword_store = get_or_create_session_keyword_store(self.session_id)
-            await self.code_executor.set_cwd(
-                str(ctx.files.get_files_dir()), session_id=self.session_id
-            )
+            await self.code_executor.set_cwd(str(ctx.files.get_files_dir()), session_id=self.session_id)
 
         await self._setup_connectors()
 
@@ -590,17 +575,19 @@ class Agent:
         # No ``connectors=``: the catalog is its own stable prefix message
         # (see ``_inject_connector_catalog``); the snapshot stays volatile-only.
         context_snapshot = await ctx.to_snapshot()
-        ctx.messages = [
-            m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False
-        ]
-        ctx.messages.append(
-            AgentMessage(role="user", content=context_snapshot, metadata={"context_snapshot": True})
-        )
+        ctx.messages = [m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False]
+        ctx.messages.append(AgentMessage(role="user", content=context_snapshot, metadata={"context_snapshot": True}))
         state.messages = list(ctx.messages)
 
-        hooks = WorkspaceRunHooks(agent=self, ctx=ctx, turn_state=turn_state,
-                                  cancellation=cancellation, tool_choice=tool_choice,
-                                  start_time=start_time, agent_span=agent_span)
+        hooks = WorkspaceRunHooks(
+            agent=self,
+            ctx=ctx,
+            turn_state=turn_state,
+            cancellation=cancellation,
+            tool_choice=tool_choice,
+            start_time=start_time,
+            agent_span=agent_span,
+        )
         async for event in run_loop(hooks, state, cancellation=cancellation):
             yield event
 
@@ -651,16 +638,12 @@ class Agent:
             raise ValueError("resume requires a non-empty user_reply")
 
         if not verify_suspension_token(record=suspension, secret=self.suspension_secret):
-            raise SuspensionTokenMismatch(
-                f"suspension token failed verification for run_id={suspension.run_id!r}"
-            )
+            raise SuspensionTokenMismatch(f"suspension token failed verification for run_id={suspension.run_id!r}")
 
         if max_suspension_age_s is not None:
             age = (datetime.now(UTC) - suspension.suspended_at).total_seconds()
             if age > max_suspension_age_s:
-                raise SuspensionExpired(
-                    f"suspension is {age:.0f}s old (max {max_suspension_age_s:.0f}s)"
-                )
+                raise SuspensionExpired(f"suspension is {age:.0f}s old (max {max_suspension_age_s:.0f}s)")
 
         agent_span = trace.get_current_span()
         logger.info(
@@ -689,9 +672,7 @@ class Agent:
             ctx.files = self.file_store
             ctx.vector_store = get_or_create_session_vector_store(self.session_id)
             ctx.keyword_store = get_or_create_session_keyword_store(self.session_id)
-            await self.code_executor.set_cwd(
-                str(ctx.files.get_files_dir()), session_id=self.session_id
-            )
+            await self.code_executor.set_cwd(str(ctx.files.get_files_dir()), session_id=self.session_id)
 
         await self._setup_connectors()
 
@@ -738,17 +719,19 @@ class Agent:
         # No ``connectors=``: the catalog is its own stable prefix message
         # (see ``_inject_connector_catalog``); the snapshot stays volatile-only.
         context_snapshot = await ctx.to_snapshot()
-        ctx.messages = [
-            m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False
-        ]
-        ctx.messages.append(
-            AgentMessage(role="user", content=context_snapshot, metadata={"context_snapshot": True})
-        )
+        ctx.messages = [m for m in ctx.messages if m.metadata.get("context_snapshot", False) is False]
+        ctx.messages.append(AgentMessage(role="user", content=context_snapshot, metadata={"context_snapshot": True}))
         state.messages = list(ctx.messages)
 
-        hooks = WorkspaceRunHooks(agent=self, ctx=ctx, turn_state=turn_state,
-                                  cancellation=cancellation, tool_choice="auto",
-                                  start_time=start_time, agent_span=agent_span)
+        hooks = WorkspaceRunHooks(
+            agent=self,
+            ctx=ctx,
+            turn_state=turn_state,
+            cancellation=cancellation,
+            tool_choice="auto",
+            start_time=start_time,
+            agent_span=agent_span,
+        )
         yield StateSnapshot(context=ctx)
         async for event in run_loop(hooks, state, cancellation=cancellation):
             yield event
@@ -874,7 +857,7 @@ class Agent:
         },
         tool_type="system",
         ui_message="Reading output...",
-        ui_message_completed="Read output"
+        ui_message_completed="Read output",
     )
     async def output_read(self, *, variable_name: str, pages: list[int], context: AgentContext) -> SystemToolOutput:
         pages = pages[:5]
@@ -902,7 +885,6 @@ class Agent:
         text = blocks_to_text(blocks)
         return SystemToolOutput(content=Text(content=text))
 
-
     @toolmethod(
         name="output_search",
         description=(
@@ -921,7 +903,7 @@ class Agent:
         },
         tool_type="system",
         ui_message="Reading output...",
-        ui_message_completed="Read output"
+        ui_message_completed="Read output",
     )
     async def output_search(
         self,
@@ -945,7 +927,7 @@ class Agent:
                 keyword_store=context.keyword_store,
                 vector_store=context.vector_store,
                 identifier=variable_name,
-                k=top_k
+                k=top_k,
             )
         except Exception as e:
             return _system_error(f"Search failed: {str(e)}")
@@ -957,7 +939,7 @@ class Agent:
         )
 
         return SystemToolOutput(content=Text(content=response_text))
-    
+
     async def _ensure_indexed(self, variable_name: str, context: AgentContext) -> bool:
         """Ensure a variable (or cell ref) is indexed in both stores (lazy indexing)."""
         keyword_indexed = context.keyword_store.is_indexed(variable_name) if context.keyword_store else True
@@ -1035,8 +1017,7 @@ class Agent:
             results = await asyncio.gather(*tasks, return_exceptions=True)
             return all(r is True or not isinstance(r, Exception) for r in results)
         return False
-    
-    
+
     def _format_search_results(self, query: str, results: list) -> str:
         """Format search results."""
         lines: list[str] = []
@@ -1044,15 +1025,12 @@ class Agent:
             page = result.metadata.get("page", 1)
             lines.append(f"Page {page}:\n{result.content}\n")
         return "\n".join(lines).rstrip()
-    
+
     def _format_no_search_results(self, query: str, variable_name: str | None) -> str:
         """Format response when no relevant results are found."""
         if variable_name:
             return f"No matching content for '{query}' in '{variable_name}'."
         return f"No matching content for '{query}'."
-
-
-
 
     @toolmethod(
         name="dry_execute_code",
@@ -1114,11 +1092,7 @@ class Agent:
         # Attach lightweight metadata to the kernel output
         kernel_output.metadata = metadata
 
-        return UtilityToolOutput(
-            metadata=metadata,
-            content=kernel_output,
-            ui_message="Executing temporary code"
-        )
+        return UtilityToolOutput(metadata=metadata, content=kernel_output, ui_message="Executing temporary code")
 
     def _workspace_root(self) -> Path:
         cwd = getattr(self.code_executor, "cwd", None)
@@ -1219,8 +1193,7 @@ class Agent:
         head = df.head(5)
         # Connector-supplied: column names, dtypes, source, params. Escape every interpolation.
         schema_line = " | ".join(
-            f"{escape_text(c.name)} ({escape_text(c.role.value)}, {escape_text(c.dtype)})"
-            for c in result.columns
+            f"{escape_text(c.name)} ({escape_text(c.role.value)}, {escape_text(c.dtype)})" for c in result.columns
         )
         prov = result.provenance
         lines = [
@@ -1260,8 +1233,7 @@ class Agent:
                 "live_name": {
                     "type": "string",
                     "description": (
-                        "Workspace slug, exactly as it appears in "
-                        "<turn_artifacts> or in a list_artifacts row."
+                        "Workspace slug, exactly as it appears in <turn_artifacts> or in a list_artifacts row."
                     ),
                 },
                 "kind": {
@@ -1302,9 +1274,7 @@ class Agent:
         context: AgentContext,  # noqa: ARG002
     ) -> SystemToolOutput:
         if self._read_artifact_fn is None:
-            raise RuntimeError(
-                "read_artifact is not enabled for this agent configuration"
-            )
+            raise RuntimeError("read_artifact is not enabled for this agent configuration")
         options: dict[str, Any] = {
             "view": view,
             "mode": mode,
@@ -1365,9 +1335,7 @@ class Agent:
         context: AgentContext,  # noqa: ARG002
     ) -> SystemToolOutput:
         if self._list_artifacts_fn is None:
-            raise RuntimeError(
-                "list_artifacts is not enabled for this agent configuration"
-            )
+            raise RuntimeError("list_artifacts is not enabled for this agent configuration")
         bounded_limit = max(1, min(100, int(limit)))
         items = await self._list_artifacts_fn(query, kind, bounded_limit)
         text = _format_list_artifacts(items, query=query, kind=kind)
@@ -1473,9 +1441,7 @@ class Agent:
         # Canonicalize newlines via in-memory round-trip — same shape the
         # snapshot store will write, so ``content_sha`` matches what the
         # streaming layer's persist step computes from the ScriptPreview.
-        canonical = deserialize_notebook(
-            serialize_notebook(Script(path=normalized, code=code)), path=normalized
-        ).code
+        canonical = deserialize_notebook(serialize_notebook(Script(path=normalized, code=code)), path=normalized).code
         if execute:
             # The notebook is the producer for every kernel variable it
             # assigns — open a producer-scoped run so the variable origin
@@ -1599,9 +1565,7 @@ class Agent:
         raise ValueError(f"unsupported code tool: {tool_name!r}")
 
     @staticmethod
-    async def _resolve_notebook_logical_id(
-        working_copy_path: str, context: AgentContext
-    ) -> str:
+    async def _resolve_notebook_logical_id(working_copy_path: str, context: AgentContext) -> str:
         """Resolve a notebook user-visible path to its ``logical_id``.
 
         1. If the workspace host bound ``context.notebook_logical_id_resolver``,
@@ -1624,9 +1588,7 @@ class Agent:
         return notebook_logical_id(working_copy_path)
 
     @staticmethod
-    async def _notebook_ref_for(
-        code: str, working_copy_path: str, context: AgentContext
-    ) -> ArtifactRef:
+    async def _notebook_ref_for(code: str, working_copy_path: str, context: AgentContext) -> ArtifactRef:
         """Canonical notebook ref for *code* at *working_copy_path*.
 
         ``content_sha = notebook_content_sha(code)`` is universal.
@@ -1739,13 +1701,10 @@ class Agent:
             )
         if not isinstance(out_obj, DataFrameObject):
             raise TypeError(
-                f"Dataset '{dataset_variable_name}' must resolve to a pandas DataFrame; "
-                f"got {type(out_obj).__name__}."
+                f"Dataset '{dataset_variable_name}' must resolve to a pandas DataFrame; got {type(out_obj).__name__}."
             )
 
-        nb_refs, src_refs = await self._lineage_for_variable(
-            dataset_variable_name, context=context
-        )
+        nb_refs, src_refs = await self._lineage_for_variable(dataset_variable_name, context=context)
 
         final_tags: list[str] = []
         for t in TypeAdapter(list[str]).validate_python(tags or []):
@@ -1844,8 +1803,7 @@ class Agent:
         fig_obj = await self.code_executor.get(chart_variable_name)
         if fig_obj is None:
             raise ValueError(
-                f"Variable '{chart_variable_name}' is not in the kernel. "
-                "Run the notebook that creates it first."
+                f"Variable '{chart_variable_name}' is not in the kernel. Run the notebook that creates it first."
             )
         if not isinstance(fig_obj, FigureObject):
             raise TypeError(
@@ -1855,9 +1813,7 @@ class Agent:
         if fig_obj.name is None:
             fig_obj.name = chart_variable_name
 
-        nb_refs, src_refs, ds_refs = await self._chart_lineage_for_variable(
-            chart_variable_name, context=context
-        )
+        nb_refs, src_refs, ds_refs = await self._chart_lineage_for_variable(chart_variable_name, context=context)
         if not nb_refs:
             raise ValueError(
                 f"Chart variable {chart_variable_name!r} has no producing notebook "
@@ -2017,9 +1973,7 @@ class Agent:
                 if not s or s in seen:
                     continue
                 if s not in VALID_FORMATS:
-                    raise ValueError(
-                        f"return_report: unknown format {s!r}; pick from {sorted(VALID_FORMATS)}."
-                    )
+                    raise ValueError(f"return_report: unknown format {s!r}; pick from {sorted(VALID_FORMATS)}.")
                 seen.add(s)
                 chosen_formats.append(s)
             if not chosen_formats:
@@ -2085,23 +2039,18 @@ class Agent:
             )
 
         seen = extract_seen_live_names(context.messages)
-        target_lid = await self._resolve_artifact_slug(
-            live_name, kind="report", seen_live_names=seen
-        )
+        target_lid = await self._resolve_artifact_slug(live_name, kind="report", seen_live_names=seen)
 
         log_path = f".ockham/reports/{target_lid}/log.jsonl"
         try:
             raw_log = await self.code_executor.read_workspace_file(log_path)
         except FileNotFoundError as e:
             raise ValueError(
-                f"edit_report: report {live_name!r} has no log.jsonl "
-                "— it has not been published yet."
+                f"edit_report: report {live_name!r} has no log.jsonl — it has not been published yet."
             ) from e
         last_csha = last_content_sha_from_log(raw_log)
         if last_csha is None:
-            raise ValueError(
-                f"edit_report: report {live_name!r} log.jsonl has no usable entries."
-            )
+            raise ValueError(f"edit_report: report {live_name!r} log.jsonl has no usable entries.")
 
         snapshot_path = f".ockham/reports/{target_lid}/{last_csha}.qmd"
         raw = await self.code_executor.read_workspace_file(snapshot_path)
@@ -2116,9 +2065,7 @@ class Agent:
         if n == 0:
             raise ValueError("edit_report: old_str not found in report markdown.")
         if n > 1:
-            raise ValueError(
-                "edit_report: old_str occurs multiple times; provide a more specific target."
-            )
+            raise ValueError("edit_report: old_str occurs multiple times; provide a more specific target.")
         new_markdown = snap.body.replace(old_str, new_str, 1)
 
         # Resolve embeds against the PRESERVED pin map. If the edit
@@ -2179,9 +2126,7 @@ class Agent:
         if not live_name:
             raise ValueError("refresh: live_name must be non-empty.")
         seen = extract_seen_live_names(context.messages)
-        target_ref = await self._resolve_slug_to_latest_ref(
-            live_name, seen_live_names=seen
-        )
+        target_ref = await self._resolve_slug_to_latest_ref(live_name, seen_live_names=seen)
 
         new_ref = await refresh_artifact(
             target_ref,
@@ -2200,8 +2145,7 @@ class Agent:
             payload = await self.code_executor.get(dataset.variable_name)
             if payload is None:
                 raise ValueError(
-                    f"refresh: dataset variable {dataset.variable_name!r} "
-                    "is not in the kernel after refresh."
+                    f"refresh: dataset variable {dataset.variable_name!r} is not in the kernel after refresh."
                 )
             if not isinstance(payload, DataFrameObject):
                 raise ValueError(
@@ -2215,10 +2159,7 @@ class Agent:
             chart, _spec = deserialize_chart(blob)
             payload = await self.code_executor.get(chart.variable_name)
             if payload is None:
-                raise ValueError(
-                    f"refresh: chart variable {chart.variable_name!r} is "
-                    "not in the kernel after refresh."
-                )
+                raise ValueError(f"refresh: chart variable {chart.variable_name!r} is not in the kernel after refresh.")
             if not isinstance(payload, FigureObject):
                 raise ValueError(
                     f"refresh: chart variable {chart.variable_name!r} "
@@ -2232,9 +2173,7 @@ class Agent:
             return await self._reload_report_for_refresh(new_ref, blob)
         raise AssertionError(f"refresh: unreachable kind {new_ref.kind!r}")
 
-    async def _reload_report_for_refresh(
-        self, ref: ArtifactRef, blob: bytes
-    ) -> Report:
+    async def _reload_report_for_refresh(self, ref: ArtifactRef, blob: bytes) -> Report:
         """Reconstruct a :class:`Report` model from disk after refresh.
 
         Reports have no in-kernel payload — snapshot bytes ARE the
@@ -2272,8 +2211,7 @@ class Agent:
             raise ValueError(f"{parameter_name} must be a non-empty string.")
         if not normalized.isidentifier():
             raise ValueError(
-                f"{parameter_name} must be a plain variable name, not an expression or slice. "
-                f"Got '{value}'."
+                f"{parameter_name} must be a plain variable name, not an expression or slice. Got '{value}'."
             )
         return normalized
 
@@ -2298,9 +2236,7 @@ class Agent:
                     "be a published chart or dataset in this workspace."
                 ) from e
 
-    async def _build_report_pin_map(
-        self, embed_keys: list[tuple[SnapshotKind, str]]
-    ) -> dict[str, ArtifactRef]:
+    async def _build_report_pin_map(self, embed_keys: list[tuple[SnapshotKind, str]]) -> dict[str, ArtifactRef]:
         """Resolve each ``(kind, live_name)`` to its latest published snapshot.
 
         Walks ``.ockham/<kind>s/*/curation.json`` for the first match
@@ -2321,9 +2257,7 @@ class Agent:
             if live_name in seen_live_names:
                 continue  # already pinned via earlier (kind, live_name) tuple
             seen_live_names.add(live_name)
-            ref = await self._resolve_live_name_to_latest_ref(
-                kind=kind, live_name=live_name
-            )
+            ref = await self._resolve_live_name_to_latest_ref(kind=kind, live_name=live_name)
             if ref is None:
                 raise ValueError(
                     f"return_report: embedded {kind} live_name {live_name!r} has no "
@@ -2333,9 +2267,7 @@ class Agent:
             pin_map[live_name] = ref
         return pin_map
 
-    async def _resolve_live_name_to_latest_ref(
-        self, *, kind: SnapshotKind, live_name: str
-    ) -> ArtifactRef | None:
+    async def _resolve_live_name_to_latest_ref(self, *, kind: SnapshotKind, live_name: str) -> ArtifactRef | None:
         """Look up the latest snapshot for ``(kind, live_name)`` via curation.
 
         Scans ``.ockham/<kind>s/*/curation.json`` for a curation whose
@@ -2399,9 +2331,7 @@ class Agent:
                 "Publish a notebook that assigns it via return_notebook(execute=true) "
                 "first."
             )
-        notebook_ref = await self._notebook_ref_for_published_path(
-            origin.notebook_path, context=context
-        )
+        notebook_ref = await self._notebook_ref_for_published_path(origin.notebook_path, context=context)
         source_refs = list(origin.load_refs) + list(origin.fetch_refs)
         return [notebook_ref], source_refs
 
@@ -2419,17 +2349,11 @@ class Agent:
         """
         origin = await self.code_executor.get_origin(variable_name)
         if origin is None:
-            raise ValueError(
-                f"Variable '{variable_name}' has no producing notebook on record."
-            )
-        notebook_ref = await self._notebook_ref_for_published_path(
-            origin.notebook_path, context=context
-        )
+            raise ValueError(f"Variable '{variable_name}' has no producing notebook on record.")
+        notebook_ref = await self._notebook_ref_for_published_path(origin.notebook_path, context=context)
         return [notebook_ref], list(origin.fetch_refs), list(origin.load_refs)
 
-    async def _notebook_ref_for_published_path(
-        self, working_copy_path: str, *, context: AgentContext
-    ) -> ArtifactRef:
+    async def _notebook_ref_for_published_path(self, working_copy_path: str, *, context: AgentContext) -> ArtifactRef:
         """Resolve a notebook path to its latest persisted :class:`ArtifactRef`.
 
         The notebook MUST have a ``log.jsonl`` — i.e. the agent must
@@ -2440,9 +2364,7 @@ class Agent:
         """
         logical_id = await Agent._resolve_notebook_logical_id(working_copy_path, context)
         try:
-            _raw, latest_csha = await read_latest_notebook(
-                self.code_executor, logical_id=logical_id
-            )
+            _raw, latest_csha = await read_latest_notebook(self.code_executor, logical_id=logical_id)
         except FileNotFoundError as e:
             raise ValueError(
                 f"Notebook {working_copy_path!r} has not been published yet. "
@@ -2505,20 +2427,13 @@ class Agent:
                     matches.append((k, lid))
         if not matches:
             kind_label = kind or "dataset/chart/report"
-            raise ValueError(
-                f"No {kind_label} has live_name {live_name!r}. Use the slug "
-                "shown in <turn_artifacts>."
-            )
+            raise ValueError(f"No {kind_label} has live_name {live_name!r}. Use the slug shown in <turn_artifacts>.")
         if len(matches) > 1:
             raise ValueError(
-                f"Slug {live_name!r} matches multiple artifacts. Rename one "
-                "via curation before referring to it."
+                f"Slug {live_name!r} matches multiple artifacts. Rename one via curation before referring to it."
             )
         matched_kind, matched_lid = matches[0]
-        if (
-            seen_live_names is not None
-            and (matched_kind, live_name) not in seen_live_names
-        ):
+        if seen_live_names is not None and (matched_kind, live_name) not in seen_live_names:
             raise LiveNameCollisionError(
                 live_name=live_name,
                 existing_logical_id=matched_lid,
@@ -2545,9 +2460,7 @@ class Agent:
         kinds = ("dataset", "chart", "report")
         for k in kinds:
             try:
-                lid = await self._resolve_artifact_slug(
-                    live_name, kind=k, seen_live_names=seen_live_names
-                )
+                lid = await self._resolve_artifact_slug(live_name, kind=k, seen_live_names=seen_live_names)
             except ValueError:
                 continue
             # LiveNameCollisionError NOT swallowed here — surface the
@@ -2556,15 +2469,9 @@ class Agent:
             try:
                 raw_log = await self.code_executor.read_workspace_file(log_path)
             except FileNotFoundError as e:
-                raise ValueError(
-                    f"Artifact {live_name!r} has no log.jsonl."
-                ) from e
+                raise ValueError(f"Artifact {live_name!r} has no log.jsonl.") from e
             last_csha = last_content_sha_from_log(raw_log)
             if not last_csha:
-                raise ValueError(
-                    f"Artifact {live_name!r} log.jsonl is empty."
-                )
+                raise ValueError(f"Artifact {live_name!r} log.jsonl is empty.")
             return ArtifactRef(kind=k, logical_id=lid, content_sha=last_csha)
-        raise ValueError(
-            f"No published artifact has live_name {live_name!r}."
-        )
+        raise ValueError(f"No published artifact has live_name {live_name!r}.")

@@ -24,5 +24,3 @@ async def test_concurrent_awaits_to_execute_complete_without_deadlock(
 
     results = await asyncio.gather(*(run() for _ in range(3)))
     assert all(n >= 1 for n in results)
-
-

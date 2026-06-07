@@ -136,8 +136,7 @@ class MemoizingConnectorBundle(Mapping[str, _MemoizingConnector]):
         self._cache = cache
         self._post_hooks = post_hooks
         self._items: dict[str, _MemoizingConnector] = {
-            c.name: _MemoizingConnector(c, cache, post_hooks)
-            for c in bundle
+            c.name: _MemoizingConnector(c, cache, post_hooks) for c in bundle
         }
 
     def __getitem__(self, key: str) -> _MemoizingConnector:

@@ -98,12 +98,7 @@ def _scan(node: Any, seen: set[tuple[str, str]]) -> None:
             # later by ``to_llm`` and isn't part of the scanned graph.
             # Recognising this shape lets the cross-terminal gate see
             # the calling terminal's own iter-just-finished writes.
-            if (
-                isinstance(key, str)
-                and isinstance(value, str)
-                and value
-                and ":" in key
-            ):
+            if isinstance(key, str) and isinstance(value, str) and value and ":" in key:
                 kind_prefix = key.split(":", 1)[0]
                 if kind_prefix in SNAPSHOT_KINDS:
                     seen.add((kind_prefix, value))

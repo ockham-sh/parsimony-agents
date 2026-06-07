@@ -28,10 +28,7 @@ def normalize_connector_bundles(
         return {"client": connectors}
     if isinstance(connectors, Mapping):
         return {str(name): bundle for name, bundle in connectors.items()}
-    raise TypeError(
-        "connectors must be a Connectors or Mapping[str, Connectors]; "
-        f"got {type(connectors).__name__}"
-    )
+    raise TypeError(f"connectors must be a Connectors or Mapping[str, Connectors]; got {type(connectors).__name__}")
 
 
 __all__ = ["normalize_connector_bundles"]

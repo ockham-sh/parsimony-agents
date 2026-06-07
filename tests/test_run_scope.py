@@ -191,7 +191,9 @@ def test_origin_captures_load_refs(tmp_path: Path) -> None:
     df = pd.DataFrame({"v": [1, 2]})
     payload = DataFrameObject.from_pandas(df, local_dir=tmp_path)
     ds = Dataset(
-        logical_id="lid_up", title="us_gdp", live_name="us_gdp",
+        logical_id="lid_up",
+        title="us_gdp",
+        live_name="us_gdp",
         variable_name="r",
     )
     blob = write_dataset_bytes(ds, payload)
@@ -199,13 +201,17 @@ def test_origin_captures_load_refs(tmp_path: Path) -> None:
     base = tmp_path / ".ockham" / "datasets" / "lid_up"
     base.mkdir(parents=True, exist_ok=True)
     (base / f"{csha}.parquet").write_bytes(blob)
-    (base / "log.jsonl").write_text(
-        json.dumps({"ts": "t1", "content_sha": csha, "inputs": {}}) + "\n"
-    )
+    (base / "log.jsonl").write_text(json.dumps({"ts": "t1", "content_sha": csha, "inputs": {}}) + "\n")
     (base / "curation.json").write_text(
         json.dumps(
-            {"kind": "dataset", "logical_id": "lid_up", "live_name": "us_gdp",
-             "title": "us_gdp", "tags": [], "notes": []}
+            {
+                "kind": "dataset",
+                "logical_id": "lid_up",
+                "live_name": "us_gdp",
+                "title": "us_gdp",
+                "tags": [],
+                "notes": [],
+            }
         )
     )
 

@@ -84,8 +84,6 @@ async def embed_texts(
 
 async def embed_query(query: str) -> list[float]:
     """Generate embedding for a single search query."""
-    response = await _embed_with_configured_dimension(
-        [query], task_type="RETRIEVAL_QUERY"
-    )
+    response = await _embed_with_configured_dimension([query], task_type="RETRIEVAL_QUERY")
     embedding = response["data"][0]["embedding"]
     return _normalize_embedding(embedding)

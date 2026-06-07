@@ -101,9 +101,7 @@ async def child_refs(ref: ArtifactRef, *, executor: _Executor) -> list[ArtifactR
     raise ValueError(f"closure: unsupported kind {ref.kind!r}")
 
 
-async def enumerate_closure(
-    root: ArtifactRef, *, executor: _Executor
-) -> list[ArtifactRef]:
+async def enumerate_closure(root: ArtifactRef, *, executor: _Executor) -> list[ArtifactRef]:
     """Topological closure of ``root`` under typed source refs.
 
     Returns every ref reachable from ``root`` (inclusive), in post-order:
@@ -136,9 +134,7 @@ async def enumerate_closure(
 # ---------------------------------------------------------------------------
 
 
-async def _report_children(
-    ref: ArtifactRef, *, executor: _Executor
-) -> list[ArtifactRef]:
+async def _report_children(ref: ArtifactRef, *, executor: _Executor) -> list[ArtifactRef]:
     """Pin-map values, in YAML insertion order.
 
     Body URIs (``file://./charts/<n>.vl.json`` etc.) speak in
@@ -153,9 +149,7 @@ async def _report_children(
     return list(snap.pins.values())
 
 
-async def _chart_children(
-    ref: ArtifactRef, *, executor: _Executor
-) -> list[ArtifactRef]:
+async def _chart_children(ref: ArtifactRef, *, executor: _Executor) -> list[ArtifactRef]:
     """notebook_ref (when set) + source_dataset_refs + source_refs.
 
     ``source_refs`` is the "uncommon" path (chart drawn straight from
@@ -175,9 +169,7 @@ async def _chart_children(
     return out
 
 
-async def _dataset_children(
-    ref: ArtifactRef, *, executor: _Executor
-) -> list[ArtifactRef]:
+async def _dataset_children(ref: ArtifactRef, *, executor: _Executor) -> list[ArtifactRef]:
     """notebook_refs + source_refs (mixed dataset / data_object kinds)."""
     from parsimony_agents.dataset_io import deserialize_dataset
 
@@ -195,5 +187,3 @@ async def _read_snapshot(executor: _Executor, ref: ArtifactRef) -> bytes:
             f"{ref.logical_id}@{ref.content_sha[:8]}. The artifact may have "
             "been deleted from disk."
         ) from e
-
-

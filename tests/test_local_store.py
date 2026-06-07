@@ -140,7 +140,10 @@ def test_build_session_state_lists_artifacts(tmp_path: Path) -> None:
 
 def test_read_notebook_returns_source(tmp_path: Path) -> None:
     _write_artifact(
-        tmp_path, kind="notebook", lid="n1", live_name="unrate_nb",
+        tmp_path,
+        kind="notebook",
+        lid="n1",
+        live_name="unrate_nb",
         snapshot_bytes=b"df = load_dataset('unrate')\n",
     )
     result = read_local_artifact(tmp_path, "unrate_nb", "notebook", {})
@@ -192,8 +195,10 @@ def _ctx_with_artifact(*, local_discovery: bool):
         session_state=SessionState(
             workspace_artifacts=[
                 WorkspaceArtifactLine(
-                    path=".ockham/datasets/d1/x.parquet", kind="dataset",
-                    live_name="unrate", summary="US Unemployment",
+                    path=".ockham/datasets/d1/x.parquet",
+                    kind="dataset",
+                    live_name="unrate",
+                    summary="US Unemployment",
                 )
             ]
         ),

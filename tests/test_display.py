@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from parsimony.result import ColumnRole, Provenance
-
 from types import SimpleNamespace
+
+from parsimony.result import ColumnRole, Provenance
 
 from parsimony_agents.agent.agent import AgentResult
 from parsimony_agents.agent.events import Handoff, PartialRunSummary
 from parsimony_agents.artifacts import Report
 from parsimony_agents.display import (
-    _PlainDisplay,
-    _RichDisplay,
     _chart_summary,
     _format_handoff,
     _format_partial_summary,
     _pick_display_columns,
+    _PlainDisplay,
+    _RichDisplay,
     _title_from_preview,
 )
 from parsimony_agents.execution.outputs import FetchLogEntry
@@ -94,9 +94,7 @@ def test_format_handoff_falls_back_when_rationale_empty() -> None:
 
 
 def test_format_partial_summary_lists_missing() -> None:
-    body = _format_partial_summary(
-        PartialRunSummary(missing=["unemployment series"], next_step_plan="Fetch UNRATE")
-    )
+    body = _format_partial_summary(PartialRunSummary(missing=["unemployment series"], next_step_plan="Fetch UNRATE"))
     assert "Fetch UNRATE" in body
     assert "unemployment series" in body
 
@@ -237,9 +235,7 @@ def test_show_charts_saves_path_and_open_is_opt_in(monkeypatch) -> None:
     assert opened == []
 
     # Opt-in: viewer opened.
-    disp._RichDisplay(console=_recording_console()).show_charts(
-        {"c": _fake_chart(_bar_spec())}, open_charts=True
-    )
+    disp._RichDisplay(console=_recording_console()).show_charts({"c": _fake_chart(_bar_spec())}, open_charts=True)
     assert opened == ["/tmp/fake_chart.png"]
 
 

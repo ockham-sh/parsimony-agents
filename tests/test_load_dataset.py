@@ -30,9 +30,7 @@ from parsimony_agents.execution.run_scope import OriginLedger
 from parsimony_agents.identity import content_sha
 
 
-def _seed_dataset(
-    root: Path, logical_id: str, live_name: str, df: pd.DataFrame
-) -> str:
+def _seed_dataset(root: Path, logical_id: str, live_name: str, df: pd.DataFrame) -> str:
     """Persist a dataset snapshot + curation + log on disk; return content_sha."""
     payload = DataFrameObject.from_pandas(df, local_dir=root)
     dataset = Dataset(

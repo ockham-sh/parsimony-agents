@@ -36,6 +36,7 @@ def test_tool_phase6_fields_default_safely() -> None:
 
 def test_tool_phase6_fields_can_be_set() -> None:
     """The new fields are forwarded to the Tool instance."""
+
     async def fn(**_):
         return None
 

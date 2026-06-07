@@ -71,6 +71,7 @@ class SessionKeywordStore:
     def _get_processor(self) -> Any:
         if self._output_processor is None:
             from parsimony_agents.rag.processors import OutputProcessor
+
             self._output_processor = OutputProcessor()
         return self._output_processor
 
@@ -86,9 +87,7 @@ class SessionKeywordStore:
                 tantivy_doc = tantivy.Document()
                 tantivy_doc.add_text(self.FIELD_CONTENT, doc.content)
                 tantivy_doc.add_text(self.FIELD_IDENTIFIER, identifier)
-                tantivy_doc.add_text(
-                    self.FIELD_SOURCE_TYPE, doc.metadata.get("source_type", "unknown")
-                )
+                tantivy_doc.add_text(self.FIELD_SOURCE_TYPE, doc.metadata.get("source_type", "unknown"))
                 tantivy_doc.add_text(self.FIELD_METADATA_JSON, json.dumps(doc.metadata))
                 writer.add_document(tantivy_doc)
             writer.commit()
@@ -152,12 +151,8 @@ class SessionKeywordStore:
             return []
 
         try:
-            parsed_query = self._index.parse_query(
-                " OR ".join(expanded_terms), [self.FIELD_CONTENT]
-            )
-            hits = searcher.search(
-                parsed_query, limit=k * 3 if identifier else k
-            ).hits
+            parsed_query = self._index.parse_query(" OR ".join(expanded_terms), [self.FIELD_CONTENT])
+            hits = searcher.search(parsed_query, limit=k * 3 if identifier else k).hits
         except Exception as e:
             logger.warning("Keyword search failed for '%s': %s", query, e)
             return []

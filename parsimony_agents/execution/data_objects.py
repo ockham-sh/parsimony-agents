@@ -75,9 +75,7 @@ def make_data_object_persister(
             pq.write_table(table, buffer)
             blob = buffer.getvalue()
             csha = content_sha(blob)
-            ref = ArtifactRef(
-                kind="data_object", logical_id=logical_id, content_sha=csha
-            )
+            ref = ArtifactRef(kind="data_object", logical_id=logical_id, content_sha=csha)
             target = root / object_pool_path(csha)
             target.parent.mkdir(parents=True, exist_ok=True)
             if not target.exists():
@@ -141,9 +139,7 @@ def _content_hash_legacy(provenance: Any, table: pa.Table) -> str:
     that consume parquet directly.
     """
     canonical_prov = provenance.model_dump(mode="json", exclude={"fetched_at"})
-    canonical_prov_bytes = json.dumps(
-        canonical_prov, sort_keys=True, default=str
-    ).encode("utf-8")
+    canonical_prov_bytes = json.dumps(canonical_prov, sort_keys=True, default=str).encode("utf-8")
     canonical_table = _strip_table_metadata(table)
     sink = io.BytesIO()
     with pa.ipc.new_stream(sink, canonical_table.schema) as writer:
@@ -162,9 +158,6 @@ def _strip_table_metadata(table: pa.Table) -> pa.Table:
     original metadata so :func:`TabularResult.from_arrow` can recover
     provenance later.
     """
-    bare_fields = [
-        pa.field(field.name, field.type, nullable=field.nullable, metadata=None)
-        for field in table.schema
-    ]
+    bare_fields = [pa.field(field.name, field.type, nullable=field.nullable, metadata=None) for field in table.schema]
     bare_schema = pa.schema(bare_fields, metadata=None)
     return table.replace_schema_metadata(None).cast(bare_schema)

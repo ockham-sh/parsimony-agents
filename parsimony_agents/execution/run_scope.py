@@ -139,10 +139,7 @@ class OriginLedger:
         a programming error and raises.
         """
         if self._current is not None:
-            raise RuntimeError(
-                f"RunScope already open for {self._current.notebook_path!r}; "
-                "cannot nest scopes."
-            )
+            raise RuntimeError(f"RunScope already open for {self._current.notebook_path!r}; cannot nest scopes.")
         scope = RunScope(notebook_path=notebook_path)
         self._current = scope
         try:

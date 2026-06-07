@@ -63,13 +63,13 @@ def test_cutoff_is_nth_from_last_assistant():
 def test_old_tool_observations_compact():
     """Tool results before the cutoff collapse to minimal; recent ones stay default."""
     roles = [
-        "user",       # 0
+        "user",  # 0
         "assistant",  # 1 — iteration 1
-        "tool",       # 2 — old observation → minimal
+        "tool",  # 2 — old observation → minimal
         "assistant",  # 3 — iteration 2 (cutoff)
-        "tool",       # 4 — recent observation → default
+        "tool",  # 4 — recent observation → default
         "assistant",  # 5 — iteration 3
-        "tool",       # 6 — recent + last tool → default
+        "tool",  # 6 — recent + last tool → default
     ]
     modes = _modes(roles)
     assert modes[2] == "minimal"
@@ -94,12 +94,7 @@ def test_user_and_system_messages_never_compacted():
 
 def test_last_tool_message_always_default():
     """The most-recent tool result stays default even outside the recent window."""
-    assert (
-        infer_message_mode(
-            index=0, is_last_tool_message=True, role="tool", default_cutoff=99
-        )
-        == "default"
-    )
+    assert infer_message_mode(index=0, is_last_tool_message=True, role="tool", default_cutoff=99) == "default"
 
 
 def test_empty_history():

@@ -142,10 +142,7 @@ _logger = logging.getLogger(__name__)
 # no tool call. A text-only response is not a valid end-of-run — the agent must
 # terminate explicitly via a termination tool. ``handle_failure`` turns this into
 # a pending_instruction on the first strike and escalates to handoff on the second.
-_NO_PROGRESS_EXPLANATION = (
-    "The agent replied with text only and took no action, "
-    "so the run could not move forward."
-)
+_NO_PROGRESS_EXPLANATION = "The agent replied with text only and took no action, so the run could not move forward."
 
 
 # ---------------------------------------------------------------------------
@@ -178,9 +175,7 @@ class AgentLike(Protocol):
 # ---------------------------------------------------------------------------
 
 
-async def _emit_hook(
-    agent: Any, name: str, /, *args: Any, **kwargs: Any
-) -> AsyncGenerator[AgentEvent, None]:
+async def _emit_hook(agent: Any, name: str, /, *args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
     """Invoke an optional async-generator hook, yielding its events.
 
     No-op when the hook is absent — this is what lets library callers pass a
@@ -354,8 +349,7 @@ async def run_loop(
         if cancellation is not None and cancellation.is_set():
             _logger.info(
                 "Run cancelled",
-                extra={"phase": "pre_iteration", "reason": cancellation.reason,
-                       "iteration": state.iteration},
+                extra={"phase": "pre_iteration", "reason": cancellation.reason, "iteration": state.iteration},
             )
             yield RunCancelled(message="cancelled before iteration", reason=cancellation.reason)
             state.done = True
@@ -398,7 +392,8 @@ async def run_loop(
                         yield event
                 else:
                     async for event in _default_translate_signal(
-                        agent, sig,
+                        agent,
+                        sig,
                         text_message_id=text_message_id,
                         reasoning_message_id=reasoning_message_id,
                     ):
@@ -424,8 +419,7 @@ async def run_loop(
         if cancellation is not None and cancellation.is_set():
             _logger.info(
                 "Run cancelled",
-                extra={"phase": "post_llm_stream", "reason": cancellation.reason,
-                       "iteration": state.iteration},
+                extra={"phase": "post_llm_stream", "reason": cancellation.reason, "iteration": state.iteration},
             )
             yield RunCancelled(
                 message="Generation was cancelled before the assistant message completed.",
@@ -453,9 +447,7 @@ async def run_loop(
 
         # --- LLM-complete hook (workspace: emit LLMCallCompleted) ---
         latency_ms = int((time.perf_counter() - t0) * 1000)
-        async for event in _emit_hook(
-            agent, "on_llm_complete", state, response, latency_ms=latency_ms
-        ):
+        async for event in _emit_hook(agent, "on_llm_complete", state, response, latency_ms=latency_ms):
             yield event
 
         # --- Post-LLM detectors ---
@@ -540,8 +532,7 @@ async def run_loop(
             _reason = cancellation.reason if cancellation is not None else "user_request"
             _logger.info(
                 "Run cancelled",
-                extra={"phase": "tool_execution", "reason": _reason,
-                       "iteration": state.iteration},
+                extra={"phase": "tool_execution", "reason": _reason, "iteration": state.iteration},
             )
             yield RunCancelled(
                 message="The run was cancelled while tools were executing.",
@@ -708,16 +699,12 @@ async def resume_run(
         raise ValueError("resume_run requires a non-empty user_reply")
 
     if not verify_suspension_token(record=suspension, secret=agent.suspension_secret):
-        raise SuspensionTokenMismatch(
-            f"suspension token failed verification for run_id={suspension.run_id!r}"
-        )
+        raise SuspensionTokenMismatch(f"suspension token failed verification for run_id={suspension.run_id!r}")
 
     if max_suspension_age_s is not None:
         age = (datetime.now(UTC) - suspension.suspended_at).total_seconds()
         if age > max_suspension_age_s:
-            raise SuspensionExpired(
-                f"suspension is {age:.0f}s old (max {max_suspension_age_s:.0f}s)"
-            )
+            raise SuspensionExpired(f"suspension is {age:.0f}s old (max {max_suspension_age_s:.0f}s)")
 
     state = RunState.from_suspension(
         suspension,

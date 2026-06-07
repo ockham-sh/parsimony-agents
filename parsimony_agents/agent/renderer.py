@@ -145,9 +145,7 @@ def render_lessons_learned(lessons: Iterable[Failure]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def recent_iterations_cutoff(
-    messages: list[Any], *, n_iterations: int = RECENT_ITERATIONS_DEFAULT
-) -> int:
+def recent_iterations_cutoff(messages: list[Any], *, n_iterations: int = RECENT_ITERATIONS_DEFAULT) -> int:
     """Message index marking the start of the last ``n_iterations`` agent iterations.
 
     Agent iterations are delimited by ``role="assistant"`` messages (each
@@ -214,9 +212,7 @@ def select_messages_to_render(messages: Iterable[Any]) -> list[Any]:
     carry no metadata and are never treated as context snapshots.
     """
     messages_list = list(messages)
-    snapshot_indices = [
-        i for i, m in enumerate(messages_list) if _get_metadata(m).get("context_snapshot", False)
-    ]
+    snapshot_indices = [i for i, m in enumerate(messages_list) if _get_metadata(m).get("context_snapshot", False)]
     if len(snapshot_indices) <= 1:
         return messages_list
     keep_idx = snapshot_indices[-1]

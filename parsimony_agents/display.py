@@ -20,6 +20,7 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from typing import Any, Protocol
@@ -28,7 +29,7 @@ import pandas as pd
 from parsimony.result import ColumnRole
 
 from parsimony_agents.agent.agent import Agent, AgentResult
-from parsimony_agents.artifacts import Dataset, Report
+from parsimony_agents.artifacts import Dataset
 from parsimony_agents.execution.outputs import FetchLogEntry
 
 try:
@@ -314,24 +315,32 @@ def _open_file(path: str) -> None:
         system = platform.system()
         if "microsoft" in platform.uname().release.lower():
             # WSL — convert to Windows path and open with cmd.exe
-            win_path = subprocess.check_output(
-                ["wslpath", "-w", path], stderr=subprocess.DEVNULL,
-            ).decode().strip()
+            win_path = (
+                subprocess.check_output(
+                    ["wslpath", "-w", path],
+                    stderr=subprocess.DEVNULL,
+                )
+                .decode()
+                .strip()
+            )
             subprocess.Popen(
                 ["cmd.exe", "/c", "start", "", win_path],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
         elif system == "Darwin":
             subprocess.Popen(
                 ["open", path],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
         elif system == "Windows" or os.name == "nt":
             os.startfile(path)  # type: ignore[attr-defined]
         else:
             subprocess.Popen(
                 ["xdg-open", path],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
     except Exception:
         pass
@@ -449,10 +458,8 @@ class _RichDisplay:
                 return
             except Exception:
                 # Live failed mid-stream — drop to raw passthrough for the rest.
-                try:
+                with contextlib.suppress(Exception):
                     self._live.stop()
-                except Exception:
-                    pass
                 self._live = None
         # Fallback path: raw text, markup disabled so brackets are not mangled.
         self._console.print(chunk, end="", markup=False, highlight=False)
@@ -460,14 +467,10 @@ class _RichDisplay:
     def end_response(self, full_text: str) -> None:
         text = full_text or self._response_buffer
         if self._live is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._live.update(Markdown(text))
-            except Exception:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 self._live.stop()
-            except Exception:
-                pass
             self._live = None
         self._response_buffer = ""
         self._console.print()
@@ -528,7 +531,7 @@ class _RichDisplay:
             self._console.print()
             lines = source.splitlines()
             if len(lines) > max_lines:
-                truncated = "\n".join(lines[:max_lines - 3])
+                truncated = "\n".join(lines[: max_lines - 3])
                 truncated += f"\n\n# ... {len(lines) - max_lines + 3} more lines"
             else:
                 truncated = source
@@ -1226,9 +1229,7 @@ def display_result(
         ok=result.ok,
         elapsed=0.0,
         tool_count=sum(
-            1
-            for e in result.events
-            if getattr(e, "type", None) == "tool_event" and getattr(e, "completed", False)
+            1 for e in result.events if getattr(e, "type", None) == "tool_event" and getattr(e, "completed", False)
         ),
         dataset_count=len(result.datasets),
         chart_count=len(result.charts),

@@ -76,8 +76,7 @@ def test_formats_param_lists_valid_set_and_default() -> None:
     fmts = _param_desc("formats")
     expected_default = f"Defaults to [{','.join(repr(f) for f in DEFAULT_FORMATS)}]"
     assert expected_default in fmts, (
-        f"formats description must match DEFAULT_FORMATS={DEFAULT_FORMATS!r}; "
-        f"expected substring: {expected_default!r}"
+        f"formats description must match DEFAULT_FORMATS={DEFAULT_FORMATS!r}; expected substring: {expected_default!r}"
     )
     assert "pptx" in fmts and "revealjs" in fmts
 

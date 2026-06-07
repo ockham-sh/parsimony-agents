@@ -134,12 +134,8 @@ async def _refresh_dataset(ref: ArtifactRef, *, executor: _Executor) -> Artifact
             "return_dataset to enable refresh."
         )
 
-    refreshed_datasets = await _refresh_dataset_sources(
-        dataset.source_refs, executor=executor
-    )
-    new_notebook_refs, new_data_object_refs = await _rerun_notebooks(
-        dataset.notebook_refs, executor=executor
-    )
+    refreshed_datasets = await _refresh_dataset_sources(dataset.source_refs, executor=executor)
+    new_notebook_refs, new_data_object_refs = await _rerun_notebooks(dataset.notebook_refs, executor=executor)
 
     out_obj = await executor.get(dataset.variable_name)
     if out_obj is None:
@@ -196,12 +192,8 @@ async def _refresh_chart(ref: ArtifactRef, *, executor: _Executor) -> ArtifactRe
             "This snapshot is malformed — re-publish via return_chart."
         )
 
-    refreshed_datasets = await _refresh_dataset_sources(
-        chart.source_dataset_refs, executor=executor
-    )
-    new_notebook_refs, new_data_object_refs = await _rerun_notebooks(
-        [chart.notebook_ref], executor=executor
-    )
+    refreshed_datasets = await _refresh_dataset_sources(chart.source_dataset_refs, executor=executor)
+    new_notebook_refs, new_data_object_refs = await _rerun_notebooks([chart.notebook_ref], executor=executor)
 
     fig_obj = await executor.get(chart.variable_name)
     if fig_obj is None:
@@ -211,9 +203,7 @@ async def _refresh_chart(ref: ArtifactRef, *, executor: _Executor) -> ArtifactRe
             "notebook. The notebook may no longer assign that variable."
         )
 
-    new_source_dataset_refs = [
-        refreshed_datasets.get(r.logical_id, r) for r in chart.source_dataset_refs
-    ]
+    new_source_dataset_refs = [refreshed_datasets.get(r.logical_id, r) for r in chart.source_dataset_refs]
     new_source_refs = _compose_source_refs(
         original=chart.source_refs,
         refreshed_datasets={},
@@ -308,9 +298,7 @@ async def _refresh_report(
 # ---------------------------------------------------------------------------
 
 
-async def _refresh_dataset_sources(
-    refs: list[ArtifactRef], *, executor: _Executor
-) -> dict[str, ArtifactRef]:
+async def _refresh_dataset_sources(refs: list[ArtifactRef], *, executor: _Executor) -> dict[str, ArtifactRef]:
     """Recursively refresh every ``kind="dataset"`` ref; key by ``logical_id``."""
     out: dict[str, ArtifactRef] = {}
     for src in refs:
@@ -340,17 +328,12 @@ async def _rerun_notebooks(
 
     for nb_ref in notebook_refs:
         if nb_ref.kind != "notebook":
-            raise ValueError(
-                f"refresh: expected kind='notebook' in notebook_refs, got {nb_ref.kind!r}"
-            )
+            raise ValueError(f"refresh: expected kind='notebook' in notebook_refs, got {nb_ref.kind!r}")
         try:
-            raw, latest_csha = await read_latest_notebook(
-                executor, logical_id=nb_ref.logical_id
-            )
+            raw, latest_csha = await read_latest_notebook(executor, logical_id=nb_ref.logical_id)
         except FileNotFoundError as e:
             raise ValueError(
-                f"refresh: notebook {nb_ref.logical_id!r} has no persisted "
-                "snapshot (log missing or empty)."
+                f"refresh: notebook {nb_ref.logical_id!r} has no persisted snapshot (log missing or empty)."
             ) from e
         snapshot_path = f".ockham/notebooks/{nb_ref.logical_id}/{latest_csha}.py"
         script = deserialize_notebook(raw, path=snapshot_path)
@@ -432,9 +415,7 @@ async def _read_snapshot(executor: _Executor, ref: ArtifactRef) -> bytes:
         ) from e
 
 
-async def _load_report_curation(
-    executor: _Executor, ref: ArtifactRef
-) -> dict[str, Any]:
+async def _load_report_curation(executor: _Executor, ref: ArtifactRef) -> dict[str, Any]:
     """Read a report's editable curation sidecar as a plain dict."""
     cur_path = f".ockham/reports/{ref.logical_id}/curation.json"
     try:
@@ -450,9 +431,7 @@ async def _load_report_curation(
 
 # Body embeds reference live tree paths, not content-addressed paths:
 # the renderer resolves them against the snapshot's frozen pin map.
-_EMBED_URI_RE = re.compile(
-    r"file://\./(?P<dir>charts|data)/(?P<live_name>[A-Za-z0-9_-]+)\.(?P<ext>vl\.json|parquet)"
-)
+_EMBED_URI_RE = re.compile(r"file://\./(?P<dir>charts|data)/(?P<live_name>[A-Za-z0-9_-]+)\.(?P<ext>vl\.json|parquet)")
 
 # Body URI dir → canonical artifact kind. Charts live under ``charts/``;
 # datasets live under ``data/`` (matches VIRTUAL_LIVE_KINDS).
@@ -488,9 +467,7 @@ def extract_embed_keys_from_markdown(markdown: str) -> list[tuple[SnapshotKind, 
     return out
 
 
-def embedded_refs_from_markdown(
-    markdown: str, pin_map: dict[str, ArtifactRef]
-) -> list[ArtifactRef]:
+def embedded_refs_from_markdown(markdown: str, pin_map: dict[str, ArtifactRef]) -> list[ArtifactRef]:
     """Resolve every embed URI in ``markdown`` to an ``ArtifactRef`` via ``pin_map``.
 
     Reports embed published artifacts via

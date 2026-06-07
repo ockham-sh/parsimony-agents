@@ -97,11 +97,7 @@ class DataframeRef(BaseModel):
         if be is None:
             raise ValueError(
                 f"DataFrame {self.ref} not available locally"
-                + (
-                    f" (remote_key={self.remote_key}, no backend configured)"
-                    if self.remote_key
-                    else ""
-                )
+                + (f" (remote_key={self.remote_key}, no backend configured)" if self.remote_key else "")
             )
 
         target = self._paths_for_io()[0]
@@ -138,8 +134,7 @@ class DataframeRef(BaseModel):
                     except TypeError:
                         bad_cols.append(col)
                 logger.error(
-                    "DataFrame has unhashable columns (list/array/dict): %s. "
-                    "Flatten or drop these before caching.",
+                    "DataFrame has unhashable columns (list/array/dict): %s. Flatten or drop these before caching.",
                     bad_cols,
                 )
             raise
@@ -168,7 +163,7 @@ class DataframeRef(BaseModel):
                 # is already a datetime-like Python object. This avoids invoking
                 # dateutil parsing (and its noisy UserWarning) on plain string
                 # columns that happen to be object dtype.
-                if not isinstance(sample.iloc[0], (pd.Timestamp, )) and not hasattr(sample.iloc[0], "isoformat"):
+                if not isinstance(sample.iloc[0], (pd.Timestamp,)) and not hasattr(sample.iloc[0], "isoformat"):
                     continue
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", UserWarning)

@@ -104,9 +104,7 @@ def read_notebook(path: str | Path) -> Script:
     return deserialize_notebook(target.read_bytes(), path=str(target))
 
 
-async def read_latest_notebook(
-    executor: _Executor, *, logical_id: str
-) -> tuple[bytes, str]:
+async def read_latest_notebook(executor: _Executor, *, logical_id: str) -> tuple[bytes, str]:
     """Read the latest persisted snapshot bytes for a notebook ``logical_id``.
 
     Notebooks live solely under ``.ockham/notebooks/<lid>/<csha>.py`` —
@@ -129,9 +127,7 @@ async def read_latest_notebook(
     raw_log = await executor.read_workspace_file(log_path)
     last_csha = last_content_sha_from_log(raw_log)
     if last_csha is None:
-        raise FileNotFoundError(
-            f"notebook {logical_id!r} log.jsonl has no usable content_sha entry"
-        )
+        raise FileNotFoundError(f"notebook {logical_id!r} log.jsonl has no usable content_sha entry")
     snapshot_path = f".ockham/notebooks/{logical_id}/{last_csha}.py"
     raw = await executor.read_workspace_file(snapshot_path)
     return raw, last_csha
