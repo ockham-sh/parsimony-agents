@@ -33,4 +33,4 @@ This policy covers the open-source packages:
 - `parsimony-agents`
 - `parsimony-connectors` (parsimony-*)
 
-For vulnerabilities in the ockham terminal (the AGPLv3 agentic data-analysis product built on this library), please also email security@ockham.sh.
+For vulnerabilities in the ockham terminal (coming soon) (the AGPLv3 agentic data-analysis product built on this library), please also email security@ockham.sh.
