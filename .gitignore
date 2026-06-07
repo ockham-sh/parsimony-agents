@@ -23,12 +23,22 @@ htmlcov/
 .nox/
 MagicMock/
 
+# Type & lint caches
+.mypy_cache/
+.ruff_cache/
+
 # IDE
 .idea/
 .vscode/
+.cursor/
 *.swp
 *.swo
 *~
+
+# AI assistant / workspace scratch
+.claude/
+.council/
+PLAN-*.md
 
 # OS
 .DS_Store

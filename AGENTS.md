@@ -45,7 +45,7 @@ uv run pytest tests/ -v && uv run ruff check . && uv run mypy parsimony_agents/
 - **Stdout is for application output only.** Use `logging` (never `print()`) for diagnostics.
 - Never log API keys, bearer tokens, or credential strings — `__cause__`/`__context__` chains on HTTP errors commonly embed them.
 - The `CodeExecutor` runs arbitrary agent-generated Python in-process. A `threading.Lock` serializes all kernel access. Do NOT bypass it.
-- Every new event class added to `parsimony_agents/agent/events.py` needs a corresponding branch in the terminal's SSE dispatcher (`terminal/server/api/workspace/streaming.py`) — return `None` for events that are internal/eval-only.
+- Every new event class added to `parsimony_agents/agent/events.py` must be handled by any host that consumes the agent event stream (e.g. an SSE dispatcher) — return `None` to drop events that are internal or eval-only.
 - New data connectors go to [`parsimony-connectors`](https://github.com/ockham-sh/parsimony-connectors), not here.
 - `parsimony-agents` is published to PyPI (`pip install parsimony-agents`) under Apache-2.0. Do not add runtime gating, license checks, or proprietary code.
 - Run all checks before any commit.

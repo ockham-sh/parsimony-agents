@@ -1,7 +1,5 @@
 """Structured failure-handling taxonomy and recovery primitives.
 
-See ``BRIEF-ai-failure-handling.md`` at the ockham workspace root for the design.
-
 This package owns the load-bearing types and the machinery around them:
 
 - :class:`FailureKind` — a closed enum naming every failure mode the framework recognises.
@@ -49,6 +47,7 @@ from parsimony_agents.agent.failure.termination import TerminationRequest
 def __getattr__(name: str):
     if name == "handle_failure":
         from parsimony_agents.agent.failure.recovery import handle_failure
+
         return handle_failure
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
