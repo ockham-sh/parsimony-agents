@@ -454,7 +454,7 @@ not a raised exception.
   and `Provenance` abstractions the agent fetches against and persists.
 - Its **data sources** come from `parsimony-*` connector packages (e.g. `parsimony-fred`,
   `parsimony-sdmx`, `parsimony-fmp`), which you pass to `Agent(connectors=...)`.
-- It is a normal published PyPI dependency consumed by the **Ockham terminal**, which embeds
+- It is a normal published PyPI dependency consumed by the **Ockham terminal** (coming soon), which embeds
   this agent as its analysis engine.
 
 Artifact persistence is identical in both modes: the framework writes the `.ockham/` store through
