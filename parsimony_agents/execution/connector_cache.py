@@ -27,7 +27,6 @@ from __future__ import annotations
 
 __all__ = ["ConnectorCache", "MemoizingConnectorBundle"]
 
-import inspect
 import json
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -80,7 +79,7 @@ class _MemoizingConnector:
         self,
         inner: Connector,
         cache: ConnectorCache,
-        post_hooks: tuple[Callable[[Result], Any], ...],
+        post_hooks: tuple[Callable[[Result], None], ...],
     ) -> None:
         self._inner = inner
         self._cache = cache
@@ -99,18 +98,16 @@ class _MemoizingConnector:
         # (param_schema, describe, to_llm, etc.).
         return getattr(self._inner, item)
 
-    async def __call__(self, *args: Any, **kwargs: Any) -> Result:
+    def __call__(self, *args: Any, **kwargs: Any) -> Result:
         key = _canonical_args(args, kwargs)
         cached = self._cache.get(self._inner.name, key)
         if cached is not None:
             result = cached
         else:
-            result = await self._inner(*args, **kwargs)
+            result = self._inner(*args, **kwargs)
             self._cache.put(self._inner.name, key, result)
         for hook in self._post_hooks:
-            ret = hook(result)
-            if inspect.isawaitable(ret):
-                await ret
+            hook(result)
         return result
 
 
@@ -131,7 +128,7 @@ class MemoizingConnectorBundle(Mapping[str, _MemoizingConnector]):
         self,
         bundle: Connectors,
         cache: ConnectorCache,
-        post_hooks: tuple[Callable[[Result], Any], ...],
+        post_hooks: tuple[Callable[[Result], None], ...],
     ) -> None:
         self._cache = cache
         self._post_hooks = post_hooks

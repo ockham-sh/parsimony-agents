@@ -123,13 +123,13 @@ When the agent runs code, the connector bundle is available in the kernel namesp
 
 ```python
 # Code the agent writes and the kernel executes:
-result = await fred["fred_fetch"](series_id="UNRATE")
+result = fred["fred_fetch"](series_id="UNRATE")
 data = result.data  # a DataFrame; also result.columns, result.provenance
 ```
 
-Connector entries are async — each call is a typed awaitable, so agent-written kernel code must `await` it.
+Connector entries are synchronous callables — agent-written kernel code calls them directly (no `await`).
 
-Before injection, each bundle is wrapped in a `MemoizingConnectorBundle`. This wrapper is a drop-in `Mapping[str, ...]` replacement — `await connectors["fred_fetch"](series_id="UNRATE")` works identically — but it caches results within a single kernel lifetime.
+Before injection, each bundle is wrapped in a `MemoizingConnectorBundle`. This wrapper is a drop-in `Mapping[str, ...]` replacement — `connectors["fred_fetch"](series_id="UNRATE")` works identically — but it caches results within a single kernel lifetime.
 
 The cache is a `ConnectorCache`, a store mapping `(connector_name, canonical_args_key)` → `Result`. The canonical key is built by JSON-serializing the call's positional and keyword arguments with sorted keys, so two calls with identical arguments (modulo dict ordering) hit the same key. **Identical-arg calls within a kernel lifetime are served from the cache instead of re-hitting the network** — the agent has not refreshed anything, so a re-fetch would be pure cost (API quota, latency, determinism drift).
 

@@ -60,7 +60,7 @@ class TestFlatConnectorCatalogShape:
         from parsimony.connector import connector
 
         @connector()
-        async def sample_macro(country: str, indicator: str) -> pd.DataFrame:
+        def sample_macro(country: str, indicator: str) -> pd.DataFrame:
             """Fetch macro indicator values for a country and indicator code."""
             return pd.DataFrame({"country": [country], "indicator": [indicator]})
 
@@ -79,7 +79,7 @@ class TestSnapshotEmitsAvailableConnectorsBlock:
         from parsimony.connector import connector
 
         @connector()
-        async def sample_macro(country: str, indicator: str) -> pd.DataFrame:
+        def sample_macro(country: str, indicator: str) -> pd.DataFrame:
             """Fetch macro indicator values for a country and indicator code."""
             return pd.DataFrame({"country": [country], "indicator": [indicator]})
 
