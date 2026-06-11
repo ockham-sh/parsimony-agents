@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal
 import altair as alt
 import pandas as pd
 from parsimony.errors import ConnectorError
-from parsimony.result import Provenance
+from parsimony.result import Column, Provenance
 from parsimony.transport import redact_sensitive_text
 from pydantic import BaseModel, Field, TypeAdapter, computed_field, field_serializer, field_validator
 
@@ -77,6 +77,14 @@ class DataFrameObject(BaseOutputObject):
     type: Literal["dataframe"] = "dataframe"
     ref: DataframeRef
     include_full_value_in_frontend: bool = Field(default=False)
+    #: When set, ``to_llm`` returns this governed view verbatim instead of the
+    #: paginated CSV. Set when a connector ``TabularResult`` is displayed: the
+    #: human UI still gets the full table (``to_frontend_dict``), but the LLM
+    #: sees the result's own governed view — schema + sample with
+    #: ``exclude_from_llm_view`` columns enforced, which a raw frame render
+    #: cannot express. Carried as a real field so the governed view survives the
+    #: sandbox→server wire, where ``to_llm`` is rendered into the prompt.
+    governed_llm_text: str | None = Field(default=None)
 
     @cached_property
     def value(self) -> pd.DataFrame:
@@ -124,6 +132,11 @@ class DataFrameObject(BaseOutputObject):
         return json.loads(value.tail(_DATAFRAME_HEAD_TAIL_SIZE).to_json(orient="table"))
 
     def to_llm(self, mode: Literal["default", "minimal"] = "default", overrides: dict[str, Any] | None = None):
+        # A displayed connector Result carries its own governed view (schema +
+        # sample, hidden columns enforced). Return it verbatim — the paginated
+        # CSV below would re-expose columns the result declared LLM-hidden.
+        if self.governed_llm_text is not None:
+            return [{"type": "text", "text": self.governed_llm_text}]
         overrides = overrides or {}
         view_cfg = get_llm_view_defaults("dataframe")[mode].model_copy(update=overrides)
 
@@ -405,10 +418,11 @@ class KernelOutput(MessageContent):
             params_inline = escape_attr(
                 json.dumps(entry.params or {}, sort_keys=True, default=str)
             )
+            cols_attr = _fetch_columns_attr(entry.columns)
             v_attr = f' version="{escape_attr(entry.version)}"' if entry.version is not None else ""
             lines.append(
                 f'  <entry source="{escape_attr(entry.source)}" '
-                f'params="{params_inline}" rows="{entry.row_count}"{v_attr}/>'
+                f'params="{params_inline}" rows="{entry.row_count}"{cols_attr}{v_attr}/>'
             )
         lines.append("</fetch_log>")
         return "\n".join(lines) + "\n"
@@ -420,6 +434,25 @@ class KernelOutput(MessageContent):
             "metadata": self.metadata,
             "fetch_log": [_fetch_entry_safe_dump(e) for e in self.fetch_log],
         }
+
+
+def _fetch_columns_attr(columns: list[dict[str, Any]]) -> str:
+    """Render a fetch entry's governed column schema as a ``columns="..."`` attribute.
+
+    Delegates the role/namespace rendering to the framework's
+    :meth:`Column.llm_annotation`, so the vocabulary matches the connector card
+    and the result preview. Columns flagged ``exclude_from_llm_view`` are
+    omitted. Returns ``""`` when nothing is visible.
+    """
+    tokens: list[str] = []
+    for raw in columns:
+        col = Column.model_validate(raw)
+        if col.exclude_from_llm_view:
+            continue
+        tokens.append(f"{col.name} {col.llm_annotation()}")
+    if not tokens:
+        return ""
+    return f' columns="{escape_attr(", ".join(tokens))}"'
 
 
 def _fetch_entry_safe_dump(entry: FetchLogEntry) -> dict[str, Any]:
