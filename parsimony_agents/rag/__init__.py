@@ -17,16 +17,13 @@ from parsimony_agents.rag.keyword_store import (
     SessionKeywordStore,
     cleanup_session_keyword_store,
     get_or_create_session_keyword_store,
-    get_session_keyword_store,
 )
 from parsimony_agents.rag.vector_store import (
     Document,
     RetrievedChunk,
     SessionVectorStore,
     cleanup_session_vector_store,
-    create_session_vector_store,
     get_or_create_session_vector_store,
-    get_session_vector_store,
 )
 
 __all__ = [
@@ -39,15 +36,12 @@ __all__ = [
     "Document",
     "RetrievedChunk",
     "SessionVectorStore",
-    "get_session_vector_store",
     "get_or_create_session_vector_store",
-    "create_session_vector_store",
     "cleanup_session_vector_store",
     # Keyword search
     "KeywordDocument",
     "KeywordSearchResult",
     "SessionKeywordStore",
-    "get_session_keyword_store",
     "get_or_create_session_keyword_store",
     "cleanup_session_keyword_store",
     # Hybrid search
@@ -80,15 +74,22 @@ async def hybrid_search(
 
     Stage 1 — RRF: fuse keyword and vector results for high recall.
     Stage 2 — Semantic: re-rank fused candidates by cosine similarity.
+
+    Keyword-only search (no ``vector_store``) needs no embedding provider, so the
+    query is embedded only when a vector store is present — a keyless standalone
+    user still gets working keyword search.
     """
-    query_embedding_list = await embed_query(query)
-    query_embedding = np.array(query_embedding_list)
+    if keyword_store is None and vector_store is None:
+        return []
 
     recall_k = max(k * 3, 50)
+    query_embedding = None
     tasks = []
     if keyword_store:
         tasks.append(keyword_store.query(query, identifier, k=recall_k))
     if vector_store:
+        query_embedding_list = await embed_query(query)
+        query_embedding = np.array(query_embedding_list)
         tasks.append(vector_store.query(query_embedding_list, identifier, k=recall_k))
 
     if not tasks:
@@ -136,7 +137,11 @@ async def hybrid_search(
     if not candidates:
         return candidates
 
-    # Stage 2: Semantic re-ranking (precision)
+    # Stage 2: Semantic re-ranking (precision) — only when a vector store gave us
+    # a query embedding. Keyword-only results keep their RRF ordering.
+    if vector_store is None or query_embedding is None:
+        return candidates[:k]
+
     content_embeddings = await embed_texts([r.content for r in candidates])
     for result, content_embedding in zip(candidates, content_embeddings, strict=True):
         emb = np.array(content_embedding)

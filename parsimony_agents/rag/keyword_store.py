@@ -184,13 +184,6 @@ class SessionKeywordStore:
                 break
         return results
 
-    def delete_documents(self, identifier: str) -> int:
-        """Mark identifier as not indexed (Tantivy rebuild not implemented for session stores)."""
-        if identifier not in self._indexed:
-            return 0
-        self._indexed.discard(identifier)
-        return 1
-
     async def cleanup(self) -> None:
         try:
             self._indexed.clear()
@@ -203,10 +196,6 @@ class SessionKeywordStore:
 
 # Session registry
 _session_stores: dict[str, SessionKeywordStore] = {}
-
-
-def get_session_keyword_store(session_id: str) -> SessionKeywordStore | None:
-    return _session_stores.get(session_id)
 
 
 def get_or_create_session_keyword_store(session_id: str) -> SessionKeywordStore:

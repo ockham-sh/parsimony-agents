@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import logging
-from functools import lru_cache
-from pathlib import Path
 
 import altair as alt
 
@@ -19,42 +16,11 @@ PARSIMONY_FIGURE_WIDTH = 640
 PARSIMONY_FIGURE_HEIGHT = 400
 
 
-def _chart_config_path() -> Path:
-    return Path(__file__).resolve().parent / "data" / "chart-config.json"
-
-
-@lru_cache(maxsize=1)
-def _load_chart_config() -> dict:
-    path = _chart_config_path()
-    if not path.exists():
-        logger.debug("Chart config not found at %s. Using defaults.", path)
-        return {}
-    try:
-        with open(path, encoding="utf-8") as f:
-            return json.load(f) or {}
-    except Exception as e:
-        logger.error("Failed to load chart config at %s: %s", path, e)
-        return {}
-
-
-def get_parsimony_range() -> dict:
-    """
-    Load Parsimony color ranges.
-    Expected shape in chart-config.json:
-      { "range": { ... Vega-Lite range config ... } }
-    """
-    cfg = _load_chart_config()
-    r = cfg.get("range", {})
-    return r if isinstance(r, dict) else {}
-
-
 def get_parsimony_theme() -> dict:
     """
     Parsimony Altair theme (minimal).
     Note: Altair themes must return a dict with top-level "config".
     """
-    range_cfg = get_parsimony_range()
-
     return {
         "config": {
             "background": "#080808",  # hsl(0, 0%, 3%) — same neutral as terminal app `surface-canvas`
@@ -86,7 +52,6 @@ def get_parsimony_theme() -> dict:
                 "subtitleFontSize": 11,
                 "subtitleFontWeight": 400,
             },
-            "range": range_cfg,
         }
     }
 

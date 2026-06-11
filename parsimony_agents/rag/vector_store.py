@@ -152,17 +152,6 @@ class SessionVectorStore:
                 )
         return chunks
 
-    async def delete_documents(self, identifier: str) -> int:
-        results = self._collection.get(
-            where={"identifier": identifier}, include=["metadatas"]
-        )
-        if results["ids"]:
-            self._collection.delete(ids=results["ids"])
-            self._indexed.discard(identifier)
-            logger.info("Deleted %d chunks for '%s'", len(results["ids"]), identifier)
-            return len(results["ids"])
-        return 0
-
     async def cleanup(self) -> None:
         try:
             await asyncio.to_thread(
@@ -178,18 +167,10 @@ class SessionVectorStore:
 _session_stores: dict[str, SessionVectorStore] = {}
 
 
-def get_session_vector_store(session_id: str) -> SessionVectorStore | None:
-    return _session_stores.get(session_id)
-
-
 def get_or_create_session_vector_store(session_id: str) -> SessionVectorStore:
     if session_id not in _session_stores:
         _session_stores[session_id] = SessionVectorStore(session_id)
     return _session_stores[session_id]
-
-
-def create_session_vector_store(session_id: str) -> SessionVectorStore:
-    return get_or_create_session_vector_store(session_id)
 
 
 async def cleanup_session_vector_store(session_id: str) -> None:
