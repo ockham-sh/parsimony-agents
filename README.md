@@ -298,6 +298,11 @@ dataset / chart / report kinds only. The snapshots `refresh` walks are the ones 
 wrote at publish time (see **Persisted deliverables** above), and a refreshed report is
 re-validated at write time whenever a host injects a `report_validator`.
 
+To *review* what a refresh changed, `parsimony_agents.lineage_diff.diff_artifacts(before, after,
+executor=...)` compares the dependency closures of two `content_sha`s of one artifact and reports
+exactly which lineage nodes moved (`changed` / `added` / `removed`, plus a readable `summary()`) —
+so an analyst or agent sees *why* a deliverable changed, not just *that* it did.
+
 ### Suspend / resume
 
 When the agent calls `ask_user`, the run emits a `UserInputRequested` event carrying a
