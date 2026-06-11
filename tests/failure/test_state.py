@@ -9,7 +9,6 @@ Verifies (BRIEF gaps 44–48, plan Phase 1 done criteria):
 
 from __future__ import annotations
 
-import json
 from datetime import UTC, datetime
 
 from parsimony_agents.agent.failure import (

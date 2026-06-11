@@ -10,7 +10,28 @@ Verifies (PLAN Phase 3 done criteria):
 from __future__ import annotations
 
 from parsimony_agents.agent.failure import Action, DefaultPolicy, Failure, FailureKind
+from parsimony_agents.agent.failure.kinds import default_action_for
 from parsimony_agents.agent.state import RunState
+
+
+def test_every_failure_kind_has_a_default_action() -> None:
+    """A new FailureKind without a default-action entry would KeyError at runtime."""
+    for kind in FailureKind:
+        assert isinstance(default_action_for(kind), Action)
+
+
+def test_every_retry_default_kind_has_positive_budget() -> None:
+    """Guard the footgun: a kind whose default action is ``retry`` but with no budget
+    silently de-budgets to 0 → immediate handoff (zero retries). Any future
+    retry-defaulting kind must also get a budget in DefaultPolicy."""
+    policy = DefaultPolicy()
+    retry_kinds = [k for k in FailureKind if default_action_for(k) is Action.retry]
+    assert retry_kinds, "expected at least one retry-defaulting kind"
+    for kind in retry_kinds:
+        assert policy.retry_budget(kind) > 0, (
+            f"{kind} defaults to Action.retry but has retry_budget 0 → immediate handoff; "
+            "add it to DefaultPolicy._retry_budgets"
+        )
 
 
 def test_default_policy_retry_budget_transient_provider() -> None:

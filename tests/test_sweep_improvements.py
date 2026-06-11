@@ -11,7 +11,6 @@ from parsimony_agents.agent.failure import Failure, FailureKind
 from parsimony_agents.agent.models import AgentContextSnapshot
 from parsimony_agents.execution.pagination import StringPaginator, TablePaginator
 
-
 # --- F75: paginator de-duplicates resolved pages --------------------------------
 
 
