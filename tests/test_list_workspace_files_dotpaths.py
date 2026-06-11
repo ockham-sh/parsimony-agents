@@ -62,6 +62,49 @@ async def test_empty_prefix_still_hides_dotdirs(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_read_write_delete_reject_traversal(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (tmp_path / "secret.txt").write_bytes(b"top secret")
+    of = OutputFactory(local_dir=workspace)
+    ex = CodeExecutor(cwd=str(workspace), output_factory=of)
+
+    with pytest.raises(ValueError, match="escapes workspace"):
+        await ex.read_workspace_file("../secret.txt")
+    with pytest.raises(ValueError, match="escapes workspace"):
+        await ex.write_workspace_file("../evil.txt", b"x")
+    with pytest.raises(ValueError, match="escapes workspace"):
+        await ex.delete_workspace_file("../secret.txt")
+    # The sibling secret is untouched.
+    assert (tmp_path / "secret.txt").read_bytes() == b"top secret"
+
+
+@pytest.mark.asyncio
+async def test_traversal_prefix_lists_nothing_outside_workspace(tmp_path: Path) -> None:
+    """A ``..`` or absolute prefix must not let list escape the workspace root.
+
+    read/write/delete confine via _workspace_resolved_path; list must too. A
+    secret living beside the workspace must stay invisible.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _seed(workspace, "data/inside.csv")
+    # A sibling file outside the workspace root.
+    (tmp_path / "secret.txt").write_bytes(b"top secret")
+
+    of = OutputFactory(local_dir=workspace)
+    ex = CodeExecutor(cwd=str(workspace), output_factory=of)
+
+    assert await ex.list_workspace_files("../") == []
+    assert await ex.list_workspace_files("../../") == []
+    # Absolute prefix must not crash and must not escape.
+    assert await ex.list_workspace_files(str(tmp_path)) == []
+    # The in-workspace listing still works.
+    rows = await ex.list_workspace_files("data")
+    assert {r for r, _ in rows} == {"data/inside.csv"}
+
+
+@pytest.mark.asyncio
 async def test_data_prefix_still_hides_dotdirs(tmp_path: Path) -> None:
     of = OutputFactory(local_dir=tmp_path)
     ex = CodeExecutor(cwd=str(tmp_path), output_factory=of)
