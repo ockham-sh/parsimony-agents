@@ -26,7 +26,7 @@ import pyarrow.parquet as pq
 import pytest
 from parsimony.result import Provenance, TabularResult
 
-from parsimony_agents import Dataset, deserialize_dataset, serialize_dataset
+from parsimony_agents import Dataset, deserialize_dataset
 from parsimony_agents.dataset_io import CURATION_META_KEY, write_dataset_bytes
 from parsimony_agents.execution.outputs import DataFrameObject
 from parsimony_agents.identity import ArtifactRef
@@ -73,17 +73,6 @@ def test_write_dataset_bytes_roundtrips(sample_df: pd.DataFrame, tmp_path: Path)
     assert recovered.logical_id == "lid-abc"
 
 
-def test_serialize_dataset_alias_matches_write_dataset_bytes(
-    sample_df: pd.DataFrame, tmp_path: Path
-) -> None:
-    """``serialize_dataset`` is the dispatcher-friendly alias and must behave identically."""
-
-    dataset = Dataset(title="Streaming", tags=["streaming"])
-    blob = serialize_dataset(dataset, _payload(sample_df, tmp_path))
-
-    _, recovered = deserialize_dataset(blob)
-    assert recovered.title == "Streaming"
-    assert recovered.tags == ["streaming"]
 
 
 def test_deserialize_handles_vanilla_parquet(sample_df: pd.DataFrame, tmp_path: Path) -> None:

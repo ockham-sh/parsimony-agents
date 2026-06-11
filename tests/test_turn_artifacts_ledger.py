@@ -99,11 +99,11 @@ def test_fuse_preserves_cross_turn_order_with_appended_minted() -> None:
 
 
 # ---------------------------------------------------------------------------
-# SessionState.to_llm_text
+# SessionState.render_block
 # ---------------------------------------------------------------------------
 
 
-def test_to_llm_text_renders_turn_artifacts_block_with_new_flag() -> None:
+def test_render_block_renders_turn_artifacts_block_with_new_flag() -> None:
     state = SessionState(
         kernel=[],
         workspace_artifacts=[
@@ -121,7 +121,7 @@ def test_to_llm_text_renders_turn_artifacts_block_with_new_flag() -> None:
     # rendered tag to carry ``live_name="..."`` — without it, the next
     # iteration's seen-set extractor cannot recognise the artifact and
     # the next ``return_*`` raises against this terminal's own write.
-    text = state.to_llm_text(
+    text = state.render_block(
         minted_refs=minted,
         minted_live_names={"chart:lid-c": "my_chart"},
     )
@@ -139,18 +139,18 @@ def test_to_llm_text_renders_turn_artifacts_block_with_new_flag() -> None:
     assert "content_sha" not in text
 
 
-def test_to_llm_text_minted_without_live_name_carrier_falls_back_to_no_attr() -> None:
+def test_render_block_minted_without_live_name_carrier_falls_back_to_no_attr() -> None:
     """Legacy / standalone callers that don't populate the carrier still
     render — they just omit ``live_name=`` (the seen-set extractor will
     skip the row, which is fine in single-call scenarios)."""
     state = SessionState(kernel=[], workspace_artifacts=[])
     minted = [ArtifactRef(kind="chart", logical_id="lid-c", content_sha="cs-c")]
-    text = state.to_llm_text(minted_refs=minted)  # no minted_live_names
+    text = state.render_block(minted_refs=minted)  # no minted_live_names
     assert 'kind="chart" new="true"' in text
     assert 'live_name="' not in text.split("<turn_artifacts>")[1].split("</turn_artifacts>")[0]
 
 
-def test_to_llm_text_minted_live_name_propagates_to_seen_set_extractor() -> None:
+def test_render_block_minted_live_name_propagates_to_seen_set_extractor() -> None:
     """End-to-end: when the rendering carries live_name, the seen-set
     extractor reading the rendered text picks the artifact up.
 
@@ -162,7 +162,7 @@ def test_to_llm_text_minted_live_name_propagates_to_seen_set_extractor() -> None
 
     state = SessionState(kernel=[], workspace_artifacts=[])
     minted = [ArtifactRef(kind="notebook", logical_id="us_gdp", content_sha="cs")]
-    text = state.to_llm_text(
+    text = state.render_block(
         minted_refs=minted,
         minted_live_names={"notebook:us_gdp": "us_gdp"},
     )
@@ -171,7 +171,7 @@ def test_to_llm_text_minted_live_name_propagates_to_seen_set_extractor() -> None
     assert ("notebook", "us_gdp") in seen
 
 
-def test_to_llm_text_no_minted_renders_clean_cross_turn_view() -> None:
+def test_render_block_no_minted_renders_clean_cross_turn_view() -> None:
     state = SessionState(
         workspace_artifacts=[
             WorkspaceArtifactLine(
@@ -181,7 +181,7 @@ def test_to_llm_text_no_minted_renders_clean_cross_turn_view() -> None:
             ),
         ],
     )
-    text = state.to_llm_text(minted_refs=None)
+    text = state.render_block(minted_refs=None)
     assert "<turn_artifacts>" in text
     # No new="true" attribute on any rendered artifact line — extract just
     # the artifact block, since the human-readable <note> mentions new="true"
@@ -190,7 +190,7 @@ def test_to_llm_text_no_minted_renders_clean_cross_turn_view() -> None:
     assert 'new="true"' not in artifacts_block
 
 
-def test_to_llm_text_replaces_advanced_artifact_in_place() -> None:
+def test_render_block_replaces_advanced_artifact_in_place() -> None:
     """Same logical_id, new content_sha → in-place replacement marked new=true.
 
     With the new live_name surface, the *visible* effect is just that the
@@ -210,7 +210,7 @@ def test_to_llm_text_replaces_advanced_artifact_in_place() -> None:
         ],
     )
     minted = [ArtifactRef(kind="report", logical_id="lid-r", content_sha="cs2")]
-    text = state.to_llm_text(minted_refs=minted)
+    text = state.render_block(minted_refs=minted)
     assert 'kind="report" live_name="weekly_report" new="true"' in text
     # Only one row for that artifact — replacement, not addition.
     assert text.count('live_name="weekly_report"') == 1
@@ -218,14 +218,14 @@ def test_to_llm_text_replaces_advanced_artifact_in_place() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sanity: TurnState carries minted_refs
+# Sanity: RunState carries the run-lifetime minted_refs ledger
 # ---------------------------------------------------------------------------
 
 
-def test_turn_state_starts_with_empty_minted_refs() -> None:
-    from parsimony_agents.agent.helpers import TurnState
+def test_run_state_starts_with_empty_minted_refs() -> None:
+    from parsimony_agents.agent.state import RunState
 
-    state = TurnState()
+    state = RunState(run_id="r", session_id="s")
     assert state.minted_refs == []
     assert state.minted_live_names == {}
     state.minted_refs.append(

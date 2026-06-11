@@ -168,7 +168,7 @@ async def test_edit_report_preserves_logical_id() -> None:
         new_str="The answer is 43.",
     )
 
-    assert tr.success, getattr(tr, "exception_message", "")
+    assert tr.ok, getattr(tr, "exception_message", "")
     report = tr.data
     assert isinstance(report, Report)
     assert report.logical_id == "rep1"
@@ -189,7 +189,7 @@ async def test_edit_report_rejects_unknown_slug() -> None:
         old_str="a",
         new_str="b",
     )
-    assert not tr.success
+    assert not tr.ok
     assert "live_name" in tr.exception_message or "report" in tr.exception_message
 
 
@@ -207,7 +207,7 @@ async def test_edit_report_rejects_empty_old_str() -> None:
         old_str="",
         new_str="anything",
     )
-    assert not tr.success
+    assert not tr.ok
     assert "old_str must be a non-empty" in tr.exception_message
 
 
@@ -229,7 +229,7 @@ async def test_edit_report_errors_when_log_missing() -> None:
         old_str="anything",
         new_str="other",
     )
-    assert not tr.success
+    assert not tr.ok
     assert "log.jsonl" in tr.exception_message or "no published artifact" in tr.exception_message.lower()
 
 
@@ -251,7 +251,7 @@ async def test_edit_report_rejects_non_unique_old_str() -> None:
         old_str="foo",
         new_str="qux",
     )
-    assert not tr.success
+    assert not tr.ok
     assert "occurs multiple times" in tr.exception_message
 
 
@@ -290,6 +290,6 @@ async def test_edit_report_resolves_to_latest_snapshot() -> None:
         old_str="updated text",
         new_str="patched text",
     )
-    assert tr.success, getattr(tr, "exception_message", "")
+    assert tr.ok, getattr(tr, "exception_message", "")
     assert "patched text" in tr.data.markdown
     assert "original text" not in tr.data.markdown

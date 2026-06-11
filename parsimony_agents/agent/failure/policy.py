@@ -11,7 +11,7 @@ without touching the recovery funnel.
   other kinds.
 - ``decide()`` starts from ``failure.suggested_action`` and promotes to ``handoff``
   when retry budgets are exhausted or when ``narrow_scope`` is hit twice for the
-  same kind (the "second-strike" rule for ``no_progress`` per BRIEF §4.4).
+  same kind (the "second-strike" rule for ``no_progress``).
 """
 
 from __future__ import annotations
@@ -37,18 +37,24 @@ class RecoveryPolicy(Protocol):
 
 
 class DefaultPolicy:
-    """Production default recovery policy. See module docstring for rules."""
+    """Production default recovery policy. See module docstring for rules.
 
-    _RETRY_BUDGETS: dict[FailureKind, int] = {
-        FailureKind.transient_provider: 3,
-        FailureKind.tool_error: 2,
-        FailureKind.output_truncated: 1,
-    }
+    ``transient_retry_budget`` (the host's ``AgentGuardrails.llm_max_retries``)
+    sets how many times a transient provider error is retried before handoff;
+    omitted, it defaults to 3.
+    """
 
     _BACKOFF_CAP_S: float = 30.0
 
+    def __init__(self, *, transient_retry_budget: int | None = None) -> None:
+        self._retry_budgets: dict[FailureKind, int] = {
+            FailureKind.transient_provider: 3 if transient_retry_budget is None else transient_retry_budget,
+            FailureKind.tool_error: 2,
+            FailureKind.output_truncated: 1,
+        }
+
     def retry_budget(self, kind: FailureKind) -> int:
-        return self._RETRY_BUDGETS.get(kind, 0)
+        return self._retry_budgets.get(kind, 0)
 
     def backoff(self, kind: FailureKind, attempt: int) -> float:
         if kind is FailureKind.transient_provider:

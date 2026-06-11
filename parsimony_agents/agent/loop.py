@@ -20,7 +20,7 @@ built-in defaults.
     async for event in run_loop(agent, state):
         ...
 
-Architecture (BRIEF §2):
+Architecture:
 
 - **One LLM chokepoint** (:func:`~parsimony_agents.agent.llm.call_llm`).
 - **One funnel** for every failure (:func:`~parsimony_agents.agent.failure.recovery.handle_failure`).
@@ -89,7 +89,6 @@ import json
 import logging
 import time
 from collections.abc import AsyncGenerator
-from datetime import UTC
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -109,19 +108,17 @@ from parsimony_agents.agent.failure import (
     FailureKind,
     FailureRaised,
     RecoveryPolicy,
-    SuspensionExpired,
     SuspensionRequest,
-    SuspensionTokenMismatch,
     TerminationRequest,
     accumulate_usage,
+    build_suspension_record,
     handle_failure,
     post_llm,
     post_tool,
     pre_step,
     record_tool_call,
-    verify_suspension_token,
+    validate_suspension,
 )
-from parsimony_agents.agent.failure.suspension import compute_suspension_token
 from parsimony_agents.agent.llm import (
     LLMComplete,
     LLMReasoningDelta,
@@ -271,45 +268,6 @@ def _parse_tool_args(raw: str) -> dict[str, Any]:
     return {"_value": parsed}
 
 
-def _build_suspension_record_from_tool(
-    state: RunState,
-    *,
-    question: str,
-    context: str | None,
-    secret: str,
-    originating_failure_kind: str | None = None,
-) -> SuspensionRecord:
-    """Snapshot ``state`` into a :class:`SuspensionRecord` for an ``ask_user`` exit."""
-    return SuspensionRecord(
-        run_id=state.run_id,
-        session_id=state.session_id,
-        model_id=state.model_id,
-        suspension_token=compute_suspension_token(
-            run_id=state.run_id,
-            session_id=state.session_id,
-            secret=secret,
-        ),
-        messages=list(state.messages),
-        iteration_count=state.iteration,
-        tool_call_history=list(state.tool_call_history),
-        minted_refs=list(state.turn.minted_refs),
-        minted_live_names=dict(state.turn.minted_live_names),
-        started_at=state.started_at,
-        elapsed_seconds=state.elapsed_seconds(),
-        pending_question=question,
-        pending_question_context=context,
-        originating_failure_kind=originating_failure_kind,
-        accumulated_reasoning=state.accumulated_reasoning,
-        accumulated_reasoning_duration_s=state.accumulated_reasoning_duration_s,
-        last_repeat_counts=dict(state.last_repeat_counts),
-        cumulative_cost_usd=state.cumulative_cost_usd,
-        cumulative_prompt_tokens=state.cumulative_prompt_tokens,
-        cumulative_completion_tokens=state.cumulative_completion_tokens,
-        lessons_learned=list(state.lessons_learned),
-        failure_attempts=dict(state.failure_attempts),
-    )
-
-
 # ---------------------------------------------------------------------------
 # The loop
 # ---------------------------------------------------------------------------
@@ -348,7 +306,6 @@ async def run_loop(
 
     while not state.done:
         state.iteration += 1
-        state.turn = state.turn.__class__()  # fresh TurnSubstate for this iteration
 
         # --- Cancellation pre-check ---
         if cancellation is not None and cancellation.is_set():
@@ -448,6 +405,12 @@ async def run_loop(
                 yield event
             continue
 
+        # A successful LLM call consumes any one-off corrective instruction the
+        # recovery funnel injected for this turn. A FailureRaised / transient
+        # retry above skips this (via ``continue``), so the instruction survives
+        # to be re-rendered until exactly one full response is produced.
+        state.pending_instruction = None
+
         # --- Accumulate usage ---
         accumulate_usage(state, response.raw, model=agent.model_config.get("model"))
 
@@ -508,12 +471,12 @@ async def run_loop(
                     state.last_event_time_s = time.monotonic()
         except SuspensionRequest as suspension:
             # Soft suspension: build record, yield UserInputRequested, exit cleanly.
-            record = _build_suspension_record_from_tool(
+            record = build_suspension_record(
                 state,
                 question=suspension.question,
                 context=suspension.context,
                 secret=agent.suspension_secret,
-                originating_failure_kind=suspension.originating_failure_kind,
+                originating_kind=suspension.originating_failure_kind,
             )
             yield UserInputRequested(
                 question=suspension.question,
@@ -551,6 +514,12 @@ async def run_loop(
             async for event in _emit_hook(agent, "on_iteration_end", state):
                 yield event
             break
+
+        # Tool dispatch just finished — mark progress regardless of which dispatch
+        # path ran. Without this the workspace path never bumps the clock, so the
+        # next pre_step reads a long tool batch as "silence" and fires a spurious
+        # no_progress stall.
+        state.last_event_time_s = time.monotonic()
 
         # --- Iteration-end hook (workspace: emit StateSnapshot) ---
         async for event in _emit_hook(agent, "on_iteration_end", state):
@@ -618,12 +587,37 @@ async def _execute_tool_calls(
         invocation_args = {k: v for k, v in args.items() if k != "_ui_message"}
 
         try:
-            result = await tool(**invocation_args)
+            # Enforce the guardrail timeout on this path too (the workspace
+            # dispatch enforces it via trace_tool_execution). SuspensionRequest /
+            # TerminationRequest raised inside the tool propagate through wait_for
+            # unchanged; only a genuine overrun becomes TimeoutError.
+            result = await asyncio.wait_for(
+                tool(**invocation_args), timeout=agent.guardrails.tool_timeout_s
+            )
         except (SuspensionRequest, TerminationRequest):
             # Bubble: caller (run_loop) catches and translates to UserInputRequested / Handoff.
             raise
         except asyncio.CancelledError:
             raise
+        except TimeoutError:
+            failure = Failure(
+                kind=FailureKind.tool_error,
+                explanation=(
+                    f"Tool {tool_name!r} exceeded the {agent.guardrails.tool_timeout_s:.0f}s "
+                    "tool timeout and was aborted."
+                ),
+                metadata={"tool_name": tool_name, "exception_class": "TimeoutError"},
+            )
+            async for event in handle_failure(failure, agent=agent, state=state):
+                yield event
+            state.messages.append(
+                _tool_result_message(
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    result_text=f"Tool {tool_name} timed out.",
+                )
+            )
+            continue
         except Exception as exc:
             # Any unhandled exception inside a tool surfaces as a structured Failure.
             failure = Failure(
@@ -683,17 +677,14 @@ async def resume_run(
     suspension: SuspensionRecord,
     user_reply: str,
     *,
-    files: Any | None = None,
-    code_executor: Any | None = None,
     cancellation: CancellationRequest | None = None,
     max_suspension_age_s: float | None = 24 * 3600.0,
 ) -> AsyncGenerator[AgentEvent, None]:
     """Resume a suspended run with a user reply.
 
-    Validates the suspension token, checks staleness, rebuilds :class:`RunState`
+    Validates the suspension token + staleness, rebuilds :class:`RunState`
     from the record, appends the user's reply as the next message, then re-enters
-    :func:`run_loop`. Runtime services (``files``, ``code_executor``, ``cancellation``)
-    are re-injected via kwargs — they cannot be persisted across the suspend boundary.
+    :func:`run_loop`. ``cancellation`` is passed straight to :func:`run_loop`.
 
     :raises SuspensionTokenMismatch: presented record's token fails HMAC verification.
     :raises SuspensionExpired: record is older than ``max_suspension_age_s`` (default 24h).
@@ -702,33 +693,18 @@ async def resume_run(
     Cancellation precedence: if ``cancellation`` is set before resume, the loop
     yields :class:`RunCancelled` immediately on its first cancellation check.
     """
-    from datetime import datetime
-
-    if not user_reply or not user_reply.strip():
-        raise ValueError("resume_run requires a non-empty user_reply")
-
-    if not verify_suspension_token(record=suspension, secret=agent.suspension_secret):
-        raise SuspensionTokenMismatch(
-            f"suspension token failed verification for run_id={suspension.run_id!r}"
-        )
-
-    if max_suspension_age_s is not None:
-        age = (datetime.now(UTC) - suspension.suspended_at).total_seconds()
-        if age > max_suspension_age_s:
-            raise SuspensionExpired(
-                f"suspension is {age:.0f}s old (max {max_suspension_age_s:.0f}s)"
-            )
-
-    state = RunState.from_suspension(
+    validate_suspension(
         suspension,
-        files=files,
-        code_executor=code_executor,
-        cancellation=cancellation,
+        user_reply,
+        secret=agent.suspension_secret,
+        max_age_s=max_suspension_age_s,
     )
 
-    # Append the user's reply as the next user message. The renderer will surface it
-    # as the most-recent input on the next iteration. No special marker — the LLM
-    # treats it as a normal user message (BRIEF §4.2).
+    state = RunState.from_suspension(suspension)
+
+    # Append the user's reply as the next user message. The renderer surfaces it
+    # as the most-recent input on the next iteration; the LLM treats it as a
+    # normal user message.
     state.messages.append({"role": "user", "content": user_reply.strip()})
 
     async for event in run_loop(agent, state, cancellation=cancellation):

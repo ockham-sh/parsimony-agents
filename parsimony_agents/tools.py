@@ -1,10 +1,11 @@
 """LLM tool primitives: Tool, ToolMethod, ToolResult, Tools registry.
 
-- :class:`Tool` carries structural declarations the loop reads —
-  ``idempotent``, ``retryable_on_error``, ``parallelizable``, ``timeout_s``.
 - :class:`ToolResult` carries a structured ``failure: Failure | None`` plus
   ``partial_data: Any``, alongside the ``exception_message``/``data`` pair.
-- ``ok`` is the canonical successful-result predicate; ``success`` is an alias.
+- ``ok`` is the successful-result predicate.
+
+Concurrency is governed by the read-only-safe tool-name set in
+``agent.workspace_hooks``; per-tool timeouts by the ``tool_timeout_s`` guardrail.
 """
 
 from __future__ import annotations
@@ -88,12 +89,6 @@ class Tool:
         ui_message: str | None = None,
         ui_message_completed: str | None = None,
         ui_description: str | None = None,
-        # ---- Structural declarations ---------------------------------------
-        # All default to conservative values so existing constructions don't break.
-        idempotent: bool = False,
-        retryable_on_error: bool = False,
-        parallelizable: bool = False,
-        timeout_s: float | None = None,
     ):
         self.function = function
         self.parameters_schema = parameters_schema
@@ -104,14 +99,6 @@ class Tool:
         self.ui_message = ui_message
         self.ui_message_completed = ui_message_completed
         self.ui_description = ui_description
-        # Structural declarations. The loop reads these to:
-        # - serialize parallelizable=False tools at the loop level
-        # - auto-retry retryable_on_error tools via the recovery funnel
-        # - apply per-tool timeouts (overriding the global tool_timeout_s)
-        self.idempotent = idempotent
-        self.retryable_on_error = retryable_on_error
-        self.parallelizable = parallelizable
-        self.timeout_s = timeout_s
 
     async def __call__(self, *args, **kwargs) -> ToolResult:
         """
@@ -201,10 +188,6 @@ class ToolMethod(Tool):
             ui_message=self.ui_message,
             ui_message_completed=self.ui_message_completed,
             ui_description=getattr(self, "ui_description", None),
-            idempotent=getattr(self, "idempotent", False),
-            retryable_on_error=getattr(self, "retryable_on_error", False),
-            parallelizable=getattr(self, "parallelizable", False),
-            timeout_s=getattr(self, "timeout_s", None),
         )
 
 

@@ -87,7 +87,7 @@ async def test_return_dataset_derives_lineage_from_origin(tmp_path: Path) -> Non
         notes=[],
         live_name="my_result",
     )
-    assert r.success, getattr(r, "exception_message", "")
+    assert r.ok, getattr(r, "exception_message", "")
     ds = r.data
     assert isinstance(ds, Dataset)
     assert ds.live_name == "my_result"
@@ -114,7 +114,7 @@ async def test_return_dataset_rejects_variable_without_origin(tmp_path: Path) ->
         notes=[],
         live_name="my_result",
     )
-    assert not r.success
+    assert not r.ok
     assert "producing notebook" in r.exception_message.lower() or "scratch" in r.exception_message.lower()
 
 
@@ -145,7 +145,7 @@ async def test_return_chart_partitions_load_and_fetch(tmp_path: Path) -> None:
         notes=[],
         live_name="chart_one",
     )
-    assert r.success, getattr(r, "exception_message", "")
+    assert r.ok, getattr(r, "exception_message", "")
     ch = r.data
     assert isinstance(ch, Chart)
     assert ch.source_dataset_refs == [load_ref]
@@ -191,7 +191,7 @@ async def test_return_report_pins_embedded_live_names(tmp_path: Path) -> None:
         notes=[],
         live_name="my_report",
     )
-    assert r.success, getattr(r, "exception_message", "")
+    assert r.ok, getattr(r, "exception_message", "")
     rep = r.data
     assert isinstance(rep, Report)
     assert len(rep.embedded_refs) == 1
@@ -218,7 +218,7 @@ async def test_return_report_rejects_unresolved_embed(tmp_path: Path) -> None:
         notes=[],
         live_name="ghost_report",
     )
-    assert not r.success
+    assert not r.ok
     msg = r.exception_message.lower()
     assert "ghost" in msg
     assert "no published snapshot" in msg or "not found" in msg

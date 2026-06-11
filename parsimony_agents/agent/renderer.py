@@ -5,7 +5,7 @@ list passed to ``litellm.acompletion``. Every input is read-only; every output i
 a fresh list. The new loop calls :func:`render_for_llm` at the top of each
 iteration and feeds the result straight into the LLM chokepoint.
 
-Structural responsibilities (BRIEF §4.1):
+Structural responsibilities:
 
 - Snapshot deduplication: only the most-recent ``metadata["context_snapshot"]=True``
   message is rendered; older ones are silently filtered.

@@ -23,7 +23,6 @@ from parsimony_agents import (
     Chart,
     deserialize_chart,
     read_chart,
-    serialize_chart,
 )
 from parsimony_agents.chart_io import (
     CHART_DATA_REF_KEY,
@@ -118,7 +117,7 @@ def test_chart_save_from_altair(sample_alt_chart: alt.Chart, tmp_path: Path) -> 
     assert (mark == "line") or (isinstance(mark, dict) and mark.get("type") == "line")
 
 
-def test_serialize_chart_uses_vega_lite_format(sample_spec: dict) -> None:
+def test_write_chart_bytes_uses_vega_lite_format(sample_spec: dict) -> None:
     fig = FigureObject(value=sample_spec)
     chart = Chart(
         title="Stream",
@@ -126,7 +125,7 @@ def test_serialize_chart_uses_vega_lite_format(sample_spec: dict) -> None:
         notebook_ref=_nb_ref(),
     )
 
-    blob = serialize_chart(chart, fig)
+    blob = write_chart_bytes(chart, fig)
     spec = json.loads(blob.decode("utf-8"))
 
     assert spec["mark"] == "bar"

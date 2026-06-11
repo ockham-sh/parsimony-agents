@@ -126,9 +126,10 @@ def test_collect_skips_snapshot_with_unrecognised_extension(tmp_path: Path) -> N
     assert collect_local_artifact_lines(tmp_path) == []
 
 
-def test_build_session_state_lists_artifacts(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_build_session_state_lists_artifacts(tmp_path: Path) -> None:
     _write_artifact(tmp_path, kind="dataset", lid="d1", live_name="unrate")
-    state = build_local_session_state(executor=None, local_dir=tmp_path)
+    state = await build_local_session_state(executor=None, local_dir=tmp_path)
     assert [a.live_name for a in state.workspace_artifacts] == ["unrate"]
     assert state.kernel == []
 

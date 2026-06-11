@@ -52,8 +52,10 @@ class ArtifactNotFound(FileNotFoundError):
         # canonical bytes, no sibling workspaces, no "did you mean".
         if kind == "virtual_unresolved":
             msg = (
-                f"No artifact resolves to {path!r}. The current set of typed artifacts "
-                "is in <session_state>.<turn_artifacts>; copy a path from there."
+                f"No artifact resolves to {path!r}. Copy the kind and live_name from a "
+                "<turn_artifacts> row in <session_state> and retry "
+                "read_artifact(live_name=, kind=); if no row matches, call "
+                "list_artifacts(query=...)."
             )
         elif kind == "canonical_missing":
             msg = (

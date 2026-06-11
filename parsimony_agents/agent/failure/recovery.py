@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncGenerator
 from typing import Protocol
 
@@ -36,8 +37,8 @@ from parsimony_agents.agent.events import (
 )
 from parsimony_agents.agent.failure.kinds import Action, Failure, FailureKind
 from parsimony_agents.agent.failure.policy import DefaultPolicy, RecoveryPolicy
-from parsimony_agents.agent.failure.suspension import compute_suspension_token
-from parsimony_agents.agent.state import RunState, SuspensionRecord
+from parsimony_agents.agent.failure.suspension import build_suspension_record
+from parsimony_agents.agent.state import RunState
 
 _logger = logging.getLogger(__name__)
 
@@ -71,50 +72,6 @@ def _track_lesson(state: RunState, failure: Failure) -> None:
         state.lessons_learned = state.lessons_learned[-_LESSONS_LEARNED_CAP:]
 
 
-def _build_suspension_record(
-    state: RunState,
-    failure: Failure | None,
-    *,
-    question: str,
-    context: str | None,
-    secret: str,
-    originating_kind: FailureKind | None,
-) -> SuspensionRecord:
-    """Snapshot ``state`` into a JSON-serializable :class:`SuspensionRecord`.
-
-    The token binds (run_id, session_id, nonce) under ``secret`` so the host
-    cannot forge a resume. See ``failure.suspension`` for the wire format.
-    """
-    return SuspensionRecord(
-        run_id=state.run_id,
-        session_id=state.session_id,
-        suspension_token=compute_suspension_token(
-            run_id=state.run_id,
-            session_id=state.session_id,
-            secret=secret,
-        ),
-        messages=list(state.messages),
-        iteration_count=state.iteration,
-        tool_call_history=list(state.tool_call_history),
-        minted_refs=list(state.turn.minted_refs),
-        minted_live_names=dict(state.turn.minted_live_names),
-        started_at=state.started_at,
-        elapsed_seconds=state.elapsed_seconds(),
-        pending_question=question,
-        pending_question_context=context,
-        originating_failure_kind=originating_kind,
-        model_id=state.model_id,
-        accumulated_reasoning=state.accumulated_reasoning,
-        accumulated_reasoning_duration_s=state.accumulated_reasoning_duration_s,
-        last_repeat_counts=dict(state.last_repeat_counts),
-        cumulative_cost_usd=state.cumulative_cost_usd,
-        cumulative_prompt_tokens=state.cumulative_prompt_tokens,
-        cumulative_completion_tokens=state.cumulative_completion_tokens,
-        lessons_learned=list(state.lessons_learned),
-        failure_attempts=dict(state.failure_attempts),
-    )
-
-
 def _narrow_scope_instruction(failure: Failure) -> str:
     """Build the corrective prompt injected as ``state.pending_instruction``.
 
@@ -127,6 +84,16 @@ def _narrow_scope_instruction(failure: Failure) -> str:
     had really been trying to ask the user a question. Other narrow_scope kinds
     (``scope_too_large``, ``kernel_invalidated``) keep the shrink-the-step framing.
     """
+    # A no_progress failure has two distinct producers: a phase-boundary *stall*
+    # (detectors.pre_step, carries ``silence_s``) and a *text-only* response (the
+    # loop). They need different corrective text — telling a stalled run "your
+    # previous turn was text only" is simply false.
+    if failure.kind is FailureKind.no_progress and failure.metadata.get("silence_s") is not None:
+        return (
+            "The run stalled — no event was produced for a while. If a tool is "
+            "genuinely stuck, take a different, smaller next step now; if you are "
+            "blocked, call return_unable; if you need the user, call ask_user."
+        )
     if failure.kind is FailureKind.no_progress:
         return (
             "Your previous turn was text only — no tool call — so the run could "
@@ -208,14 +175,22 @@ async def handle_failure(
     state.record_failure_attempt(failure.kind)
     _track_lesson(state, failure)
 
+    # Handling a failure is itself activity — reset the stall clock so a stall we
+    # just handled (or the work of recovering) can't immediately re-trip the
+    # phase-boundary detector on the next pre_step.
+    state.last_event_time_s = time.monotonic()
+
     if action is Action.retry:
         attempt = state.failure_attempts[failure.kind]
         delay = policy.backoff(failure.kind, attempt)
         if delay > 0:
             await asyncio.sleep(delay)
+        # The spine is retrying — this is not a terminal failure. recoverable=True
+        # is what lets AgentResult.ok and the CLI ignore a blip the loop handled.
         yield AgentError(
             message=f"Recoverable failure ({failure.kind.value}): {failure.explanation}",
             failure=failure,
+            recoverable=True,
         )
         return
 
@@ -224,14 +199,14 @@ async def handle_failure(
         yield AgentError(
             message=f"Narrowing scope after {failure.kind.value}: {failure.explanation}",
             failure=failure,
+            recoverable=True,
         )
         return
 
     if action is Action.ask_user:
         question, context = _ask_user_question_for(failure)
-        record = _build_suspension_record(
+        record = build_suspension_record(
             state,
-            failure,
             question=question,
             context=context,
             secret=agent.suspension_secret,

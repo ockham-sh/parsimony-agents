@@ -1,7 +1,7 @@
 """Agent session state and message models (no FastAPI / SSE dependencies).
 
 The legacy ``ReturnedDatasetState`` / ``ReturnedChartState`` slots have
-been removed (§5.8 item A): with content-addressed identity,
+been removed: with content-addressed identity,
 match-and-reuse is automatic — the same logical inputs always hash to
 the same path, so no per-session bookkeeping is required to detect a
 re-publish.
@@ -31,17 +31,15 @@ from parsimony_agents.notebook import Script
 
 class AgentContextSnapshot(MessageContent):
     type: Literal["agent_context_snapshot"] = "agent_context_snapshot"
-    #: Pre-rendered catalog of connectors bound into the executor this turn,
-    #: as produced by :func:`parsimony_agents.agent.helpers.render_connector_catalog`.
-    #: Empty string means no connectors are bound and the corresponding XML
-    #: block is omitted from :meth:`to_llm`.
-    connectors_catalog: str = ""
+    #: Optional ``iteration="7/50" elapsed_s="84/300"`` budget line, rendered as a
+    #: ``<budget .../>`` tag so the agent can pace itself before the hard stop.
+    budget: str | None = None
     #: Optional kernel + workspace artifact hints (filled by the host in workspace mode).
     session_state: SessionState | None = None
-    #: Refs minted by ``return_*`` / ``edit_*`` / ``refresh`` during the
-    #: current turn (populated from ``TurnState.minted_refs`` each iteration).
-    #: Fused with ``session_state.workspace_artifacts`` to render a single
-    #: always-current ``<turn_artifacts>`` block.
+    #: Refs minted by ``return_*`` / ``edit_*`` / ``refresh`` so far in the run
+    #: (populated from ``RunState.minted_refs`` each iteration). Fused with
+    #: ``session_state.workspace_artifacts`` to render a single always-current
+    #: ``<turn_artifacts>`` block.
     minted_refs: list[ArtifactRef] = Field(default_factory=list)
     #: ``f"{kind}:{logical_id}"`` → ``live_name`` for the same refs in
     #: :attr:`minted_refs`. Carries the agent-typed workspace slug so the
@@ -51,7 +49,7 @@ class AgentContextSnapshot(MessageContent):
     #: a sibling-terminal collision on the very next ``return_*`` call).
     minted_live_names: dict[str, str] = Field(default_factory=dict)
     #: ``(kind, live_name)`` pairs the calling terminal has interacted with
-    #: in the current conversation. Used by :meth:`SessionState.to_llm_text`
+    #: in the current conversation. Used by :meth:`SessionState.render_block`
     #: to filter cross-turn workspace artifacts to this terminal's seen-set
     #: — sibling-terminal artifacts are hidden until the agent calls
     #: ``list_artifacts`` / ``read_artifact``. Serialised as a list of
@@ -99,20 +97,15 @@ class AgentContextSnapshot(MessageContent):
             }
         )
 
-        if self.connectors_catalog:
-            chunks.append(
-                {
-                    "type": "text",
-                    "text": (f"<available_connectors>\n{self.connectors_catalog}\n</available_connectors>\n"),
-                }
-            )
+        if self.budget:
+            chunks.append({"type": "text", "text": f"<budget {self.budget}/>\n"})
 
         if self.session_state is not None and mode != "minimal":
             seen = {tuple(p) for p in self.seen_live_names_pairs if len(p) == 2}
             chunks.append(
                 {
                     "type": "text",
-                    "text": self.session_state.to_llm_text(
+                    "text": self.session_state.render_block(
                         minted_refs=self.minted_refs or None,
                         minted_live_names=self.minted_live_names or None,
                         seen_live_names=seen,
@@ -206,11 +199,10 @@ class AgentContext(MessageContent):
     async def to_snapshot(
         self,
         *,
-        connectors: Any = None,
         minted_refs: list[ArtifactRef] | None = None,
         minted_live_names: dict[str, str] | None = None,
+        budget: str | None = None,
     ) -> AgentContextSnapshot:
-        from parsimony_agents.agent.helpers import render_connector_catalog
         from parsimony_agents.agent.seen_refs import extract_seen_live_names
 
         # Compute the calling terminal's seen-set from the live message
@@ -226,7 +218,7 @@ class AgentContext(MessageContent):
                     seen.add((a.kind, a.live_name))
         seen_pairs = sorted(seen)
         return AgentContextSnapshot(
-            connectors_catalog=render_connector_catalog(connectors),
+            budget=budget,
             session_state=self.session_state,
             minted_refs=list(minted_refs or []),
             minted_live_names=dict(minted_live_names or {}),

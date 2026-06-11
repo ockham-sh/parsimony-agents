@@ -13,7 +13,7 @@ signatures) and :func:`accumulate_usage` (accumulates cost / tokens) — *do* mu
 ``RunState``; the loop calls them at well-defined points (``record_tool_call`` before
 each tool invocation, ``accumulate_usage`` between ``post_llm`` and the next ``pre_step``).
 
-Precedence at the same phase (per BRIEF §4.3): **hard-stops > quality issues > warnings**;
+Precedence at the same phase: **hard-stops > quality issues > warnings**;
 first-match-wins within each tier. Encoded in the function bodies, not via a separate scheduler.
 """
 

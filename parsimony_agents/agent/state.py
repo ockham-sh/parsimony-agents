@@ -1,22 +1,16 @@
 """Single canonical run state for the new agent loop.
 
-Three Pydantic models:
+Two Pydantic models:
 
 - :class:`RunState` — the in-process state object that flows through the loop.
-  Subsumes the legacy ``AgentContext`` / ``TurnState`` / ``SessionState`` overlap.
-- :class:`TurnSubstate` — per-turn scratchpad (minted refs, turn-local counters).
-  Resets at the start of each loop iteration.
+  Subsumes the legacy ``AgentContext`` / ``TurnState`` / ``SessionState`` overlap,
+  including the run-lifetime ledger of minted artifact refs + live names.
 - :class:`SuspensionRecord` — JSON-serializable snapshot captured when the agent
   suspends pending user input. Carries everything needed to resume in another process.
 
-Runtime services (``files``, ``code_executor``, ``cancellation``) are ``Field(exclude=True)``
-so the state survives JSON serialization for resume; they are re-injected on
-:meth:`Agent.resume` via kwargs.
-
 The HMAC token helpers (``compute_suspension_token`` / ``verify_suspension_token``) live
 in :mod:`parsimony_agents.agent.failure.suspension` so the crypto + exception types
-sit alongside :class:`SuspensionRequest`. They are re-exported from this module for
-convenience.
+sit alongside :class:`SuspensionRequest`. Import them from there.
 """
 
 from __future__ import annotations
@@ -31,32 +25,15 @@ from parsimony_agents.agent.failure.kinds import Failure, FailureKind
 from parsimony_agents.identity import ArtifactRef
 
 
-class TurnSubstate(BaseModel):
-    """Per-turn scratchpad; cleared at the start of each loop iteration.
-
-    Keeps fields the renderer reads at end-of-turn (minted artifacts, live-name map)
-    separated from the run-level counters that persist across turns.
-    """
-
-    minted_refs: list[ArtifactRef] = Field(default_factory=list)
-    minted_live_names: dict[str, str] = Field(default_factory=dict)
-    text_only_response: bool = False
-    tool_calls_this_turn: int = 0
-
-
 class RunState(BaseModel):
     """Canonical state for a single agent run.
 
     Persisted across iterations; partial-snapshotted into :class:`SuspensionRecord`
-    when the agent suspends. Runtime services (``files``, ``code_executor``,
-    ``cancellation``) are excluded from serialization and must be re-injected on
-    :meth:`Agent.resume`.
+    when the agent suspends.
     """
 
-    # ``arbitrary_types_allowed`` lets us hold non-Pydantic runtime services on the
-    # state (FileStore, BaseCodeExecutor, CancellationRequest) without forcing them
-    # to subclass BaseModel. They are ``Field(exclude=True)`` so they never appear
-    # in serialized output.
+    # ``arbitrary_types_allowed`` lets the state carry pydantic-dataclass values
+    # (Failure) and ArtifactRef without extra coercion config.
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     run_id: str
@@ -73,14 +50,21 @@ class RunState(BaseModel):
     messages: list[Any] = Field(default_factory=list)
 
     iteration: int = 0
-    turn: TurnSubstate = Field(default_factory=TurnSubstate)
+
+    # Run-lifetime ledger of the artifacts the agent has minted, plus their
+    # human-readable live names. Accumulates across iterations (the per-turn
+    # ``<turn_artifacts>`` snapshot is derived from this) and is snapshotted into
+    # :class:`SuspensionRecord` so a resumed run keeps its mints.
+    minted_refs: list[ArtifactRef] = Field(default_factory=list)
+    minted_live_names: dict[str, str] = Field(default_factory=dict)
 
     # Per-FailureKind attempt counter. Drives the "second strike → handoff"
     # behavior in the recovery funnel (e.g. text-no-tools twice → Handoff).
     failure_attempts: dict[FailureKind, int] = Field(default_factory=dict)
 
-    # One-off prompt injected on the next iteration, then cleared by the renderer.
-    # Populated by ``narrow_scope`` recovery and by ``kernel_invalidated`` resume.
+    # One-off corrective prompt injected on the next iteration, then cleared by
+    # the loop after the next successful LLM call. Populated by ``narrow_scope``
+    # recovery.
     pending_instruction: str | None = None
 
     # Capped at 5 distinct kinds by the renderer (most-recent wins). Each Failure
@@ -123,12 +107,6 @@ class RunState(BaseModel):
     # SuspensionRequest, which is a distinct exit path.
     done: bool = False
 
-    # --- Runtime services (excluded from serialization) ---
-    # Re-injected on :meth:`Agent.resume`. Cannot be persisted across processes.
-    files: Any | None = Field(default=None, exclude=True)
-    code_executor: Any | None = Field(default=None, exclude=True)
-    cancellation: Any | None = Field(default=None, exclude=True)
-
     def record_failure_attempt(self, kind: FailureKind) -> int:
         """Increment the per-kind attempt counter and return the new count."""
         new_count = self.failure_attempts.get(kind, 0) + 1
@@ -147,21 +125,14 @@ class RunState(BaseModel):
         return self.accumulated_elapsed_s + max(0.0, wall)
 
     @classmethod
-    def from_suspension(
-        cls,
-        record: SuspensionRecord,
-        *,
-        files: Any | None = None,
-        code_executor: Any | None = None,
-        cancellation: Any | None = None,
-    ) -> RunState:
+    def from_suspension(cls, record: SuspensionRecord) -> RunState:
         """Rebuild a :class:`RunState` from a persisted :class:`SuspensionRecord`.
 
-        Runtime services (``files``, ``code_executor``, ``cancellation``) cannot be
-        persisted — the caller re-injects them via kwargs. The reconstructed state
-        carries forward all accumulators (cost, tokens, elapsed-time, reasoning,
-        tool_call_history, lessons_learned) so the next turn sees a coherent
-        continuation of the suspended run.
+        The reconstructed state carries forward all accumulators (cost, tokens,
+        elapsed-time, reasoning, tool_call_history, lessons_learned, and the minted
+        artifact ledger) so the next turn sees a coherent continuation of the
+        suspended run. Runtime services (cancellation) are passed to
+        :func:`run_loop` directly, not stored on the state.
 
         Budget reset on continue: when the run suspended *because* it exhausted a
         budget guardrail (``time_limit`` / ``iteration_limit``) and the user chose
@@ -187,6 +158,8 @@ class RunState(BaseModel):
             model_id=record.model_id,
             messages=list(record.messages),
             iteration=iteration,
+            minted_refs=list(record.minted_refs),
+            minted_live_names=dict(record.minted_live_names),
             failure_attempts=dict(record.failure_attempts),
             pending_instruction=None,  # cleared on resume; user_reply is the new prompt
             lessons_learned=list(record.lessons_learned),
@@ -201,25 +174,24 @@ class RunState(BaseModel):
             accumulated_reasoning_duration_s=record.accumulated_reasoning_duration_s,
             last_repeat_counts=dict(record.last_repeat_counts),
             done=False,
-            files=files,
-            code_executor=code_executor,
-            cancellation=cancellation,
         )
 
 
 class SuspensionRecord(BaseModel):
     """JSON-serializable snapshot captured when the agent suspends.
 
-    Carries every field needed to resume the run in another process (BRIEF gaps 44–48):
+    Carries every field needed to resume the run in another process:
 
-    - ``suspension_token`` (HMAC-SHA256) prevents replay / forgery.
+    - ``suspension_token`` (HMAC-SHA256) binds the record to a per-suspension
+      nonce under the host secret; resume rejects a token that does not verify.
+    - ``minted_refs`` / ``minted_live_names`` so a resumed run keeps its artifacts.
     - ``tool_call_history`` survives so loop detection works post-resume.
     - ``accumulated_reasoning`` + duration so the Anthropic reasoning span continues.
     - ``started_at`` + ``elapsed_seconds`` so guardrails reckon with pre-suspension time.
     - ``last_repeat_counts`` so loop detection's progress isn't reset.
     - Cumulative cost / token counters so the budget detector keeps accurate totals.
 
-    See :func:`compute_suspension_token` / :func:`verify_suspension_token`.
+    Token helpers live in :mod:`parsimony_agents.agent.failure.suspension`.
     """
 
     run_id: str
@@ -259,30 +231,7 @@ class SuspensionRecord(BaseModel):
     failure_attempts: dict[FailureKind, int] = Field(default_factory=dict)
 
 
-def compute_suspension_token(
-    *,
-    run_id: str,
-    session_id: str,
-    secret: str,
-    nonce: str | None = None,
-) -> str:
-    """Issue a suspension token via the failure module without importing it eagerly."""
-    from parsimony_agents.agent.failure.suspension import compute_suspension_token as _compute_suspension_token
-
-    return _compute_suspension_token(run_id=run_id, session_id=session_id, secret=secret, nonce=nonce)
-
-
-def verify_suspension_token(*, record: SuspensionRecord, secret: str) -> bool:
-    """Verify a suspension token via the failure module without importing it eagerly."""
-    from parsimony_agents.agent.failure.suspension import verify_suspension_token as _verify_suspension_token
-
-    return _verify_suspension_token(record=record, secret=secret)
-
-
 __all__ = [
     "RunState",
     "SuspensionRecord",
-    "TurnSubstate",
-    "compute_suspension_token",
-    "verify_suspension_token",
 ]

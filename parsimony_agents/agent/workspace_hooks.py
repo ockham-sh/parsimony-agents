@@ -46,7 +46,6 @@ from parsimony_agents.agent.events import (
 from parsimony_agents.agent.events import (
     ToolResultObserved as ToolResultObservedEvent,
 )
-from parsimony_agents.agent.helpers import TurnState
 from parsimony_agents.agent.models import AgentContext, AgentMessage
 from parsimony_agents.agent.outputs import (
     SystemToolMessage,
@@ -157,7 +156,6 @@ class WorkspaceRunHooks:
         *,
         agent: Any,
         ctx: AgentContext,
-        turn_state: TurnState,
         cancellation: CancellationRequest | None,
         tool_choice: str,
         start_time: float,
@@ -165,7 +163,6 @@ class WorkspaceRunHooks:
     ) -> None:
         self.agent = agent
         self.ctx = ctx
-        self.turn_state = turn_state
         self.cancellation = cancellation
         self.tool_choice = tool_choice
         self.start_time = start_time
@@ -203,9 +200,14 @@ class WorkspaceRunHooks:
         # No ``connectors=``: the catalog is rendered separately into the
         # cache-stable prefix (see ``render_messages`` / ``__init__``); the
         # per-iteration snapshot carries only volatile turn state.
+        budget = (
+            f'iteration="{state.iteration}/{self.guardrails.max_iterations}" '
+            f'elapsed_s="{int(state.elapsed_seconds())}/{int(self.guardrails.max_execution_time_s)}"'
+        )
         iter_snapshot = await self.ctx.to_snapshot(
-            minted_refs=self.turn_state.minted_refs,
-            minted_live_names=self.turn_state.minted_live_names,
+            minted_refs=state.minted_refs,
+            minted_live_names=state.minted_live_names,
+            budget=budget,
         )
         self.ctx.messages = [m for m in self.ctx.messages if m.metadata.get("context_snapshot", False) is False]
         self.ctx.messages.append(
@@ -397,7 +399,9 @@ class WorkspaceRunHooks:
 
         ctx = self.ctx
         tools = self.tools
-        turn_state = self.turn_state
+        # The minted-artifact ledger lives on the run-lifetime RunState (it must
+        # survive across iterations and into the suspension snapshot).
+        turn_state = state
         tool_calls = response.tool_calls
 
         # ── Stage 1: validate, yield loading UI chunks, build coroutines
@@ -662,7 +666,7 @@ class WorkspaceRunHooks:
 
             tool_result = raw_result
 
-            if not tool_result.success:
+            if not tool_result.ok:
                 self._last_tool_internal_error = (
                     f"Tool {tool_name} got an internal error. Trace ID: "
                     f"{trace.get_current_span().get_span_context().trace_id}"
@@ -794,7 +798,7 @@ class WorkspaceRunHooks:
 
                 case "code":
                     tool_call_output = tool_result.data if tool_result.data else tool_result.exception_message
-                    if tool_result.success:
+                    if tool_result.ok:
                         notebook_path = self.agent._resolve_code_tool_path(tool_args)
                         if notebook_path is None:
                             raise ValueError("code tools require a non-empty 'path'.")
@@ -906,7 +910,7 @@ class WorkspaceRunHooks:
                     # Explicit-success termination.
                     # ``return_done`` returns a SystemToolOutput; the loop
                     # ends after this batch's StateSnapshot is yielded.
-                    if tool_name == "return_done" and tool_result.success:
+                    if tool_name == "return_done" and tool_result.ok:
                         state.done = True
 
                 case _:
@@ -978,7 +982,16 @@ class WorkspaceRunHooks:
             f"Agent run completed in {total_time:.3f}s after {state.iteration} iterations",
             extra={"duration_s": total_time, "iterations": state.iteration},
         )
-        self.agent._record_agent_metrics(self.agent_span, total_time, state.iteration)
+        self.agent._record_agent_metrics(
+            self.agent_span,
+            total_time,
+            state.iteration,
+            usage={
+                "prompt_tokens": state.cumulative_prompt_tokens,
+                "completion_tokens": state.cumulative_completion_tokens,
+                "cost_usd": state.cumulative_cost_usd,
+            },
+        )
 
         # "Agent gave up with a lingering tool error" final report. The
         # workspace-side complement to spine failures: surfaces a tool-level
@@ -991,7 +1004,13 @@ class WorkspaceRunHooks:
                 error_type="tool_error",
             )
 
-        yield StateSnapshot(context=self.ctx.model_copy(deep=False))
+        usage = {
+            "prompt_tokens": state.cumulative_prompt_tokens,
+            "completion_tokens": state.cumulative_completion_tokens,
+            "cost_usd": state.cumulative_cost_usd,
+            "iterations": state.iteration,
+        }
+        yield StateSnapshot(context=self.ctx.model_copy(deep=False), usage=usage)
 
 
 __all__ = ["WorkspaceRunHooks"]

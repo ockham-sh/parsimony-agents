@@ -43,7 +43,7 @@ def test_session_state_xml_escapes() -> None:
         kernel=[],
         workspace_artifacts=[],
     )
-    text = s.to_llm_text()
+    text = s.render_block()
     assert "<session_state>" in text
     # The note teaches the agent about <turn_artifacts> as the canonical
     # surface — escaped because angle brackets are XML-special inside text.
@@ -62,7 +62,7 @@ async def test_read_artifact_tool_invokes_injected_fn() -> None:
     from parsimony_agents.messages import Text
 
     async def _fn(live_name: str, kind: str, options: dict) -> ArtifactLlmResult:
-        m = (options.get("view") or options.get("mode") or "summary") or "summary"
+        m = (options.get("view") or "summary") or "summary"
         if isinstance(m, str):
             m = m.strip().lower()
         return ArtifactLlmResult(text=f"{kind}:{live_name}|{m}")
@@ -77,14 +77,14 @@ async def test_read_artifact_tool_invokes_injected_fn() -> None:
         read_artifact_fn=_fn,
     )
     out = await agent.read_artifact(
-        live_name="n", kind="notebook", mode="summary",
+        live_name="n", kind="notebook", view="summary",
         context=AgentContext(session_id="s"),
     )
     assert out.data.content is not None
     assert isinstance(out.data.content, Text)
     assert "notebook:n" in out.data.content.content
     out2 = await agent.read_artifact(
-        live_name="n", kind="notebook", mode="full",
+        live_name="n", kind="notebook", view="full",
         context=AgentContext(session_id="s"),
     )
     assert out2.data.content is not None
@@ -177,7 +177,7 @@ def test_workspace_artifact_xml_emits_live_name_attribute() -> None:
             ),
         ],
     )
-    text = s.to_llm_text()
+    text = s.render_block()
     assert 'kind="notebook" live_name="demo"' in text
     assert 'kind="dataset" live_name="us_gdp"' in text
     # data_object rows have no live_name (no human-facing slug).

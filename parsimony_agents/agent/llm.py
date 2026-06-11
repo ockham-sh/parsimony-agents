@@ -20,7 +20,7 @@ Failure classifications:
 - ``litellm.AuthenticationError``, ``litellm.BadRequestError`` → ``Failure(kind=
   capability_gap)`` with the original message. These are not retryable.
 - ``asyncio.CancelledError`` is *not* caught — propagates so the loop can yield
-  :class:`RunCancelled` (cancel-precedence-over-suspend per BRIEF §4.2).
+  :class:`RunCancelled` (cancel takes precedence over suspend).
 
 Merge point — LLM proxy session: when the proxy lands, reconcile
 ``response.usage_cost_usd`` from the proxy's ``X-Estimated-Cost-USD`` response header

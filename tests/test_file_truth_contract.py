@@ -12,7 +12,7 @@ from parsimony_agents.execution.outputs import KernelOutput
 
 def test_context_snapshot_excludes_data_context_and_notebook_tags() -> None:
     async def _load() -> str:
-        snap = await AgentContext(session_id="s").to_snapshot(connectors=None)
+        snap = await AgentContext(session_id="s").to_snapshot()
         return "".join(c["text"] for c in snap.to_llm())
 
     joined = asyncio.run(_load())
@@ -46,7 +46,7 @@ def test_return_notebook_does_not_call_execute() -> None:
 
     async def _run() -> None:
         r = await agent.return_notebook(context=ctx, path="n.py", code="x=1\n")
-        assert r.success
+        assert r.ok
         ex.execute.assert_not_awaited()
         ex.write_workspace_file.assert_not_awaited()
         # The returned message confirms publication without exposing a ref.
@@ -77,16 +77,15 @@ def test_return_notebook_with_execute_calls_execute_once() -> None:
 
     async def _run() -> None:
         r = await agent.return_notebook(context=ctx, path="n.py", code="x=1\n", execute=True)
-        assert r.success
+        assert r.ok
         ex.execute.assert_awaited_once()
         ex.write_workspace_file.assert_not_awaited()
 
     asyncio.run(_run())
 
 
-def test_to_snapshot_default_has_empty_connectors_catalog() -> None:
+def test_to_snapshot_default_returns_snapshot() -> None:
     snap = asyncio.run(AgentContext(session_id="x").to_snapshot())
-    assert snap.connectors_catalog == ""
     assert isinstance(snap, AgentContextSnapshot)
 
 

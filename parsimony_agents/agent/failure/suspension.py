@@ -10,7 +10,7 @@ Three pieces:
 - :func:`compute_suspension_token` — issues an HMAC-SHA256 token bound to
   ``(run_id, session_id, nonce)`` under a shared secret. The wire format is
   ``"{nonce}.{hexdigest}"``; the nonce ensures distinct suspensions of the same
-  ``(run_id, session_id)`` produce distinct tokens (replay protection per BRIEF gap 45).
+  ``(run_id, session_id)`` produce distinct tokens (one token per suspension).
 
 - :func:`verify_suspension_token` — constant-time verify a record's token matches
   the secret.
@@ -21,8 +21,10 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+from datetime import UTC, datetime
 
-from parsimony_agents.agent.state import SuspensionRecord
+from parsimony_agents.agent.failure.kinds import FailureKind
+from parsimony_agents.agent.state import RunState, SuspensionRecord
 
 
 class SuspensionRequest(Exception):
@@ -105,10 +107,82 @@ class SuspensionExpired(Exception):
     """Raised by :meth:`Agent.resume` when the suspension is older than the configured max age."""
 
 
+def build_suspension_record(
+    state: RunState,
+    *,
+    question: str,
+    context: str | None,
+    secret: str,
+    originating_kind: FailureKind | str | None = None,
+) -> SuspensionRecord:
+    """Snapshot ``state`` into a JSON-serializable :class:`SuspensionRecord`.
+
+    The single builder for both suspension exits — the ``ask_user`` tool path and
+    the recovery funnel's ``Action.ask_user`` decision — so adding a carried-over
+    field means touching one place. The token binds (run_id, session_id, nonce)
+    under ``secret``.
+    """
+    return SuspensionRecord(
+        run_id=state.run_id,
+        session_id=state.session_id,
+        model_id=state.model_id,
+        suspension_token=compute_suspension_token(
+            run_id=state.run_id,
+            session_id=state.session_id,
+            secret=secret,
+        ),
+        messages=list(state.messages),
+        iteration_count=state.iteration,
+        tool_call_history=list(state.tool_call_history),
+        minted_refs=list(state.minted_refs),
+        minted_live_names=dict(state.minted_live_names),
+        started_at=state.started_at,
+        elapsed_seconds=state.elapsed_seconds(),
+        pending_question=question,
+        pending_question_context=context,
+        originating_failure_kind=originating_kind,
+        accumulated_reasoning=state.accumulated_reasoning,
+        accumulated_reasoning_duration_s=state.accumulated_reasoning_duration_s,
+        last_repeat_counts=dict(state.last_repeat_counts),
+        cumulative_cost_usd=state.cumulative_cost_usd,
+        cumulative_prompt_tokens=state.cumulative_prompt_tokens,
+        cumulative_completion_tokens=state.cumulative_completion_tokens,
+        lessons_learned=list(state.lessons_learned),
+        failure_attempts=dict(state.failure_attempts),
+    )
+
+
+def validate_suspension(
+    record: SuspensionRecord,
+    user_reply: str,
+    *,
+    secret: str,
+    max_age_s: float | None,
+) -> None:
+    """Validate a resume request: non-empty reply, token authenticity, staleness.
+
+    The single validator shared by ``Agent.resume`` and the bare-spine
+    ``resume_run``. Raises :class:`ValueError` for an empty reply,
+    :class:`SuspensionTokenMismatch` for a bad token, and
+    :class:`SuspensionExpired` when older than ``max_age_s`` (skip the staleness
+    check by passing ``None``).
+    """
+    if not user_reply or not user_reply.strip():
+        raise ValueError("resume requires a non-empty user_reply")
+    if not verify_suspension_token(record=record, secret=secret):
+        raise SuspensionTokenMismatch(f"suspension token failed verification for run_id={record.run_id!r}")
+    if max_age_s is not None:
+        age = (datetime.now(UTC) - record.suspended_at).total_seconds()
+        if age > max_age_s:
+            raise SuspensionExpired(f"suspension is {age:.0f}s old (max {max_age_s:.0f}s)")
+
+
 __all__ = [
     "SuspensionExpired",
     "SuspensionRequest",
     "SuspensionTokenMismatch",
+    "build_suspension_record",
     "compute_suspension_token",
+    "validate_suspension",
     "verify_suspension_token",
 ]

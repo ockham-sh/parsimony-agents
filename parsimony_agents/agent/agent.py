@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import tempfile
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
@@ -27,11 +28,10 @@ from parsimony_agents.agent.events import (
     ToolEvent,
 )
 from parsimony_agents.agent.helpers import (
-    TurnState,
-    render_connector_catalog,
+    parse_cell_ref as _parse_cell_ref,
 )
 from parsimony_agents.agent.helpers import (
-    parse_cell_ref as _parse_cell_ref,
+    render_connector_catalog,
 )
 from parsimony_agents.agent.helpers import (
     system_error as _system_error,
@@ -139,6 +139,16 @@ def _format_list_artifacts(
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class AgentUsage:
+    """Cumulative LLM usage for a single run."""
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cost_usd: float = 0.0
+    iterations: int = 0
+
+
 @dataclass
 class AgentResult:
     """Structured result from :meth:`Agent.ask`.
@@ -150,6 +160,9 @@ class AgentResult:
 
     text: str = ""
     """Concatenated assistant text (all ``TextDelta`` content)."""
+
+    usage: AgentUsage = field(default_factory=AgentUsage)
+    """Cumulative tokens / cost / iteration count for the run."""
 
     datasets: dict[str, Dataset] = field(default_factory=dict)
     """Returned :class:`Dataset` objects keyed by ``logical_id``."""
@@ -171,16 +184,20 @@ class AgentResult:
 
     @property
     def ok(self) -> bool:
-        """``True`` if the run finished without an error or terminal failure.
+        """``True`` if the run finished without a terminal failure.
 
         ``handoff`` and ``partial_run_summary`` are non-interactive terminal
-        failures (the agent gave up, or ran out of budget). They carry no
-        ``error`` event, so they must be checked explicitly — otherwise a run
-        that handed off on a missing API key or an unrecoverable provider error
-        would report ``ok``.
+        failures (the agent gave up, or ran out of budget). An ``error`` event
+        counts only when it is **not** recoverable — a transient blip the spine
+        successfully retried (``recoverable=True``) is not a run failure.
         """
-        failed = {"error", "handoff", "partial_run_summary"}
-        return not any(getattr(e, "type", None) in failed for e in self.events)
+        for e in self.events:
+            etype = getattr(e, "type", None)
+            if etype in ("handoff", "partial_run_summary"):
+                return False
+            if etype == "error" and not getattr(e, "recoverable", False):
+                return False
+        return True
 
     def _collect(self, event: Any) -> None:
         """Accumulate a single event into this result (called by :meth:`Agent.ask`)."""
@@ -190,6 +207,14 @@ class AgentResult:
             self.text += event.content
         elif etype == "state_snapshot":
             self.context = event.context
+            usage = getattr(event, "usage", None)
+            if usage:
+                self.usage = AgentUsage(
+                    prompt_tokens=usage.get("prompt_tokens", 0),
+                    completion_tokens=usage.get("completion_tokens", 0),
+                    cost_usd=usage.get("cost_usd", 0.0),
+                    iterations=usage.get("iterations", 0),
+                )
         elif etype == "tool_event" and getattr(event, "completed", False):
             result = getattr(event, "result", None)
             if result is None:
@@ -200,6 +225,13 @@ class AgentResult:
                 self.charts[result.logical_id] = result
             elif isinstance(result, Report) and result.logical_id:
                 self.reports[result.logical_id] = result
+            elif getattr(event, "tool_type", None) == "code" and isinstance(result, dict):
+                # A completed code ToolEvent carries {"notebook": Script, "preview": ...}.
+                # Key by notebook path; insertion order is execution order and a
+                # re-edit of the same path keeps the latest revision.
+                notebook = result.get("notebook")
+                if isinstance(notebook, Script):
+                    self.code[notebook.path] = notebook
 
 
 def _inject_connector_catalog(ctx: AgentContext, connectors: Any) -> None:
@@ -259,6 +291,7 @@ class Agent:
         model: str | None = None,
         api_key: str | None = None,
         connectors: Any | None = None,
+        workspace: str | Path | None = None,
         # --- Explicit params (product / power usage) ---
         model_config: dict[str, Any] | None = None,
         instructions: str | None = None,
@@ -273,10 +306,10 @@ class Agent:
         model_id: str | None = None,
         # --- Failure-handling spine ---
         # ``policy`` drives :func:`handle_failure` retry/backoff/handoff decisions
-        # (see :class:`DefaultPolicy`). ``suspension_secret`` is the HMAC key
-        # used to sign :class:`SuspensionRecord` tokens — when omitted, the
-        # session_id is reused (acceptable for in-process v1; v2 cross-process
-        # resume will require a real shared secret).
+        # (see :class:`DefaultPolicy`). ``suspension_secret`` is the HMAC key used
+        # to sign :class:`SuspensionRecord` tokens; if omitted it falls back to
+        # ``PARSIMONY_AGENTS_SUSPENSION_SECRET`` then to ``session_id`` (the latter
+        # is not forgery-resistant — see the resolution block below).
         policy: Any | None = None,
         suspension_secret: str | None = None,
         read_artifact_fn: Callable[
@@ -310,7 +343,22 @@ class Agent:
                 f"got {type(connectors).__name__}"
             )
 
-        # Resolve output_factory first (executor depends on it)
+        # Resolve the workspace directory (where artifacts persist). ``workspace=``
+        # is a convenience shorthand for the durable case; it is mutually exclusive
+        # with the explicit executor/factory wiring (one source of truth).
+        if workspace is not None and (code_executor is not None or output_factory is not None):
+            raise TypeError(
+                "workspace= cannot be combined with code_executor= or output_factory="
+                " — pass the directory to the factory you construct instead."
+            )
+
+        # Resolve output_factory first (executor depends on it). A given workspace
+        # roots a durable factory; otherwise default to a throwaway temp dir so a
+        # casual quickstart run does not litter the cwd with a .ockham/ tree.
+        if output_factory is None and code_executor is None and workspace is not None:
+            ws_dir = Path(workspace)
+            ws_dir.mkdir(parents=True, exist_ok=True)
+            output_factory = FrameworkOutputFactory(local_dir=ws_dir)
         output_factory = (
             output_factory
             or getattr(code_executor, "_output_factory", None)
@@ -387,9 +435,13 @@ class Agent:
                 self.edit_report,
                 self.refresh,
                 self.output_read,
-                self.output_search,
             ]
         )
+        # output_search runs over a host-supplied RAG file_store; only register
+        # it when one exists so the tool catalog (and the prompt) never advertise
+        # a search the run cannot perform.
+        if self.file_store is not None:
+            _system_tool_methods.append(self.output_search)
 
         # Explicit-termination tools. ``ask_user`` lets the agent pause for
         # clarification; ``return_done`` / ``return_unable`` are the explicit
@@ -408,19 +460,50 @@ class Agent:
         # which imports Failure from this package).
         from parsimony_agents.agent.failure import DefaultPolicy as _DefaultPolicy
 
-        self.policy = policy if policy is not None else _DefaultPolicy()
-        self.suspension_secret = suspension_secret if suspension_secret is not None else self.session_id
+        self.policy = (
+            policy
+            if policy is not None
+            else _DefaultPolicy(transient_retry_budget=self.guardrails.llm_max_retries)
+        )
+        # Suspension-token secret. Precedence: explicit arg > env var > session_id.
+        # The session_id fallback is integrity-decorative: a persisted
+        # SuspensionRecord carries session_id in plaintext, so anyone holding the
+        # record could recompute a valid token. Hosts that persist records (DB,
+        # browser) must supply a real secret.
+        if suspension_secret is not None:
+            self.suspension_secret = suspension_secret
+        elif os.environ.get("PARSIMONY_AGENTS_SUSPENSION_SECRET"):
+            self.suspension_secret = os.environ["PARSIMONY_AGENTS_SUSPENSION_SECRET"]
+        else:
+            self.suspension_secret = self.session_id
+            logger.warning(
+                "suspension_secret not provided; falling back to session_id. The resume "
+                "token is NOT forgery-resistant this way (session_id is stored in the "
+                "record). Pass suspension_secret= or set PARSIMONY_AGENTS_SUSPENSION_SECRET "
+                "if you persist or transmit SuspensionRecords."
+            )
         # AgentLike protocol completeness: ``run_loop`` reads ``agent.tools``
         # while the workspace code reads ``agent.system_tools`` — alias the two.
         self.tools = self.system_tools
 
         self._CODE_EDIT_TOOL_NAMES = {"return_notebook", "edit_notebook"}
 
-    def _record_agent_metrics(self, agent_span: Any, total_time: float, iteration_count: int) -> None:
+    def _record_agent_metrics(
+        self,
+        agent_span: Any,
+        total_time: float,
+        iteration_count: int,
+        *,
+        usage: dict[str, Any] | None = None,
+    ) -> None:
         if agent_span and agent_span.is_recording():
             agent_span.set_attribute("agent.total_duration_s", total_time)
             agent_span.set_attribute("agent.final_iterations", iteration_count)
             agent_span.set_attribute("agent.model", self.model_config.get("model", "unknown"))
+            if usage:
+                agent_span.set_attribute("agent.prompt_tokens", usage.get("prompt_tokens", 0))
+                agent_span.set_attribute("agent.completion_tokens", usage.get("completion_tokens", 0))
+                agent_span.set_attribute("agent.cost_usd", usage.get("cost_usd", 0.0))
 
     def _tool_timeout_seconds(self, tool_name: str, raw_args: dict[str, Any]) -> float:
         global_cap = self.guardrails.tool_timeout_s
@@ -478,8 +561,9 @@ class Agent:
 
             result = await agent.ask("Show me US GDP trends")
             print(result.text)        # assistant's text response
-            print(result.datasets)    # {"us_gdp": DataFrame}
-            print(result.code)        # {"main": "import pandas as ..."}
+            print(result.datasets)    # {"us_gdp": Dataset}
+            # result.code maps notebook path -> Script:
+            print(result.code["notebooks/gdp.py"].code)
             assert result.ok
         """
         result = AgentResult()
@@ -551,11 +635,8 @@ class Agent:
             from parsimony_agents.agent.local_store import build_local_session_state
 
             local_dir = Path(getattr(self.code_executor, "cwd", None) or ".")
-            ctx.session_state = build_local_session_state(self.code_executor, local_dir)
+            ctx.session_state = await build_local_session_state(self.code_executor, local_dir)
             ctx.local_discovery = True
-
-        # --- Legacy workspace turn state (still drives ref minting) --------
-        turn_state = TurnState()
 
         # --- Failure-handling spine state (mirrors ctx.messages 1:1) -------
         # ``state.messages`` is what pre_step / post_llm / render_for_llm read;
@@ -598,7 +679,7 @@ class Agent:
         )
         state.messages = list(ctx.messages)
 
-        hooks = WorkspaceRunHooks(agent=self, ctx=ctx, turn_state=turn_state,
+        hooks = WorkspaceRunHooks(agent=self, ctx=ctx,
                                   cancellation=cancellation, tool_choice=tool_choice,
                                   start_time=start_time, agent_span=agent_span)
         async for event in run_loop(hooks, state, cancellation=cancellation):
@@ -636,31 +717,17 @@ class Agent:
         :raises SuspensionExpired: the record is older than ``max_suspension_age_s``.
         :raises ValueError: ``user_reply`` is empty.
         """
-        from datetime import datetime
-
-        from parsimony_agents.agent.failure import (
-            SuspensionExpired,
-            SuspensionTokenMismatch,
-            verify_suspension_token,
-        )
+        from parsimony_agents.agent.failure import validate_suspension
         from parsimony_agents.agent.loop import run_loop
         from parsimony_agents.agent.state import RunState
         from parsimony_agents.agent.workspace_hooks import WorkspaceRunHooks
 
-        if not user_reply or not user_reply.strip():
-            raise ValueError("resume requires a non-empty user_reply")
-
-        if not verify_suspension_token(record=suspension, secret=self.suspension_secret):
-            raise SuspensionTokenMismatch(
-                f"suspension token failed verification for run_id={suspension.run_id!r}"
-            )
-
-        if max_suspension_age_s is not None:
-            age = (datetime.now(UTC) - suspension.suspended_at).total_seconds()
-            if age > max_suspension_age_s:
-                raise SuspensionExpired(
-                    f"suspension is {age:.0f}s old (max {max_suspension_age_s:.0f}s)"
-                )
+        validate_suspension(
+            suspension,
+            user_reply,
+            secret=self.suspension_secret,
+            max_age_s=max_suspension_age_s,
+        )
 
         agent_span = trace.get_current_span()
         logger.info(
@@ -706,7 +773,7 @@ class Agent:
             from parsimony_agents.agent.local_store import build_local_session_state
 
             local_dir = Path(getattr(self.code_executor, "cwd", None) or ".")
-            ctx.session_state = build_local_session_state(self.code_executor, local_dir)
+            ctx.session_state = await build_local_session_state(self.code_executor, local_dir)
             ctx.local_discovery = True
 
         # Re-apply the host's runtime-only ctx seams (report_validator,
@@ -719,17 +786,13 @@ class Agent:
         if configure_ctx is not None:
             await configure_ctx(ctx)
 
-        # --- Turn state carries forward refs minted before suspension -------
-        turn_state = TurnState(
-            minted_refs=list(suspension.minted_refs),
-            minted_live_names=dict(suspension.minted_live_names),
-        )
-
         # --- Spine state rebuilt from the record ----------------------------
-        state = RunState.from_suspension(suspension, cancellation=cancellation)
+        # from_suspension restores the minted-artifact ledger from the record, so
+        # refs minted before the suspension survive into the resumed run.
+        state = RunState.from_suspension(suspension)
         state.messages = list(ctx.messages)
 
-        # --- Append the user's reply as a normal user message (BRIEF §4.2) --
+        # --- Append the user's reply as a normal user message --
         reply_msg = AgentMessage(role="user", content=Text(content=user_reply.strip()))
         ctx.messages.append(reply_msg)
         state.messages.append(reply_msg)
@@ -746,7 +809,7 @@ class Agent:
         )
         state.messages = list(ctx.messages)
 
-        hooks = WorkspaceRunHooks(agent=self, ctx=ctx, turn_state=turn_state,
+        hooks = WorkspaceRunHooks(agent=self, ctx=ctx,
                                   cancellation=cancellation, tool_choice="auto",
                                   start_time=start_time, agent_span=agent_span)
         yield StateSnapshot(context=ctx)
@@ -1126,6 +1189,15 @@ class Agent:
             raise RuntimeError("Code executor has no working directory set.")
         return Path(cwd)
 
+    @property
+    def workspace(self) -> Path:
+        """The directory where this agent's artifacts persist.
+
+        With ``Agent(workspace=...)`` this is that path; otherwise it is the
+        per-instance temp directory chosen at construction.
+        """
+        return self._workspace_root()
+
     @toolmethod(
         name="write_file",
         description="Write or overwrite a text file in the workspace (UTF-8). Does not execute the file.",
@@ -1274,11 +1346,6 @@ class Agent:
                     "description": "summary | outline | page | full",
                     "enum": ["summary", "outline", "page", "full"],
                 },
-                "mode": {
-                    "type": "string",
-                    "description": "Deprecated alias for view (summary | full).",
-                    "enum": ["summary", "full"],
-                },
                 "locator": {
                     "type": "object",
                     "description": "Pagination locator, required for view=page.",
@@ -1297,7 +1364,6 @@ class Agent:
         live_name: str,
         kind: str,
         view: str | None = None,
-        mode: str | None = None,
         locator: dict | None = None,
         context: AgentContext,  # noqa: ARG002
     ) -> SystemToolOutput:
@@ -1307,7 +1373,6 @@ class Agent:
             )
         options: dict[str, Any] = {
             "view": view,
-            "mode": mode,
             "locator": locator,
         }
         result = await self._read_artifact_fn(live_name, kind, options)
@@ -1486,7 +1551,7 @@ class Agent:
                 producer_notebook_path=normalized,
                 seen_live_names=extract_seen_live_names(context.messages),
             )
-            return await self._stamp_notebook_ref(ko, canonical, normalized, context)
+            return ko
         return f"Published {normalized} (not executed; pass execute=true to run)."
 
     @toolmethod(
@@ -1550,7 +1615,7 @@ class Agent:
                 producer_notebook_path=path,
                 seen_live_names=extract_seen_live_names(context.messages),
             )
-            return await self._stamp_notebook_ref(ko, script.code, path, context)
+            return ko
         return f"Modified {path} (not executed; pass execute=true to run)."
 
     async def _notebook_script_after_tool(
@@ -1641,25 +1706,6 @@ class Agent:
         except ValueError:
             lid = csha
         return ArtifactRef(kind="notebook", logical_id=lid, content_sha=csha)
-
-    @classmethod
-    async def _stamp_notebook_ref(
-        cls,
-        ko: KernelOutput,
-        code: str,
-        working_copy_path: str,
-        context: AgentContext,
-    ) -> KernelOutput:
-        """Stamp ``KernelOutput.metadata['notebook_ref']`` so to_llm surfaces it.
-
-        Run after every kernel run kicked off by a code tool
-        (``return_notebook`` or ``edit_notebook`` with ``execute=True``).
-        The ref matches what the streaming layer's ``FileRefChunk`` emits
-        — the LLM sees identical refs from both surfaces.
-        """
-        ref = await cls._notebook_ref_for(code, working_copy_path, context)
-        ko.metadata = {**(ko.metadata or {}), "notebook_ref": ref.to_dict()}
-        return ko
 
     @toolmethod(
         name="return_dataset",
@@ -1779,8 +1825,9 @@ class Agent:
             "Visual contract: no title/subtitle in the chart spec (use the title "
             "parameter); legend orient='top|bottom|left|right'; size 640x400 fixed; "
             "explicit altair encodings (:Q :N :O :T); aggregate to ≤5000 points; "
-            "tooltips yes, zoom/pan no; dark theme background #0d0d0d, primary text "
-            "#f1f5f9, accent #3b82f6; positive/negative pair #10b981/#f87171."
+            "tooltips yes, zoom/pan no. The dark theme (background, fonts, axis/legend "
+            "colors) is applied automatically — do not set a background. Data colors: "
+            "accent #3b82f6, positive/negative pair #10b981/#f87171, annotation text #f1f5f9."
         ),
         parameters_schema={
             "type": "object",
@@ -1954,8 +2001,9 @@ class Agent:
                     "items": {"type": "string", "enum": ["html", "pdf", "pptx", "dashboard", "revealjs"]},
                     "description": (
                         "Output formats Quarto should produce. Defaults to ['html','pdf']. "
-                        "Slide formats (pptx, revealjs) slice the body on H2 boundaries — "
-                        "see section F of the system prompt for deck composition."
+                        "Slide formats (pptx, revealjs) slice the body on H2 boundaries; "
+                        "dashboard lays the body out as rows (H2) of cards (H3) and scrolls. "
+                        "See section F of the system prompt for per-intent composition."
                     ),
                 },
             },

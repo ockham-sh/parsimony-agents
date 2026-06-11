@@ -1,7 +1,5 @@
 """Structured failure-handling taxonomy and recovery primitives.
 
-See ``BRIEF-ai-failure-handling.md`` at the ockham workspace root for the design.
-
 This package owns the load-bearing types and the machinery around them:
 
 - :class:`FailureKind` — a closed enum naming every failure mode the framework recognises.
@@ -40,7 +38,9 @@ from parsimony_agents.agent.failure.suspension import (
     SuspensionExpired,
     SuspensionRequest,
     SuspensionTokenMismatch,
+    build_suspension_record,
     compute_suspension_token,
+    validate_suspension,
     verify_suspension_token,
 )
 from parsimony_agents.agent.failure.termination import TerminationRequest
@@ -65,6 +65,7 @@ __all__ = [
     "SuspensionTokenMismatch",
     "TerminationRequest",
     "accumulate_usage",
+    "build_suspension_record",
     "compute_suspension_token",
     "default_action_for",
     "handle_failure",
@@ -73,5 +74,6 @@ __all__ = [
     "post_tool",
     "pre_step",
     "record_tool_call",
+    "validate_suspension",
     "verify_suspension_token",
 ]

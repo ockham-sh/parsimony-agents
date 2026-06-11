@@ -455,7 +455,7 @@ _EMBED_URI_RE = re.compile(
 )
 
 # Body URI dir → canonical artifact kind. Charts live under ``charts/``;
-# datasets live under ``data/`` (matches VIRTUAL_LIVE_KINDS).
+# datasets live under ``data/``.
 _DIR_TO_KIND: dict[str, SnapshotKind] = {
     "charts": "chart",
     "data": "dataset",

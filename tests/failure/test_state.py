@@ -12,13 +12,14 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 
-from parsimony_agents.agent.failure import Action, Failure, FailureKind
-from parsimony_agents.agent.state import (
-    RunState,
-    SuspensionRecord,
+from parsimony_agents.agent.failure import (
+    Action,
+    Failure,
+    FailureKind,
     compute_suspension_token,
     verify_suspension_token,
 )
+from parsimony_agents.agent.state import RunState, SuspensionRecord
 
 
 def test_runstate_round_trips_through_json() -> None:
@@ -52,27 +53,12 @@ def test_runstate_round_trips_through_json() -> None:
     assert rehydrated.cumulative_cost_usd == 0.42
 
 
-def test_runstate_excludes_runtime_services_from_serialization() -> None:
-    """``files``, ``code_executor``, ``cancellation`` are ``Field(exclude=True)``."""
-    state = RunState(
-        run_id="r1",
-        session_id="s1",
-        files=object(),  # Any sentinel
-        code_executor=object(),
-        cancellation=object(),
-    )
-    payload = json.loads(state.model_dump_json())
-    assert "files" not in payload
-    assert "code_executor" not in payload
-    assert "cancellation" not in payload
-
-
-def test_turnsubstate_default_factory_isolation() -> None:
-    """Each :class:`RunState` gets its own :class:`TurnSubstate` (no shared mutable default)."""
+def test_runstate_minted_ledger_default_factory_isolation() -> None:
+    """Each :class:`RunState` gets its own minted-ref ledger (no shared mutable default)."""
     s1 = RunState(run_id="r1", session_id="s1")
     s2 = RunState(run_id="r2", session_id="s2")
-    s1.turn.tool_calls_this_turn = 5
-    assert s2.turn.tool_calls_this_turn == 0
+    s1.minted_live_names["dataset:x"] = "gdp"
+    assert s2.minted_live_names == {}
 
 
 def test_record_failure_attempt_increments() -> None:

@@ -1,11 +1,10 @@
 """Published deliverables (datasets, charts, reports) — content-addressed identity.
 
-Datasets, Charts, and Reports follow the dual-identity model defined in
-``CONTENT_ADDRESSED_ARTIFACTS_PLAN.md`` §2.1:
+Datasets, Charts, and Reports follow a dual-identity model:
 
 - ``logical_id`` — "Which artifact is this?" derived from inputs minus
   their content. Stable across data refreshes. Computed from the
-  per-kind formulas in :mod:`parsimony_agents.identity` (§2.2).
+  per-kind formulas in :mod:`parsimony_agents.identity`.
 - ``content_sha`` — "What does it currently look like?" hash of the
   rendered bytes. Computed at persist time by the framework, not the
   agent.
@@ -24,7 +23,7 @@ values pointing at frozen snapshots of upstream artifacts:
 Curation (title, description, tags, notes, live_name) is embedded in
 the artifact for in-process use and ALSO mirrored to a sidecar
 ``.ockham/<kind>/<logical_id>/curation.json`` for editable, identity-stable
-renames. The embedded form is **frozen at persist time** (§5.9): a
+renames. The embedded form is **frozen at persist time**: a
 later rename of the title bumps the sidecar but never rewrites bytes.
 
 Payload contract (single, typed):
@@ -50,7 +49,6 @@ from typing import Any, Literal
 
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from parsimony_agents._naming import slug_from_title
 from parsimony_agents.agent.xml_render import escape_attr, escape_text
 from parsimony_agents.execution.outputs import DataFrameObject, FigureObject
 from parsimony_agents.identity import ArtifactRef
@@ -73,7 +71,7 @@ class _ArtifactBase(MessageContent):
     description: str = ""
     tags: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
-    #: ``None`` → hidden from the live workspace tree (§4.6).
+    #: ``None`` → hidden from the live workspace tree.
     #: Empty string sentinel mapped to a slugged default at persist time
     #: by the artifact registry.
     live_name: str | None = None
@@ -432,8 +430,3 @@ def _refs_blocks(name: str, refs: list[ArtifactRef]) -> list[dict[str, Any]]:
         out.append({"type": "text", "text": f"  {r.to_self_closing_tag()}\n"})
     out.append({"type": "text", "text": f"</{name}>\n"})
     return out
-
-
-def derive_live_name(title: str) -> str:
-    """Derive a file-tree-friendly slug from a curation title (§4.6 default)."""
-    return slug_from_title(title)

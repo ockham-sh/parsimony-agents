@@ -1,6 +1,6 @@
 """Framework-level agent events (transport-agnostic).
 
-Event taxonomy for the failure-handling system (BRIEF §1.A, §4):
+Event taxonomy for the failure-handling system:
 
 - :class:`TextDelta`, :class:`ReasoningDelta`, :class:`ToolEvent`, :class:`StateSnapshot`,
   :class:`RunCancelled` — turn-shape events.
@@ -67,6 +67,9 @@ class StateSnapshot(AgentEvent):
 
     type: Literal["state_snapshot"] = "state_snapshot"
     context: Any  # AgentContext (Any avoids circular import)
+    #: Cumulative run usage, set only on the final (run-complete) snapshot:
+    #: ``{"prompt_tokens", "completion_tokens", "cost_usd", "iterations"}``.
+    usage: dict[str, Any] | None = None
 
 
 class AgentError(AgentEvent):

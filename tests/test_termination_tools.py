@@ -54,9 +54,6 @@ async def test_return_done_whitespace_only_summary_raises_value_error() -> None:
 
 def test_return_done_tool_metadata() -> None:
     assert return_done.tool_type == "system"
-    assert return_done.idempotent is True  # multiple calls are no-ops; first wins
-    assert return_done.parallelizable is False
-    assert return_done.retryable_on_error is False
 
 
 # ---------------------------------------------------------------------------
@@ -89,9 +86,6 @@ async def test_return_unable_empty_rationale_raises_value_error() -> None:
 
 def test_return_unable_tool_metadata() -> None:
     assert return_unable.tool_type == "system"
-    assert return_unable.idempotent is False
-    assert return_unable.parallelizable is False
-    assert return_unable.retryable_on_error is False
 
 
 # ---------------------------------------------------------------------------
@@ -128,9 +122,6 @@ async def test_ask_user_empty_question_raises_value_error() -> None:
 
 def test_ask_user_tool_metadata() -> None:
     assert ask_user.tool_type == "system"
-    assert ask_user.idempotent is True
-    assert ask_user.parallelizable is False
-    assert ask_user.retryable_on_error is False
 
 
 # ---------------------------------------------------------------------------

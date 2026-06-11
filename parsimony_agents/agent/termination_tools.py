@@ -11,7 +11,7 @@ Three tools, all ``tool_type="system"``:
   :class:`~parsimony_agents.agent.failure.suspension.SuspensionRequest`; the loop
   catches it and emits :class:`~parsimony_agents.agent.events.UserInputRequested`.
 
-These replace the implicit "agent stopped talking" termination signal (BRIEF gap #9):
+These replace the implicit "agent stopped talking" termination signal:
 the loop only exits when one of these tools runs (or a budget exhaustion fires).
 """
 
@@ -57,9 +57,6 @@ return_done = Tool(
         "required": ["summary"],
     },
     tool_type="system",
-    idempotent=True,  # multiple calls in one batch: first wins, rest no-op.
-    parallelizable=False,
-    retryable_on_error=False,
 )
 
 
@@ -108,9 +105,6 @@ return_unable = Tool(
         "required": ["blockers", "rationale"],
     },
     tool_type="system",
-    idempotent=False,
-    parallelizable=False,
-    retryable_on_error=False,
 )
 
 
@@ -171,9 +165,6 @@ ask_user = Tool(
         "required": ["question"],
     },
     tool_type="system",
-    idempotent=True,
-    parallelizable=False,
-    retryable_on_error=False,
 )
 
 

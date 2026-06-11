@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
-from parsimony.result import ColumnRole, Provenance
-
 from types import SimpleNamespace
+
+from parsimony.result import ColumnRole, Provenance
 
 from parsimony_agents.agent.agent import AgentResult
 from parsimony_agents.agent.events import Handoff, PartialRunSummary
 from parsimony_agents.artifacts import Report
 from parsimony_agents.display import (
-    _PlainDisplay,
-    _RichDisplay,
     _chart_summary,
     _format_handoff,
     _format_partial_summary,
     _pick_display_columns,
+    _PlainDisplay,
+    _RichDisplay,
     _title_from_preview,
 )
 from parsimony_agents.execution.outputs import FetchLogEntry

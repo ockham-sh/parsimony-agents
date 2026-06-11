@@ -35,7 +35,7 @@ from parsimony_agents.agent.session_state import (
     KernelVariableSummary,
     SessionState,
     WorkspaceArtifactLine,
-    kernel_summaries_from_locals_map,
+    parse_kernel_summaries_from_remote,
 )
 from parsimony_agents.identity import ArtifactRef
 
@@ -236,13 +236,19 @@ def collect_local_artifact_lines(local_dir: Path, *, max_items: int = 48) -> lis
     return [line for _, line in scored[:max_items]]
 
 
-def build_local_session_state(executor: Any, local_dir: Path) -> SessionState:
-    """Assemble a :class:`SessionState` from the local kernel + ``.ockham/`` tree."""
+async def build_local_session_state(executor: Any, local_dir: Path) -> SessionState:
+    """Assemble a :class:`SessionState` from the local kernel + ``.ockham/`` tree.
+
+    Reads kernel variables through the ``kernel_summaries`` seam every executor
+    overrides — not ``get_locals``, which an out-of-process executor cannot
+    populate (its objects live in another process), so a sandboxed standalone run
+    would otherwise show a silently-empty namespace.
+    """
     kernel: list[KernelVariableSummary] = []
-    get_locals = getattr(executor, "get_locals", None)
-    if callable(get_locals):
+    summaries = getattr(executor, "kernel_summaries", None)
+    if callable(summaries):
         try:
-            kernel = kernel_summaries_from_locals_map(get_locals())
+            kernel = parse_kernel_summaries_from_remote(await summaries())
         except Exception as exc:  # noqa: BLE001 — kernel hints are best-effort
             logger.info("local session_state: kernel summary skipped: %s", exc)
     return SessionState(kernel=kernel, workspace_artifacts=collect_local_artifact_lines(local_dir))

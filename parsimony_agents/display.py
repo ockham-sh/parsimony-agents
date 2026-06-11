@@ -20,6 +20,7 @@ Usage::
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from typing import Any, Protocol
@@ -28,7 +29,7 @@ import pandas as pd
 from parsimony.result import ColumnRole
 
 from parsimony_agents.agent.agent import Agent, AgentResult
-from parsimony_agents.artifacts import Dataset, Report
+from parsimony_agents.artifacts import Dataset
 from parsimony_agents.execution.outputs import FetchLogEntry
 
 try:
@@ -366,6 +367,7 @@ class DisplayBackend(Protocol):
         notebook_count: int,
         error_count: int,
         report_count: int = 0,
+        usage: Any = None,
     ) -> None: ...
 
 
@@ -449,10 +451,8 @@ class _RichDisplay:
                 return
             except Exception:
                 # Live failed mid-stream — drop to raw passthrough for the rest.
-                try:
+                with contextlib.suppress(Exception):
                     self._live.stop()
-                except Exception:
-                    pass
                 self._live = None
         # Fallback path: raw text, markup disabled so brackets are not mangled.
         self._console.print(chunk, end="", markup=False, highlight=False)
@@ -460,14 +460,10 @@ class _RichDisplay:
     def end_response(self, full_text: str) -> None:
         text = full_text or self._response_buffer
         if self._live is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._live.update(Markdown(text))
-            except Exception:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 self._live.stop()
-            except Exception:
-                pass
             self._live = None
         self._response_buffer = ""
         self._console.print()
@@ -711,6 +707,7 @@ class _RichDisplay:
         notebook_count: int,
         error_count: int,
         report_count: int = 0,
+        usage: Any = None,
     ) -> None:
         label = "ok" if ok else "!!"
         style = "green" if ok else "red"
@@ -728,6 +725,9 @@ class _RichDisplay:
             parts.append(f"{notebook_count} notebook{'s' if notebook_count != 1 else ''}")
         if error_count:
             parts.append(f"[red]{error_count} error{'s' if error_count != 1 else ''}[/]")
+        usage_part = _format_usage(usage)
+        if usage_part:
+            parts.append(usage_part)
         icon = f"[bold {style}]{label}[/]"
         self._console.print(f"  {icon}  {' | '.join(parts)}")
         self._console.print()
@@ -978,6 +978,7 @@ class _PlainDisplay:
         notebook_count: int,
         error_count: int,
         report_count: int = 0,
+        usage: Any = None,
     ) -> None:
         label = "ok" if ok else "!!"
         parts = [f"Completed in {elapsed:.1f}s"]
@@ -993,6 +994,9 @@ class _PlainDisplay:
             parts.append(f"{notebook_count} notebook{'s' if notebook_count != 1 else ''}")
         if error_count:
             parts.append(f"{error_count} error{'s' if error_count != 1 else ''}")
+        usage_part = _format_usage(usage)
+        if usage_part:
+            parts.append(usage_part)
         print(f"--- {label} " + "-" * (55 - len(label)))
         print(f"  {label}  {' | '.join(parts)}")
         print()
@@ -1016,6 +1020,20 @@ def _bullet_section(lines: list[str], title: str, items: list[str]) -> None:
     lines.append("")
     lines.append(f"{title}:")
     lines.extend(f"  - {item}" for item in items)
+
+
+def _format_usage(usage: Any) -> str:
+    """Render an :class:`AgentUsage` as ``N tok / $X`` (empty when unknown)."""
+    if usage is None:
+        return ""
+    total = getattr(usage, "prompt_tokens", 0) + getattr(usage, "completion_tokens", 0)
+    if not total:
+        return ""
+    out = f"{total:,} tok"
+    cost = getattr(usage, "cost_usd", 0.0)
+    if cost:
+        out += f" / ${cost:.4f}"
+    return out
 
 
 def _format_handoff(event: Any) -> str:
@@ -1122,11 +1140,18 @@ async def stream_to_display(
                 display.stream_text(event.content)
 
             elif etype == "error":
+                # A recoverable error is one the spine retried/narrowed — not a
+                # run failure, so don't render a red panel or count it.
+                if getattr(event, "recoverable", False):
+                    continue
                 error_count += 1
                 display.spinner_stop()
+                failure = getattr(event, "error_type", None) or (
+                    event.failure.kind.value if getattr(event, "failure", None) else None
+                )
                 display.show_error(
                     getattr(event, "message", "Unknown error"),
-                    error_type=getattr(event, "error_type", None),
+                    error_type=failure,
                 )
 
             elif etype == "handoff":
@@ -1181,6 +1206,7 @@ async def stream_to_display(
         notebook_count=len(result.code),
         error_count=error_count,
         report_count=len(result.reports),
+        usage=result.usage,
     )
 
     return result
@@ -1235,4 +1261,5 @@ def display_result(
         notebook_count=len(result.code),
         error_count=sum(1 for e in result.events if getattr(e, "type", None) == "error"),
         report_count=len(result.reports),
+        usage=result.usage,
     )

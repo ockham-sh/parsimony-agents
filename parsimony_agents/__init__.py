@@ -11,17 +11,21 @@ Quick start::
 
 from __future__ import annotations
 
-from parsimony_agents.agent.agent import Agent, AgentResult
+from parsimony_agents.agent.agent import Agent, AgentResult, AgentUsage
+from parsimony_agents.agent.cancellation import CancellationRequest
+from parsimony_agents.agent.config import AgentGuardrails, FileStore
+from parsimony_agents.agent.events import UserInputRequested
+from parsimony_agents.agent.failure import SuspensionExpired, SuspensionTokenMismatch
+from parsimony_agents.agent.outputs import ArtifactLlmResult
+from parsimony_agents.agent.state import SuspensionRecord
 from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.chart_io import (
     deserialize_chart,
     read_chart,
-    serialize_chart,
 )
 from parsimony_agents.dataset_io import (
     deserialize_dataset,
     read_dataset,
-    serialize_dataset,
 )
 from parsimony_agents.display import display_result, stream_to_display
 from parsimony_agents.notebook import Script, ScriptPreview
@@ -38,12 +42,21 @@ from parsimony_agents.notebook_io import (
 
 __all__ = [
     "Agent",
+    "AgentGuardrails",
     "AgentResult",
+    "AgentUsage",
+    "ArtifactLlmResult",
+    "CancellationRequest",
     "Chart",
     "Dataset",
+    "FileStore",
     "Report",
     "Script",
     "ScriptPreview",
+    "SuspensionExpired",
+    "SuspensionRecord",
+    "SuspensionTokenMismatch",
+    "UserInputRequested",
     "decode_notebook_state",
     "deserialize_chart",
     "deserialize_dataset",
@@ -56,8 +69,6 @@ __all__ = [
     "read_notebook",
     "save_notebook",
     "save_notebook_state",
-    "serialize_chart",
-    "serialize_dataset",
     "serialize_notebook",
     "stream_to_display",
 ]
