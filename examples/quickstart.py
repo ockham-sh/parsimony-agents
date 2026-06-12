@@ -3,12 +3,12 @@
 Prerequisites::
 
     pip install parsimony-agents[display]
-    export GEMINI_API_KEY="..."             # or any litellm-supported provider
+    export ANTHROPIC_API_KEY="..."          # or any litellm-supported provider
     export FRED_API_KEY="..."               # free: https://fred.stlouisfed.org/docs/api/api_key.html
 
 Run::
 
-    python -m parsimony_agents.examples.quickstart
+    python examples/quickstart.py
 
 For direct event access (custom UIs, websockets), see ``event_stream.py``.
 
@@ -38,7 +38,7 @@ async def main() -> None:
         return
 
     agent = Agent(
-        model="gemini/gemini-3-flash-preview",
+        model="claude-sonnet-4-6",
         connectors=FRED.bind(api_key=fred_key),
     )
 

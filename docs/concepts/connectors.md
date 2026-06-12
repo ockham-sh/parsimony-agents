@@ -151,7 +151,7 @@ Every connector call produces a record. These accumulate on the `KernelOutput` o
 - **`column_names`** — the column names, plus head/tail samples for the LLM to inspect,
 - **`data_object_ref`** — an `ArtifactRef` pointing at the persisted parquet snapshot in the data-object pool (present when the persister ran).
 
-The persister writes each fetch result to an immutable, content-addressed file:
+The persister writes each fetch result to an immutable, content-addressed file. For production deployments, this lives in the durable workspace; for development and standalone library use, it falls back to the current working directory:
 
 ```
 .ockham/objects/<content_sha[:2]>/<content_sha[2:]>.parquet

@@ -407,7 +407,7 @@ plain backend takes over.
 
 - [Events](../concepts/events.md) — the event model and the agent loop that emits it.
 - [Events reference](../reference/events.md) — every event class and its fields.
-- [Agent, AgentResult, AgentConfig, AgentGuardrails](../reference/agent.md) — the
+- [Agent, AgentResult, AgentGuardrails](../reference/agent.md) — the
   result container and run/ask/resume signatures.
 - [Multi-turn conversations](../guides/multi-turn.md) — reusing `result.context`.
 - [Suspend and resume](../guides/suspend-resume.md) — handling `UserInputRequested`.

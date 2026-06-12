@@ -6,6 +6,65 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [0.1.0] - Unreleased
 
+### Usefulness sweep
+
+Loop-merge, prompt/runtime truth pass, dead-weight removal, and small features
+from a repo-wide review.
+
+**Fixed**
+
+- The OSS default connector bundle is now bound into the kernel as `connectors`
+  (the name the prompt teaches), not `client` — standalone agent code no longer
+  NameErrors on the documented name.
+- `KernelOutput` paginator no longer sends a 1–2-page DataFrame to the LLM twice
+  (resolved page indices are de-duplicated).
+- The in-kernel exception and timeout paths now keep whatever the cell printed
+  before failing (Jupyter-parity: partial output + traceback), instead of
+  discarding it.
+- `AgentResult.code` is now populated (notebook path → `Script`); a transient
+  error the spine retried (`recoverable=True`) no longer flips `AgentResult.ok`
+  to `False`.
+- The phase-boundary stall detector no longer fires spuriously after a long
+  workspace tool batch (the clock is bumped on every dispatch path and reset on
+  handle); a real stall gets its own corrective message distinct from the
+  text-only-response one.
+- A one-off recovery `pending_instruction` is cleared after the next successful
+  LLM call (was never cleared) and rendered after the history, not before it.
+- `output_search` is registered (and advertised) only when a `file_store` exists,
+  and keyword-only `hybrid_search` no longer needs an embedding key.
+- The default tool-dispatch path enforces `tool_timeout_s`; `llm_max_retries` is
+  now wired into the transient-provider retry budget instead of being dead.
+- `build_local_session_state` reads the `kernel_summaries` seam, so a
+  standalone run shows real kernel variables instead of an empty namespace.
+
+**Changed**
+
+- **Single run state.** The minted-artifact ledger (`minted_refs` /
+  `minted_live_names`) moved onto run-lifetime `RunState` (was a per-iteration
+  `TurnSubstate` / a parallel legacy `TurnState` that the suspension snapshot
+  never read — minted refs were silently lost across suspend/resume). One
+  `build_suspension_record` and one `validate_suspension` now back both the
+  `ask_user` and recovery suspension paths.
+- The `Agent` constructor accepts `workspace=` (durable artifact dir) and exposes
+  an `agent.workspace` property; `AgentResult` gains a `usage` struct (tokens /
+  cost / iterations), surfaced in the CLI status line; the per-iteration context
+  shows a `<budget .../>` line.
+- Suspension secret resolution: `suspension_secret=` > `PARSIMONY_AGENTS_SUSPENSION_SECRET`
+  > `session_id`, with a one-time warning on the (non-forgery-resistant) fallback.
+- Top-level package re-exports the documented host surface (`AgentGuardrails`,
+  `FileStore`, `UserInputRequested`, `SuspensionRecord`, the suspension
+  exceptions, `CancellationRequest`).
+
+**Removed**
+
+- Dead/duplicate surfaces: `AgentConfig` (fictional `Agent(config=...)`),
+  the unread tool structural flags
+  (`idempotent`/`parallelizable`/`retryable_on_error`/`timeout_s`),
+  `read_artifact(mode=)`, `artifacts.derive_live_name`,
+  the dead `quality/` package, `theme.py` chart-config scaffolding,
+  `virtual_path.py`, the `AgentContextSnapshot.connectors_catalog` channel,
+  `_stamp_notebook_ref`, and dead RAG store aliases.
+
 ### Changed
 
 - Standalone `Agent` now fully persists `return_*` deliverables (dataset / chart
@@ -26,6 +85,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- `BaseCodeExecutor.kernel_summaries()` — JSON-ready per-variable summaries of
+  the kernel namespace, computed from `get_locals()` (an overridable seam for
+  executors whose namespace lives elsewhere).
+- `display(...)` of a connector `Result` is a dual projection: a displayed
+  `TabularResult` yields a `DataFrameObject` so the human UI keeps the full
+  interactive table, while the LLM sees the result's governed `to_llm()` (schema
+  + sample, `exclude_from_llm_view` columns enforced) carried on
+  `DataFrameObject.governed_llm_text`. An opaque `Result` (no frame) renders as a
+  structural `to_llm()` preview. Neither dumps an unbounded payload into context.
 - `Agent` / `DataAgent` with convenience and power APIs
 - `ask()` method for structured responses (`AgentResult`)
 - `run()` method for event streaming

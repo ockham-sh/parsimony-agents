@@ -47,7 +47,7 @@ Agents write Python code that runs in a sandboxed executor. Every data fetch is 
 
 ```python
 # Agent writes this code automatically:
-result = await client["fred_fetch"](series_id="GDPC1", observation_start="2005-01-01")
+result = await connectors["fred_fetch"](series_id="GDPC1", observation_start="2005-01-01")
 gdp = result.data  # pandas DataFrame with provenance attached
 ```
 

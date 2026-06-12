@@ -248,4 +248,4 @@ if __name__ == "__main__":
 - [Events](../concepts/events.md) and [Events reference](../reference/events.md) — `UserInputRequested`, `RunCancelled`, and the full event stream.
 - [Multi-turn conversations](multi-turn.md) — continuing a conversation when the agent does *not* suspend.
 - [Embedding in a host application](embedding-in-a-host.md) — wiring the agent into a server, including persistence concerns.
-- [Agent, AgentResult, AgentConfig, AgentGuardrails](../reference/agent.md) — `Agent.run`, `Agent.resume`, and construction parameters including `suspension_secret`.
+- [Agent, AgentResult, AgentGuardrails](../reference/agent.md) — `Agent.run`, `Agent.resume`, and construction parameters including `suspension_secret`.

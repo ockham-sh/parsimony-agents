@@ -133,7 +133,7 @@ Start here, then jump to the page that matches what you're doing.
 - [Embedding in a host application](guides/embedding-in-a-host.md)
 
 **Reference** — exact signatures
-- [Agent, AgentResult, AgentConfig, AgentGuardrails](reference/agent.md)
+- [Agent, AgentResult, AgentGuardrails](reference/agent.md)
 - [Agent tools](reference/agent-tools.md)
 - [Events reference](reference/events.md)
 - [Artifacts reference](reference/artifacts.md)

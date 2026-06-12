@@ -508,7 +508,7 @@ f"<tag>{value}</tag>"
 
 - [Events](../concepts/events.md) — narrative overview of the event model.
 - [Streaming and displaying results](../guides/streaming-and-displaying-results.md) — consuming events with `stream_to_display`.
-- [Agent, AgentResult, AgentConfig, AgentGuardrails](agent.md) — the `run` / `ask` / `resume` API and `AgentResult`.
+- [Agent, AgentResult, AgentGuardrails](agent.md) — the `run` / `ask` / `resume` API and `AgentResult`.
 - [Agent tools](agent-tools.md) — the tools referenced by `ToolEvent.tool_name` / `tool_type`.
 - [Failure handling & recovery](../concepts/failure-and-recovery.md) — the `Failure` model behind `AgentError.failure`.
 - [Suspend and resume](../guides/suspend-resume.md) — handling `UserInputRequested`.

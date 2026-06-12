@@ -488,7 +488,7 @@ so always drive them with `async for` / `await` from an `asyncio.run` entrypoint
 
 ## See also
 
-- [Agent, AgentResult, AgentConfig, AgentGuardrails](agent.md) — constructing and configuring the agent.
+- [Agent, AgentResult, AgentGuardrails](agent.md) — constructing and configuring the agent.
 - [Events reference](events.md) — the `ToolEvent` and other events these tools emit.
 - [Artifacts reference](artifacts.md) — the `Dataset`, `Chart`, `Report`, and notebook types the return tools publish.
 - [Code execution](../concepts/code-execution.md) — how the code tools reach the kernel.

@@ -1,6 +1,6 @@
-# Agent, AgentResult, AgentConfig, AgentGuardrails
+# Agent, AgentResult, AgentGuardrails
 
-The user-facing API surface for building and running a data-analysis agent. This page is the authoritative reference for the `Agent` constructor and its methods, the `AgentResult` container, the configuration types (`AgentConfig`, `AgentGuardrails`, `FileStore`), the multi-turn carrier (`AgentContext`, `AgentMessage`), the cancellation handle (`CancellationRequest`), and the run-state / suspension types (`RunState`, `SuspensionRecord`).
+The user-facing API surface for building and running a data-analysis agent. This page is the authoritative reference for the `Agent` constructor and its methods, the `AgentResult` container, the configuration types (`AgentGuardrails`, `FileStore`), the multi-turn carrier (`AgentContext`, `AgentMessage`), the cancellation handle (`CancellationRequest`), and the run-state / suspension types (`RunState`, `SuspensionRecord`).
 
 The two most commonly imported symbols come straight off the top-level package:
 
@@ -117,10 +117,6 @@ agent = Agent(
     guardrails=AgentGuardrails(max_iterations=20, max_execution_time_s=600),
 )
 ```
-
-### Bundling expert params with `AgentConfig`
-
-`AgentConfig` is a convenience dataclass that groups the expert parameters into one object, but the `Agent` constructor does **not** accept a `config=` keyword — there is no such parameter. To use it, spread its fields into the constructor yourself. See [AgentConfig](#agentconfig) below.
 
 ---
 
@@ -370,53 +366,6 @@ A single message in the conversation.
 | `role` | `str` | One of `"system"`, `"user"`, `"assistant"`. |
 | `content` | `AgentMessageContent \| None` | The message payload — `Text`, `KernelOutput`, `Dataset`, `Chart`, `Report`, `Script`, `AgentContextSnapshot`, tool output, or `str`. |
 | `metadata` | `dict[str, Any]` | Optional per-message metadata. |
-
----
-
-## AgentConfig
-
-`AgentConfig` is a dataclass bundle of the expert-level constructor parameters. The `Agent` constructor does **not** accept a `config=` keyword today, so you spread the bundle's fields into the constructor yourself (e.g. with `**`). The convenience parameters (`model`, `api_key`, `connectors`) remain direct keyword args.
-
-**Import:** `from parsimony_agents.agent.config import AgentConfig`
-
-```python
-@dataclass
-class AgentConfig:
-    model_config: dict[str, Any] | None = None
-    instructions: str | None = None
-    code_executor: Any | None = None
-    output_factory: Any | None = None
-    guardrails: AgentGuardrails = field(default_factory=AgentGuardrails)
-    session_id: str | None = None
-    file_store: Any | None = None
-```
-
-| Field | Type | Default | Meaning |
-|---|---|---|---|
-| `model_config` | `dict[str, Any] \| None` | `None` | Explicit model configuration. |
-| `instructions` | `str \| None` | `None` | System prompt override. |
-| `code_executor` | `Any \| None` | `None` | Code-execution backend (typed `Any` to avoid a circular import; expects a `BaseCodeExecutor`). |
-| `output_factory` | `Any \| None` | `None` | Artifact factory / workspace root (expects an `OutputFactory`). |
-| `guardrails` | `AgentGuardrails` | `AgentGuardrails()` | Safety limits and timeouts. |
-| `session_id` | `str \| None` | `None` | Session identifier. |
-| `file_store` | `Any \| None` | `None` | Session-scoped file storage (expects a `FileStore`). |
-
-```python
-from dataclasses import fields
-
-from parsimony_agents import Agent
-from parsimony_agents.agent.config import AgentConfig, AgentGuardrails
-
-cfg = AgentConfig(
-    model_config={"model": "gpt-4o"},
-    guardrails=AgentGuardrails(max_iterations=20),
-)
-
-# AgentConfig is not consumed by the constructor — spread its fields yourself.
-# Use a shallow spread (NOT dataclasses.asdict, which would deep-convert the
-# nested AgentGuardrails into a dict).
-agent = Agent(**{f.name: getattr(cfg, f.name) for f in fields(cfg)})
-```
 
 ---
 

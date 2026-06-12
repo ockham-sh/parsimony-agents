@@ -298,4 +298,4 @@ cancellation flow.
 - [Suspend and resume](suspend-resume.md) — continuing a run that asked for input.
 - [Retrieval (RAG)](retrieval-rag.md) — how the per-session vector/keyword stores are searched.
 - [Events](../concepts/events.md) — the full `StateSnapshot` / event reference.
-- [Agent, AgentResult, AgentConfig, AgentGuardrails](../reference/agent.md) — API reference.
+- [Agent, AgentResult, AgentGuardrails](../reference/agent.md) — API reference.

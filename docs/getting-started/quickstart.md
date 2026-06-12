@@ -118,9 +118,9 @@ if __name__ == "__main__":
 | `events` | `list[Any]` | The full event log yielded during the run. |
 | `ok` | `bool` (property) | `True` when the run produced no error, handoff, or partial_run_summary event. |
 
-`ok` is a computed property: it is `True` only if the run produced none of `error`, `handoff`, or `partial_run_summary` events — so it is `False` on an error, a handoff (the agent gave up), or a partial/incomplete run (e.g. budget exhausted), even though handoff and partial-run summaries carry no separate error event. `assert result.ok` is a quick check that the run completed cleanly.
+`ok` is a computed property: it is `True` unless the run produced a non-recoverable `error`, a `handoff` (the agent gave up), or a `partial_run_summary` — a transient error the spine successfully retried (`recoverable=True`) does **not** make a run not-ok. `assert result.ok` is a quick check that the run completed cleanly.
 
-> **`code` is not yet wired.** The `code` field is declared on `AgentResult`, but the collection step that builds the result (`AgentResult._collect`, shared by both `ask()` and `stream_to_display`) only ever populates `text`, `context`, `datasets`, and `charts`. Nothing assigns to `code`, so after a run `result.code` is **always an empty dict**. Treat it as reserved/not-yet-implemented — do not rely on it to recover the notebook source the agent ran.
+`result.code` maps each returned notebook's path to its `Script` (e.g. `result.code["notebooks/gdp.py"].code`), in execution order. `result.usage` carries cumulative `prompt_tokens` / `completion_tokens` / `cost_usd` / `iterations` for the run.
 
 ## Stream events instead of waiting (preview of `run()`)
 
@@ -175,15 +175,14 @@ result = await stream_to_display(
 
 When the agent fetches data and analyzes it, it does not just describe the answer in prose — it publishes typed **artifacts**, which is what populates `AgentResult`:
 
-- **Datasets** (`result.datasets`) — each value is a `Dataset` artifact wrapping a tabular result, keyed by its content-derived `logical_id`. Returned via the agent's `return_dataset` tool.
+- **Datasets** (`result.datasets`) — each value is a `Dataset` artifact wrapping a tabular result, keyed by its `logical_id`. Returned via the agent's `return_dataset` tool.
 - **Charts** (`result.charts`) — each value is a `Chart` artifact (a Vega-Lite spec), keyed by `logical_id`. Returned via `return_chart`.
 - **Reports** (`result.reports`) — each value is a `Report` artifact (a Quarto `.qmd` body), keyed by `logical_id`. Returned via `return_report`.
+- **Notebooks** (`result.code`) — each value is the `Script` the agent ran, keyed by notebook path.
 
-These are the deliverable artifact types `AgentResult` surfaces today. (`result.code` is declared for `Script` artifacts but is not yet populated — see the note under [`AgentResult` fields](#agentresult-fields).)
+`Dataset`, `Chart`, and `Report` are all importable from the top-level package (`from parsimony_agents import Dataset, Chart, Report`). The keys are `logical_id`s — stable identity hashes derived from each artifact's recipe (producing notebooks, variable name, sources), **not** its content — so a refreshed dataset keeps the same key while its content evolves, which is what makes lineage and re-use automatic. Content addressing applies to the immutable `<content_sha>.<ext>` snapshot files on disk, not these dict keys. The deeper model is covered in [Artifacts, identity & lineage](../concepts/artifacts.md).
 
-`Dataset`, `Chart`, and `Report` are all importable from the top-level package (`from parsimony_agents import Dataset, Chart, Report`). Because the keys are content-addressed `logical_id`s, the same content always lands under the same key, which is what makes lineage and re-use automatic. The deeper model — logical identity versus content hash — is covered in [Artifacts, identity & lineage](../concepts/artifacts.md).
-
-Results also live durably on disk, not just in memory. As each deliverable is returned, the framework persists it (and the notebook that produced it) to a content-addressed `.ockham/<kind>s/<logical_id>/` tree — `curation.json`, an append-only `log.jsonl`, and an immutable `<content_sha>.<ext>` snapshot — written through the code executor's storage seam. This happens standalone, with no host: a plain `agent.ask()` produces reusable, refreshable artifacts on disk, which is what lets a follow-up turn discover and re-use them.
+Results also live durably on disk, not just in memory. As each deliverable is returned, the framework persists it (and the notebook that produced it) durably to disk through the code executor's storage seam. Immutable artifact snapshots are stored in a content-addressed tree — `curation.json`, an append-only `log.jsonl`, and an immutable `<content_sha>.<ext>` snapshot. This happens standalone, with no host: a plain `agent.ask()` produces reusable, refreshable artifacts, which is what lets a follow-up turn discover and re-use them.
 
 ## Next steps
 
@@ -192,4 +191,4 @@ Results also live durably on disk, not just in memory. As each deliverable is re
 - [Connectors](../concepts/connectors.md) — binding, composing, and discovering data sources.
 - [Multi-turn conversations](../guides/multi-turn.md) — reusing `result.context` across questions.
 - [Streaming and displaying results](../guides/streaming-and-displaying-results.md) — building custom UIs on top of `run()`.
-- [Agent, AgentResult, AgentConfig, AgentGuardrails](../reference/agent.md) — full API reference.
+- [Agent, AgentResult, AgentGuardrails](../reference/agent.md) — full API reference.

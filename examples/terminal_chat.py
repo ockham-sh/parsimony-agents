@@ -11,12 +11,12 @@ variables.
 Prerequisites::
 
     pip install parsimony-agents[display] parsimony-fred
-    export GEMINI_API_KEY="..."   # or any litellm-supported provider
+    export ANTHROPIC_API_KEY="..."   # or any litellm-supported provider
     export FRED_API_KEY="..."               # free: https://fred.stlouisfed.org/docs/api/api_key.html
 
 Run::
 
-    python -m parsimony_agents.examples.terminal_chat
+    python examples/terminal_chat.py
 
 Type "exit" or press Ctrl+D to quit. Press Ctrl+C to cancel a response.
 
@@ -49,7 +49,7 @@ async def main() -> None:
     connectors = discover.load_all()
 
     agent = Agent(
-        model="gemini/gemini-3-flash-preview",
+        model="claude-sonnet-4-6",
         connectors=connectors,
     )
 

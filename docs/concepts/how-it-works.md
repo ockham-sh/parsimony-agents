@@ -363,4 +363,4 @@ Each `stream_to_display` call runs the loop to termination; passing
 - [Connectors](connectors.md) — what the catalog describes and how fetching works.
 - [Code execution](code-execution.md) — the code-tool class the loop dispatches.
 - [Multi-turn conversations](../guides/multi-turn.md) and [Suspend and resume](../guides/suspend-resume.md) — continuing runs.
-- [Agent, AgentResult, AgentConfig, AgentGuardrails](../reference/agent.md) and [Agent tools](../reference/agent-tools.md) — the reference surface.
+- [Agent, AgentResult, AgentGuardrails](../reference/agent.md) and [Agent tools](../reference/agent-tools.md) — the reference surface.

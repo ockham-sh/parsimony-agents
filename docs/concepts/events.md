@@ -399,5 +399,5 @@ async for event in agent.run("Analyze the data"):
 - [Suspend and resume](../guides/suspend-resume.md) — handling `UserInputRequested` and calling
   `Agent.resume`.
 - [Events reference](../reference/events.md) — full field-by-field reference for every event.
-- [Agent, AgentResult, AgentConfig, AgentGuardrails](../reference/agent.md) — the `AgentResult`
+- [Agent, AgentResult, AgentGuardrails](../reference/agent.md) — the `AgentResult`
   container and the `run()` / `ask()` signatures.

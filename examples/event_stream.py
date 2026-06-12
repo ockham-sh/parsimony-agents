@@ -9,12 +9,12 @@ For the high-level display experience, see ``quickstart.py``.
 Prerequisites::
 
     pip install parsimony-agents
-    export GEMINI_API_KEY="..."   # or any litellm-supported provider
+    export ANTHROPIC_API_KEY="..."   # or any litellm-supported provider
     export FRED_API_KEY="..."               # free: https://fred.stlouisfed.org/docs/api/api_key.html
 
 Run::
 
-    python -m parsimony_agents.examples.event_stream
+    python examples/event_stream.py
 """
 
 from __future__ import annotations
