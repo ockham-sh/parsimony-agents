@@ -12,6 +12,7 @@ without modifying this module::
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from typing import Any
 import altair as alt
 import numpy as np
 import pandas as pd
+from parsimony.result import Result, TabularResult
 
 from parsimony_agents.execution.dataframe_ref import DataframeRef, StorageBackend
 from parsimony_agents.execution.outputs import (
@@ -29,6 +31,8 @@ from parsimony_agents.execution.outputs import (
     PrimitiveObject,
     finalize_spec,
 )
+
+logger = logging.getLogger(__name__)
 
 # Type for custom handlers: (value, *, local_dir, backend) -> KernelOutputType
 OutputHandler = Callable[..., KernelOutputType]
@@ -77,16 +81,47 @@ class OutputFactory:
                 return handler(value, local_dir=self._local_dir, backend=self._backend)
         # Built-in handlers
         if isinstance(value, (pd.DataFrame, pd.Series)):
-            return DataFrameObject(
-                ref=DataframeRef.from_pandas(
-                    value,
-                    ref=ref,
-                    local_dir=self._local_dir,
-                    backend=self._backend,
+            try:
+                return DataFrameObject(
+                    ref=DataframeRef.from_pandas(
+                        value,
+                        ref=ref,
+                        local_dir=self._local_dir,
+                        backend=self._backend,
+                    )
                 )
-            )
+            except Exception:
+                # Some frames can't be Arrow/Parquet-serialized — e.g. the Series
+                # of numpy dtype objects produced by ``print(df.dtypes)``, or an
+                # object column holding exotic Python values. A display must never
+                # kill the cell: fall back to the plain text repr, which is what a
+                # bare ``print`` would have produced anyway.
+                logger.warning("could not serialize %s for display; falling back to text", type(value).__name__)
+                return PrimitiveObject(value=str(value))
         if isinstance(value, alt.TopLevelMixin):
             return self._from_altair(value)
+        if isinstance(value, TabularResult):
+            # Dual projection. The human UI gets the full interactive table; the
+            # LLM gets the result's own governed view (schema + sample, hidden
+            # columns enforced). One DataFrameObject carries both — the frame
+            # feeds the frontend table, governed_llm_text feeds the prompt.
+            try:
+                return DataFrameObject(
+                    ref=DataframeRef.from_pandas(
+                        value.data,
+                        ref=ref,
+                        local_dir=self._local_dir,
+                        backend=self._backend,
+                    ),
+                    governed_llm_text=value.to_llm(),
+                )
+            except Exception:
+                logger.warning("could not serialize %s for display; falling back to text", type(value).__name__)
+                return PrimitiveObject(value=value.to_llm())
+        if isinstance(value, Result):
+            # Opaque payload — no frame to render. Governed structural preview
+            # (O(shape)), never an unbounded dump into LLM context.
+            return PrimitiveObject(value=value.to_llm())
         if isinstance(value, (str, int, float, bool)) or value is None:
             return PrimitiveObject(value=value)
         if isinstance(value, np.generic):
