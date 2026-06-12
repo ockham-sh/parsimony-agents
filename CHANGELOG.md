@@ -34,7 +34,7 @@ from a repo-wide review.
   and keyword-only `hybrid_search` no longer needs an embedding key.
 - The default tool-dispatch path enforces `tool_timeout_s`; `llm_max_retries` is
   now wired into the transient-provider retry budget instead of being dead.
-- `build_local_session_state` reads the `kernel_summaries` seam, so a
+- `build_local_session_state` reads the `kernel_summaries` seam, so a sandboxed
   standalone run shows real kernel variables instead of an empty namespace.
 
 **Changed**
@@ -45,6 +45,9 @@ from a repo-wide review.
   never read — minted refs were silently lost across suspend/resume). One
   `build_suspension_record` and one `validate_suspension` now back both the
   `ask_user` and recovery suspension paths.
+- `BaseCodeExecutor` declares `execute_sql` (default-raising) and `set_connectors`
+  raises on a non-empty bundle with no override, so a custom executor that would
+  silently drop connectors fails loud.
 - The `Agent` constructor accepts `workspace=` (durable artifact dir) and exposes
   an `agent.workspace` property; `AgentResult` gains a `usage` struct (tokens /
   cost / iterations), surfaced in the CLI status line; the per-iteration context
@@ -53,14 +56,15 @@ from a repo-wide review.
   > `session_id`, with a one-time warning on the (non-forgery-resistant) fallback.
 - Top-level package re-exports the documented host surface (`AgentGuardrails`,
   `FileStore`, `UserInputRequested`, `SuspensionRecord`, the suspension
-  exceptions, `CancellationRequest`).
+  exceptions, `CancellationRequest`, `create_executor`, `selected_capability_tier`).
 
 **Removed**
 
 - Dead/duplicate surfaces: `AgentConfig` (fictional `Agent(config=...)`),
-  the unread tool structural flags
+  `ToolResult.success` alias, the unread tool structural flags
   (`idempotent`/`parallelizable`/`retryable_on_error`/`timeout_s`),
-  `read_artifact(mode=)`, `artifacts.derive_live_name`,
+  `serialize_chart`/`serialize_dataset` aliases, `read_artifact(mode=)`,
+  `artifacts.derive_live_name`, `execution/metadata.py` + `generate_cell_id`,
   the dead `quality/` package, `theme.py` chart-config scaffolding,
   `virtual_path.py`, the `AgentContextSnapshot.connectors_catalog` channel,
   `_stamp_notebook_ref`, and dead RAG store aliases.
@@ -82,18 +86,42 @@ from a repo-wide review.
   already include class semantics and the appropriate agent-loop directive
   (DO NOT retry / pick a different connector / etc.). Non-`ConnectorError`
   exceptions retain the redacted-traceback path.
+- Connector injection now routes through a transport seam. `connector_cache`
+  exposes `MemoizingConnectorTransport`, `local_proxy_bundle`, and `proxy_bundle`;
+  the in-process bundle yields `ConnectorProxy` objects minted from each
+  connector's secret-free `ConnectorManifest` rather than wrapping the bound
+  connector directly, and returns the same plain-dict shape the sandboxed kernel
+  injects. The memo cache and post-fetch hooks (data-object persister,
+  fetch logger) are transport-agnostic, so the in-process and out-of-process
+  paths cache and record lineage identically.
+- `display(df)` parquet scratch is written to a host-supplied per-session scratch
+  root when one is given (the host's swept cache), falling back to
+  `cwd/.ockham/dataframes` for standalone use — never the durable workspace root.
 
 ### Added
 
-- `BaseCodeExecutor.kernel_summaries()` — JSON-ready per-variable summaries of
-  the kernel namespace, computed from `get_locals()` (an overridable seam for
-  executors whose namespace lives elsewhere).
+- **Out-of-process kernel** (`parsimony_agents.execution.sandbox`): agent code can
+  run in a separate, credential-free kernel process that reaches connectors only
+  by RPC back to a `ConnectorBroker` in the trusted supervisor, so a bound
+  connector is the sole network egress. Ships the duplex RPC protocol, the broker,
+  the Arrow-IPC result codec, `SandboxedCodeExecutor`, the `Substrate` protocol
+  with `SubprocessSubstrate` and `BwrapSubstrate` (no network, cleared env,
+  workspace-only filesystem), and `create_executor` / `selected_capability_tier`
+  for boundary selection (bwrap → in-process fallback).
+- `BaseCodeExecutor.capability_tier` and `BaseCodeExecutor.kernel_summaries()`
+  (an overridable seam — out-of-process executors summarise kernel-side and ship
+  JSON rows back) for the out-of-process path.
+- `OCKHAM_SANDBOX_BOUNDARY` (`auto` | `none`) selects/forces the boundary.
 - `display(...)` of a connector `Result` is a dual projection: a displayed
   `TabularResult` yields a `DataFrameObject` so the human UI keeps the full
   interactive table, while the LLM sees the result's governed `to_llm()` (schema
   + sample, `exclude_from_llm_view` columns enforced) carried on
   `DataFrameObject.governed_llm_text`. An opaque `Result` (no frame) renders as a
   structural `to_llm()` preview. Neither dumps an unbounded payload into context.
+- Connector calls are size-bounded on the wire (max frame guard) and report a
+  clear, connector-named error for non-JSON-native arguments under the sandbox;
+  a sandboxed kernel that dies is detected and replaced on the next call with
+  connector manifests and setup snippets restored.
 - `Agent` / `DataAgent` with convenience and power APIs
 - `ask()` method for structured responses (`AgentResult`)
 - `run()` method for event streaming

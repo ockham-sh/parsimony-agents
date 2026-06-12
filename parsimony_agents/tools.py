@@ -40,12 +40,6 @@ class ToolResult(BaseModel):
 
     @computed_field
     @property
-    def success(self) -> bool:
-        """Deprecated alias for :attr:`ok`. Retained for legacy call-sites."""
-        return self.ok
-
-    @computed_field
-    @property
     def ok(self) -> bool:
         """True iff neither :attr:`failure` nor :attr:`exception_message` is set."""
         return self.exception_message is None and self.failure is None

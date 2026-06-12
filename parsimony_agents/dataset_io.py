@@ -40,7 +40,6 @@ __all__ = [
     "CURATION_META_KEY",
     "deserialize_dataset",
     "read_dataset",
-    "serialize_dataset",
     "write_dataset_bytes",
 ]
 
@@ -109,10 +108,6 @@ def write_dataset_bytes(dataset: Dataset, payload: DataFrameObject) -> bytes:
     buffer = io.BytesIO()
     pq.write_table(table, buffer)
     return buffer.getvalue()
-
-
-# Back-compat alias; keep the dispatcher-friendly name everywhere.
-serialize_dataset = write_dataset_bytes
 
 
 def deserialize_dataset(data: bytes) -> tuple[Result, Dataset]:

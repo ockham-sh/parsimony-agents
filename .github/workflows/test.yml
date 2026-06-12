@@ -43,8 +43,22 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Set up bubblewrap (so the bwrap boundary test runs, not skips)
+        # Ubuntu 24.04 (ubuntu-latest) restricts unprivileged user namespaces via
+        # AppArmor; relax it so bwrap can create them. The key is absent on 22.04,
+        # hence `|| true`.
+        working-directory: .
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       - name: Sync workspace
         run: uv sync --all-extras
+
+      - name: Verify the bwrap boundary is available (keep the guarantee honest)
+        # If this fails, the live boundary test below would silently skip — which
+        # is exactly the regression this job exists to catch.
+        run: uv run python -c "from parsimony_agents.execution.sandbox.bwrap import detect_bwrap_support; assert detect_bwrap_support(), 'bwrap boundary unavailable in CI'"
 
       - name: Pytest
         # pytest + pytest-asyncio aren't declared deps; install ephemerally

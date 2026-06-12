@@ -115,9 +115,9 @@ Connectors are passed at construction time, but they are **not** embedded in the
 
 Placing the catalog in the cached prefix matters for cost: the catalog is static, so it is billed once per session rather than re-sent on every turn. If you rebind connectors between turns, the catalog is re-injected to refresh its content while keeping the cached prefix stable.
 
-The practical consequence: the agent doesn't call connectors directly from the prompt. It writes Python in the execution kernel, and that code calls the connector bundle. See [Code execution](code-execution.md) for how agent-written code runs.
+The practical consequence: the agent doesn't call connectors directly from the prompt. It writes Python in the execution kernel, and that code calls connector proxies. Behind the scenes, each bound connector is wrapped in a `ConnectorProxy` — a secret-free proxy that exposes metadata and the authority to call, but not credentials or internal arguments. When kernel code awaits a connector call, it delegates through a `ConnectorTransport` to reach the broker (or local mock), keeping credentials outside the kernel process. See [Code execution](code-execution.md) for how agent-written code runs.
 
-## In-kernel calls and memoization (`MemoizingConnectorBundle`, `ConnectorCache`)
+## In-kernel calls and memoization (`local_proxy_bundle`, `ConnectorCache`)
 
 When the agent runs code, the connector bundle is available in the kernel namespace as a mapping keyed by connector name. Agent-written code calls a connector like this:
 
@@ -129,7 +129,7 @@ data = result.data  # a DataFrame; also result.columns, result.provenance
 
 Connector entries are async — each call is a typed awaitable, so agent-written kernel code must `await` it.
 
-Before injection, each bundle is wrapped in a `MemoizingConnectorBundle`. This wrapper is a drop-in `Mapping[str, ...]` replacement — `await connectors["fred_fetch"](series_id="UNRATE")` works identically — but it caches results within a single kernel lifetime.
+Before injection, each bundle is built by `local_proxy_bundle` into a `dict[str, ConnectorProxy]` — `await connectors["fred_fetch"](series_id="UNRATE")` works identically — caching results within a single kernel lifetime. Each entry is a `ConnectorProxy` (credential-free), and calls delegate through a `MemoizingConnectorTransport` to a `ConnectorTransport` that reaches the broker over an RPC connection (or runs locally in-process for dev/test). The kernel sees the same plain-dict shape whether it runs in-process or behind the sandbox boundary.
 
 The cache is a `ConnectorCache`, a store mapping `(connector_name, canonical_args_key)` → `Result`. The canonical key is built by JSON-serializing the call's positional and keyword arguments with sorted keys, so two calls with identical arguments (modulo dict ordering) hit the same key. **Identical-arg calls within a kernel lifetime are served from the cache instead of re-hitting the network** — the agent has not refreshed anything, so a re-fetch would be pure cost (API quota, latency, determinism drift).
 
@@ -167,4 +167,4 @@ This persistence is automatic and invisible to the agent. When a connector fetch
 - [Code execution](code-execution.md) — the kernel where connector calls actually run.
 - [Artifacts, identity & lineage](artifacts.md) — how fetches become datasets with traceable provenance.
 - [Configuration](../getting-started/configuration.md) — LLM-provider keys vs. per-connector keys.
-- [Execution reference](../reference/execution.md) — `MemoizingConnectorBundle`, `ConnectorCache`, `FetchLogEntry`, and related types.
+- [Execution reference](../reference/execution.md) — `MemoizingConnectorTransport`, `ConnectorCache`, `FetchLogEntry`, and related types.

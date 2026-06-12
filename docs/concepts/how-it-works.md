@@ -273,7 +273,7 @@ breakpoints at the end of the system message, the end of the tool catalog, and
 the end of stable history — caching that whole prefix across iterations. For
 other providers it's a no-op.
 
-To bind and pass connectors:
+To bind and pass connectors, the supervisor binds secrets into connectors held by a broker service:
 
 ```python
 from parsimony_agents import Agent

@@ -28,9 +28,7 @@ until it can publish an answer. The deliverables are not free-form text — they
 content-addressed artifacts: a `Dataset` (Parquet), a `Chart` (Vega-Lite), or a `Report`
 (Quarto `.qmd`), all of which round-trip cleanly and carry their own lineage.
 
-The kernel that runs the agent's code is an in-process, stateful Python namespace (think a
-headless Jupyter kernel) pre-loaded with `pandas`, `numpy`, `altair`, your connectors, and a
-`load_dataset` primitive. Variables persist across iterations; published artifacts are derived
+The agent code runs in a separate KERNEL process (out-of-process, with real isolation under bwrap on Linux — unprivileged user namespaces give no network and a cleared environment; in-process as a non-sandboxed fallback when bwrap is unavailable). The KERNEL namespace is pre-loaded with `pandas`, `numpy`, `altair`, your connectors (as secret-free proxies), and a `load_dataset` primitive. Credentials are held by a BROKER in the trusted SUPERVISOR process; the kernel calls connectors only by invoking a proxy that RPC-delegates back to the supervisor. Variables persist across iterations; published artifacts are derived
 from the variables the agent's notebooks assign. The LLM transport is
 [`litellm`](https://github.com/BerriAI/litellm), so any provider it supports (Anthropic,
 Gemini, OpenAI, …) works by name.
@@ -239,22 +237,22 @@ the recovery funnel, not the call site.
 
 ### Connectors as tools
 
-A bundle passed to `Agent(connectors=...)` is wrapped per-kernel by a memoizing layer. The LLM
-calls connectors as kernel locals — `result = await client['fred_fetch'](series_id='GDPC1')`.
-Identical-argument calls within one kernel lifetime return the cached result instead of
-re-hitting the network, but post-fetch hooks (the data-object persister and the fetch logger)
-run on every call so lineage and logs stay truthful. Connectors are **not** dumped into the
+A bundle passed to `Agent(connectors=...)` is wrapped per-kernel by a memoizing layer and converted to secret-free manifests. The LLM calls connectors as kernel locals — `result = await client['fred_fetch'](series_id='GDPC1')` — but the kernel receives a `ConnectorProxy` (metadata + authority, no secrets or bound arguments). The proxy delegates to a `ConnectorTransport` that RPC-calls the supervisor's broker. Identical-argument calls within one kernel lifetime return the cached result instead of re-hitting the network, but post-fetch hooks (the data-object persister and the fetch logger) run on every call so lineage and logs stay truthful. Connectors are **not** dumped into the
 system prompt; a catalog rides a stable cached message plus a per-turn snapshot.
 
 ### Notebook / `Script` execution model
 
 The agent writes durable **notebooks** — plain `.py` files (`Script`) under `notebooks/`, with
 no metadata block, so `python notebook.py` runs standalone. Run state caches under a
-content-addressed key, so re-running unchanged code is cheap. The kernel (`CodeExecutor`) runs
-each cell on a daemon thread under a per-cell timeout, with `__builtins__` restricted and an AST
-sanitizer that rejects code reaching `os.environ` / `os.getenv` / `subprocess.*` so agent code
-cannot read injected API keys. (It is **not** a hardened sandbox; full isolation needs a
-separate process or remote kernel.)
+content-addressed key, so re-running unchanged code is cheap. Each cell runs under a per-cell
+timeout. The security boundary is bwrap (the `namespaces` tier on Linux): agent code runs in
+a separate process with no network and a cleared environment, so it cannot reach injected
+keys. Without bwrap the fallback is in-process with no boundary (a plain subprocess is also
+available as a dev substrate, but it confines nothing — it does not deny network or scrub the
+environment — and is not auto-selected). The restricted `__builtins__` and the
+AST sanitizer (which rejects `os.environ` / `os.getenv` / `subprocess.*`) are best-effort
+defense-in-depth for the in-process fallback only (non-Linux self-host or
+`OCKHAM_SANDBOX_BOUNDARY=none`); never rely on the sanitizer as containment.
 
 ### Artifacts and identity
 
@@ -449,7 +447,8 @@ not a raised exception.
 | `ANTHROPIC_API_KEY` / `GEMINI_API_KEY` / `OPENAI_API_KEY` / … | Provider key read by `litellm` for the model you choose |
 | `FRED_API_KEY` | Used by the FRED connector in the bundled examples |
 | `EXECUTOR_CELL_TIMEOUT_S` | Per-cell execution timeout in `CodeExecutor` (default `300`) |
-| `OCKHAM_DISABLE_SANITIZE` | Set to `1` to bypass the AST secret-exfiltration guard — local debug only, never on a hosted deploy |
+| `OCKHAM_SANDBOX_BOUNDARY` | Set to `auto` (default) to select the strongest available boundary (bwrap on Linux, else in-process), or `none` to force in-process (non-Linux or debug only). |
+| `OCKHAM_DISABLE_SANITIZE` | Set to `1` to bypass the AST secret-exfiltration guard — debug only, never on a hosted deploy. Redundant under bwrap (env is cleared). |
 
 ## Where it fits
 

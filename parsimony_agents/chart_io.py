@@ -39,7 +39,6 @@ __all__ = [
     "deserialize_chart",
     "inline_chart_data",
     "read_chart",
-    "serialize_chart",
     "split_chart_data",
     "write_chart_bytes",
 ]
@@ -106,10 +105,6 @@ def write_chart_bytes(chart: Chart, payload: FigureObject) -> bytes:
         alt.data_transformers.disable_max_rows()
         spec = value.to_dict()
     return json.dumps(_embed_metadata(spec, chart), indent=2, default=str).encode("utf-8")
-
-
-# Back-compat alias; keep the dispatcher-friendly name everywhere.
-serialize_chart = write_chart_bytes
 
 
 def deserialize_chart(data: bytes) -> tuple[Chart, dict[str, Any]]:

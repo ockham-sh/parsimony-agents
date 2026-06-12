@@ -29,7 +29,10 @@ uv run pytest tests/ -v && uv run ruff check . && uv run mypy parsimony_agents/
 | Multi-turn session state | `parsimony_agents/agent/session_state.py` |
 | OpenTelemetry tracing hooks | `parsimony_agents/agent/tracing.py` |
 | Built-in tool definitions | `parsimony_agents/tools.py` |
-| `CodeExecutor` (in-process Python sandbox) | `parsimony_agents/execution/` |
+| Sandboxed code execution (kernel process, connector transports, capability tiers) | `parsimony_agents/execution/` |
+| `ConnectorProxy`, `ConnectorManifest` (the capability contract) | the `parsimony` library (`parsimony/capability.py`) |
+| Connector transports (proxy bundle, memoizing, socket) | `parsimony_agents/execution/connector_cache.py`, `sandbox/socket_transport.py` |
+| Out-of-process kernel, RPC broker, substrates (bwrap/subprocess) | `parsimony_agents/execution/sandbox/` |
 | `OutputFactory` (value → artifact dispatch) | `parsimony_agents/execution/` |
 | `Dataset`, `Chart`, `Report` artifact types | `parsimony_agents/artifacts.py` |
 | Notebook / `Script` / `ScriptPreview` | `parsimony_agents/notebook.py` |
@@ -44,7 +47,7 @@ uv run pytest tests/ -v && uv run ruff check . && uv run mypy parsimony_agents/
 - `mypy` type checking; `ruff` for lint and format; `pytest` for tests.
 - **Stdout is for application output only.** Use `logging` (never `print()`) for diagnostics.
 - Never log API keys, bearer tokens, or credential strings — `__cause__`/`__context__` chains on HTTP errors commonly embed them.
-- The `CodeExecutor` runs arbitrary agent-generated Python in-process. A `threading.Lock` serializes all kernel access. Do NOT bypass it.
+- Agent code runs in a separate KERNEL process (out-of-process by default via `SandboxedCodeExecutor`). On Linux with unprivileged namespaces, BwrapSubstrate enforces network/filesystem confinement. Kernel communicates with connectors over a duplex RPC to a BROKER in the supervisor; connectors never reach the kernel directly. On non-Linux, the fallback is in-process with best-effort sanitization (no boundary). Check capability_tier on /health or /api/status to see the actual boundary strength.
 - Every new event class added to `parsimony_agents/agent/events.py` needs a corresponding branch in the terminal's SSE dispatcher (`terminal/server/api/workspace/streaming.py`) — return `None` for events that are internal/eval-only.
 - New data connectors go to [`parsimony-connectors`](https://github.com/ockham-sh/parsimony-connectors), not here.
 - `parsimony-agents` is published to PyPI (`pip install parsimony-agents`) under Apache-2.0. Do not add runtime gating, license checks, or proprietary code.

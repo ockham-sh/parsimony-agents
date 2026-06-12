@@ -28,6 +28,7 @@ from parsimony_agents.dataset_io import (
     read_dataset,
 )
 from parsimony_agents.display import display_result, stream_to_display
+from parsimony_agents.execution.sandbox import create_executor, selected_capability_tier
 from parsimony_agents.notebook import Script, ScriptPreview
 from parsimony_agents.notebook_io import (
     decode_notebook_state,
@@ -57,6 +58,7 @@ __all__ = [
     "SuspensionRecord",
     "SuspensionTokenMismatch",
     "UserInputRequested",
+    "create_executor",
     "decode_notebook_state",
     "deserialize_chart",
     "deserialize_dataset",
@@ -69,6 +71,7 @@ __all__ = [
     "read_notebook",
     "save_notebook",
     "save_notebook_state",
+    "selected_capability_tier",
     "serialize_notebook",
     "stream_to_display",
 ]

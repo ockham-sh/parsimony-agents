@@ -34,3 +34,28 @@ This policy covers the open-source packages:
 - `parsimony-connectors` (parsimony-*)
 
 For vulnerabilities in the ockham terminal (coming soon) (the AGPLv3 agentic data-analysis product built on this library), please also email security@ockham.sh.
+
+## Code execution and credential isolation
+
+Agent-authored code is untrusted. The security model rests on two boundaries, not
+on inspecting the code:
+
+- **The kernel holds no credentials.** A connector is exposed to agent code as a
+  `ConnectorProxy` (from `parsimony.capability`) minted from a secret-free
+  `ConnectorManifest`. The proxy carries connector metadata and the authority to
+  call, but no `fn`, `bound_arguments`, or `secrets`. The bound, credentialed
+  connector lives in a trusted supervisor process; the kernel invokes it only by
+  RPC to a broker there, which means a bound connector is the sole egress path.
+- **The kernel is confined.** `parsimony_agents.execution.sandbox` runs the kernel
+  out-of-process. On Linux with unprivileged user namespaces, `BwrapSubstrate`
+  removes network access, clears the environment, and confines the filesystem to
+  the workspace (`capability_tier == "namespaces"`). Where no boundary is
+  available (non-Linux self-host), execution falls back in-process
+  (`capability_tier == "none"`) and says so loudly.
+
+The compile-time guard (`sanitize.assert_safe_code`) and any host-side env
+scrubbing are **best-effort defense-in-depth for the in-process fallback only**;
+they are trivially bypassable and must never be treated as containment. The
+boundary is the out-of-process kernel. Hosts that run untrusted code should verify
+`capability_tier` (surfaced on the executor's health endpoint) rather than assume
+a boundary is present.

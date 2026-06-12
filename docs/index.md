@@ -118,7 +118,7 @@ Start here, then jump to the page that matches what you're doing.
 **Concepts** — how it works under the hood
 - [How it works: the agent loop](concepts/how-it-works.md) — the iterate-until-terminate loop in detail.
 - [Connectors](concepts/connectors.md) — the `Connectors` model, `bind()`, and `+` composition.
-- [Code execution](concepts/code-execution.md) — the kernel, notebooks, and how Python output flows back to the agent.
+- [Code execution](concepts/code-execution.md) — the sandboxed kernel, notebooks, process isolation, and how Python output flows back to the agent.
 - [Artifacts, identity & lineage](concepts/artifacts.md) — `logical_id`, `content_sha`, and content-addressed storage.
 - [Events](concepts/events.md) — the stream `Agent.run` yields.
 - [Failure handling & recovery](concepts/failure-and-recovery.md) — guardrails, the recovery funnel, and handoff.

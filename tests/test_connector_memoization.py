@@ -15,7 +15,7 @@ from parsimony.result import Result
 
 from parsimony_agents.execution.connector_cache import (
     ConnectorCache,
-    MemoizingConnectorBundle,
+    local_proxy_bundle,
 )
 
 _CALL_COUNT = {"n": 0}
@@ -43,7 +43,7 @@ def test_identical_args_cached() -> None:
     def _hook(r: Result) -> None:
         log.append(r)
 
-    mb = MemoizingConnectorBundle(bundle, cache, post_hooks=(_hook,))
+    mb = local_proxy_bundle(bundle, cache, post_hooks=(_hook,))
 
     async def _go() -> None:
         r1 = await mb["test_fetch"](series_id="GDPC1")
@@ -61,7 +61,7 @@ def test_different_args_not_cached() -> None:
     _reset_calls()
     bundle = Connectors([_test_fetch])
     cache = ConnectorCache()
-    mb = MemoizingConnectorBundle(bundle, cache, post_hooks=())
+    mb = local_proxy_bundle(bundle, cache, post_hooks=())
 
     async def _go() -> None:
         await mb["test_fetch"](series_id="A")
@@ -75,7 +75,7 @@ def test_clearing_cache_re_fetches() -> None:
     _reset_calls()
     bundle = Connectors([_test_fetch])
     cache = ConnectorCache()
-    mb = MemoizingConnectorBundle(bundle, cache, post_hooks=())
+    mb = local_proxy_bundle(bundle, cache, post_hooks=())
 
     async def _go() -> None:
         await mb["test_fetch"](series_id="X")

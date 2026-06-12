@@ -1,37 +1,47 @@
-"""Per-kernel connector memoization (brief §10 — within-notebook P1).
+"""Per-kernel connector memoization and the connector transports.
 
-A connector call with identical canonical parameters within one kernel
-lifetime should not re-hit the network. The data hasn't changed by the
-agent's reckoning (no refresh has happened), so a re-fetch is pure cost
-— API quota burn, determinism drift, slower iteration.
+Three concerns live here:
 
-Design
-------
-We wrap the connector bundles the executor injects. The wrapper's
-``__getitem__`` returns a small callable that caches on
-``(connector_name, canonical_kwargs)``. Cache lives in a dict carried
-by the wrapper; cleared by the executor on ``clear_namespace`` /
-``set_cwd``.
+**Memoization** — a connector call with identical canonical parameters within
+one kernel lifetime should not re-hit the network. The data hasn't changed by
+the agent's reckoning (no refresh has happened), so a re-fetch is pure cost —
+API quota burn, determinism drift, slower iteration.
 
-Cache misses go through the underlying connector (same callbacks, same
-post-fetch hooks — including the data_object persister and the fetch
-logger). Cache hits return the previously cached ``Result`` directly
-*and* re-invoke the post-fetch hooks. Re-invoking the hooks is what
-keeps the run scope's ``fetch_refs`` consistent: every observed fetch
-in the producing run, whether memoized or not, contributes a lineage
-edge. The hooks are idempotent (data_object persister is
-content-addressed; fetch logger appends one entry per call).
+**The capability seam** — the kernel never receives a bound
+:class:`~parsimony.connector.Connector` (which would carry the credential in its
+``bound_arguments``). It receives a :class:`~parsimony.capability.ConnectorProxy`
+minted from the connector's secret-free manifest, backed by a *transport*.
+
+**Composable transports** — :class:`MemoizingConnectorTransport` wraps any
+inner transport with the memo cache + post-fetch hooks, so the in-process path
+(:class:`_LocalConnectorTransport`, which runs the real connector here, no
+isolation) and the out-of-process path (the socket transport that RPCs a broker
+holding the credential) share identical caching/lineage behaviour.
+
+Cache misses go through the inner transport (same callbacks, same post-fetch
+hooks — the data_object persister and the fetch logger). Cache hits return the
+previously cached :class:`Result` directly *and* re-invoke the post-fetch hooks.
+Re-invoking the hooks keeps the run scope's ``fetch_refs`` consistent: every
+observed fetch in the producing run, whether memoized or not, contributes a
+lineage edge. The hooks are idempotent (the data_object persister is
+content-addressed; the fetch logger appends one entry per call).
 """
 
 from __future__ import annotations
 
-__all__ = ["ConnectorCache", "MemoizingConnectorBundle"]
+__all__ = [
+    "ConnectorCache",
+    "MemoizingConnectorTransport",
+    "local_proxy_bundle",
+    "proxy_bundle",
+]
 
 import inspect
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
+from parsimony.capability import ConnectorManifest, ConnectorProxy, ConnectorTransport
 from parsimony.connector import Connector, Connectors
 from parsimony.result import Result
 
@@ -59,7 +69,7 @@ class ConnectorCache:
         return len(self._store)
 
 
-def _canonical_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
+def _canonical_args(args: Sequence[Any], kwargs: Mapping[str, Any]) -> str:
     """Stable key for memoization.
 
     JSON-serialises positional + keyword arguments with sorted keys and
@@ -67,18 +77,43 @@ def _canonical_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
     whose canonical kwargs match — modulo dict ordering — produce the
     same key.
     """
-    payload = {"args": list(args), "kwargs": kwargs}
+    payload = {"args": list(args), "kwargs": dict(kwargs)}
     return json.dumps(payload, sort_keys=True, default=str)
 
 
-class _MemoizingConnector:
-    """Callable proxy: cache the connector's ``__call__`` per kernel."""
+class _LocalConnectorTransport:
+    """Tier-0 in-process transport: invoke the real bound connector directly.
+
+    Satisfies :class:`~parsimony.capability.ConnectorTransport`. The credentialed
+    connectors live in *this* process, so this is **not** an isolation boundary —
+    it is the trusted dev/test default. Out-of-process containment is provided by
+    the socket transport behind a kernel boundary; the proxy surface is identical
+    either way. Carries no memoization or hooks of its own — wrap it in
+    :class:`MemoizingTransport`.
+    """
+
+    __slots__ = ("_by_name",)
+
+    def __init__(self, connectors: Sequence[Connector]) -> None:
+        self._by_name: dict[str, Connector] = {c.name: c for c in connectors}
+
+    async def invoke(self, name: str, args: Sequence[Any], kwargs: Mapping[str, Any]) -> Result:
+        return await self._by_name[name](*args, **kwargs)
+
+
+class MemoizingConnectorTransport:
+    """Wrap an inner :class:`ConnectorTransport` with the memo cache + post-hooks.
+
+    Memoizes on ``(name, canonical_args)`` against a shared :class:`ConnectorCache`
+    and runs the post-fetch hooks on every call (cached or not). Transport-agnostic
+    — the inner may be in-process or a socket RPC to the broker.
+    """
 
     __slots__ = ("_inner", "_cache", "_post_hooks")
 
     def __init__(
         self,
-        inner: Connector,
+        inner: ConnectorTransport,
         cache: ConnectorCache,
         post_hooks: tuple[Callable[[Result], Any], ...],
     ) -> None:
@@ -86,27 +121,14 @@ class _MemoizingConnector:
         self._cache = cache
         self._post_hooks = post_hooks
 
-    @property
-    def name(self) -> str:
-        return self._inner.name
-
-    @property
-    def description(self) -> str:
-        return self._inner.description
-
-    def __getattr__(self, item: str) -> Any:
-        # Fall through to the underlying connector for everything else
-        # (param_schema, describe, to_llm, etc.).
-        return getattr(self._inner, item)
-
-    async def __call__(self, *args: Any, **kwargs: Any) -> Result:
+    async def invoke(self, name: str, args: Sequence[Any], kwargs: Mapping[str, Any]) -> Result:
         key = _canonical_args(args, kwargs)
-        cached = self._cache.get(self._inner.name, key)
+        cached = self._cache.get(name, key)
         if cached is not None:
             result = cached
         else:
-            result = await self._inner(*args, **kwargs)
-            self._cache.put(self._inner.name, key, result)
+            result = await self._inner.invoke(name, args, kwargs)
+            self._cache.put(name, key, result)
         for hook in self._post_hooks:
             ret = hook(result)
             if inspect.isawaitable(ret):
@@ -114,40 +136,37 @@ class _MemoizingConnector:
         return result
 
 
-class MemoizingConnectorBundle(Mapping[str, _MemoizingConnector]):
-    """Mapping-shaped wrapper around a :class:`Connectors` bundle.
+def proxy_bundle(
+    manifests: Sequence[ConnectorManifest],
+    transport: ConnectorTransport,
+) -> dict[str, ConnectorProxy]:
+    """Build ``{name: ConnectorProxy}`` for one binding, sharing one transport.
 
-    Drop-in replacement for the bundle the executor used to inject:
-    ``connectors["fred_series"](series_id="GDPC1")`` works identically,
-    but identical-arg repeats return the cached :class:`Result` without
-    re-issuing the network call.
-
-    The post-fetch hooks (data_object persister, fetch logger) are
-    applied to *every* call, cached or not, so lineage and logs stay
-    truthful.
+    The transport dispatches by connector name, so every proxy in the binding
+    shares it. Used by both the in-process bundle and the kernel's socket bundle.
     """
+    return {m.name: ConnectorProxy(m, transport) for m in manifests}
 
-    def __init__(
-        self,
-        bundle: Connectors,
-        cache: ConnectorCache,
-        post_hooks: tuple[Callable[[Result], Any], ...],
-    ) -> None:
-        self._cache = cache
-        self._post_hooks = post_hooks
-        self._items: dict[str, _MemoizingConnector] = {
-            c.name: _MemoizingConnector(c, cache, post_hooks)
-            for c in bundle
-        }
 
-    def __getitem__(self, key: str) -> _MemoizingConnector:
-        return self._items[key]
+def local_proxy_bundle(
+    bundle: Connectors,
+    cache: ConnectorCache,
+    post_hooks: tuple[Callable[[Result], Any], ...],
+) -> dict[str, ConnectorProxy]:
+    """In-process (Tier-0) bundle: proxies over a memoized local transport.
 
-    def __iter__(self):
-        return iter(self._items)
+    Drop-in for the bundle the executor injects:
+    ``connectors["fred_series"](series_id="GDPC1")`` works identically, but
+    identical-arg repeats return the cached :class:`Result` without re-issuing
+    the network call. Each item is a :class:`ConnectorProxy` minted from the
+    connector's secret-free manifest — so the kernel namespace exposes connector
+    *metadata and the authority to call*, never the bound credential. Returns
+    the same plain-dict shape the sandboxed kernel injects, so the agent-visible
+    surface is identical across tiers.
 
-    def __len__(self) -> int:
-        return len(self._items)
-
-    def __contains__(self, key: object) -> bool:
-        return key in self._items
+    The post-fetch hooks (data_object persister, fetch logger) are applied to
+    *every* call, cached or not, so lineage and logs stay truthful.
+    """
+    connectors = list(bundle)
+    transport = MemoizingConnectorTransport(_LocalConnectorTransport(connectors), cache, post_hooks)
+    return proxy_bundle([c.to_manifest() for c in connectors], transport)

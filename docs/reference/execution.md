@@ -31,6 +31,12 @@ from parsimony_agents.execution import (
     set_default_local_root,
     get_default_local_root,
 )
+from parsimony_agents.execution.sandbox import (
+    SandboxedCodeExecutor,
+    create_executor,
+    selected_capability_tier,
+    detect_bwrap_support,
+)
 ```
 
 This is the low-level substrate that the agent loop drives. Most host
@@ -227,10 +233,16 @@ await executor.set_connectors(FRED.bind(api_key="..."))
 await executor.set_connectors({"fred": FRED.bind(api_key="...")})
 ```
 
-Accepts a `Connectors` bundle or a `Mapping[str, Connectors]`. Each bundle is
-wrapped in a `MemoizingConnectorBundle` for within-kernel memoization (see
-[Memoization](#memoization-connectorcache-memoizingconnectorbundle)). See
-[Connectors](../concepts/connectors.md) for what a bundle is.
+Accepts a `Connectors` bundle or a `Mapping[str, Connectors]`. Internally,
+each connector is converted to a secret-free `ConnectorManifest` and wrapped in a
+`ConnectorProxy`, backed by a `ConnectorTransport` (in-process or socket-based).
+The kernel-side namespace receives only the `ConnectorProxy` objects—metadata
+and authority to call, but no credential (`bound_arguments` or secrets). A
+`MemoizingConnectorTransport` wraps the inner transport with the per-kernel cache and
+post-fetch hooks (data-object persister, fetch logger) so lineage stays truthful
+across cached and uncached calls. See [Connectors](../concepts/connectors.md)
+for the connector model and [Memoization](#memoization-connectorcache-memoizingconnectortransport)
+below.
 
 #### Timeout behaviour
 
@@ -561,11 +573,14 @@ result = await executor.execute(
 See [Artifacts, identity & lineage](../concepts/artifacts.md) for the full
 lineage model.
 
-## Memoization (ConnectorCache, MemoizingConnectorBundle)
+## Memoization (ConnectorCache, MemoizingConnectorTransport)
 
 Connector calls are memoized within one kernel lifetime so an agent re-running
 the same fetch doesn't hit the network twice. `set_connectors` wires this up
-automatically; the two types below are the moving parts.
+automatically. The kernel receives a `Mapping[str, ConnectorProxy]` — each proxy
+points to a `ConnectorManifest` and delegates to a `ConnectorTransport`. A
+`MemoizingConnectorTransport` wraps the inner transport with per-kernel memoization and
+post-fetch hooks; the two types below are the moving parts.
 
 ### ConnectorCache
 
@@ -579,28 +594,39 @@ class ConnectorCache:
 A store keyed by `(connector_name, canonical_args_key)` → `Result`. Cleared on
 `clear_namespace`/`set_cwd`.
 
-### MemoizingConnectorBundle
+### MemoizingConnectorTransport
 
 ```python
-class MemoizingConnectorBundle(Mapping[str, _MemoizingConnector]):
+class MemoizingConnectorTransport:
     def __init__(
         self,
-        bundle: Connectors,
+        inner: ConnectorTransport,
         cache: ConnectorCache,
         post_hooks: tuple[Callable[[Result], Any], ...],
     ): ...
 ```
 
-A drop-in replacement for a `Connectors` bundle. It wraps each connector so
-identical-argument calls return the cached `Result`. Crucially, the
-`post_hooks` (the data-object persister and the fetch logger) run on **every**
-call — cached or not — so the `fetch_log` and lineage stay truthful even when a
-fetch is served from cache.
+Wraps any inner `ConnectorTransport` (in-process or socket-based) with
+memoization and post-fetch hooks. Identical-argument calls return the cached
+`Result` without invoking the inner transport. Crucially, the `post_hooks`
+(the data-object persister and the fetch logger) run on **every** call — cached
+or not — so the `fetch_log` and lineage stay truthful even when a fetch is
+served from cache.
 
 ```python
 result = await executor.execute('data = fred["gdpc1"](series_id="GDPC1")')
 # result.fetch_log has one FetchLogEntry with a persisted data_object_ref
 ```
+
+### ConnectorProxy and ConnectorManifest
+
+The kernel never receives a bound `Connector` (which would carry the credential
+in its `bound_arguments`). It receives a `ConnectorProxy` minted from the
+connector's secret-free `ConnectorManifest`. The proxy exposes connector
+metadata (parameters, return types, etc.) and the authority to call via the
+transport, but carries no credential. See the `parsimony` library for
+`ConnectorProxy`, `ConnectorManifest`, `ConnectorTransport`, and
+`Connector.to_manifest()`.
 
 ## Pagination (StringPaginator, TablePaginator) and StructuredStreamCapturer
 
