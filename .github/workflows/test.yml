@@ -58,7 +58,7 @@ jobs:
       - name: Verify the bwrap boundary is available (keep the guarantee honest)
         # If this fails, the live boundary test below would silently skip — which
         # is exactly the regression this job exists to catch.
-        run: uv run python -c "from parsimony_agents.execution.sandbox.bwrap import detect_bwrap_support; assert detect_bwrap_support(), 'bwrap boundary unavailable in CI'"
+        run: uv run python -c "from parsimony_agents.execution.sandbox import detect_bwrap_support; assert detect_bwrap_support(), 'bwrap boundary unavailable in CI'"
 
       - name: Pytest
         # pytest + pytest-asyncio aren't declared deps; install ephemerally
