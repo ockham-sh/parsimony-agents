@@ -12,11 +12,12 @@ def normalize_connector_bundles(
 ) -> dict[str, Connectors]:
     """Coerce caller input into a ``{binding_name: Connectors}`` mapping.
 
-    A bare :class:`Connectors` is treated as ``{"client": connectors}`` to
-    keep the OSS quick-start (``Agent(..., connectors=FRED)``) working
-    unchanged. A mapping is shallow-copied with string-coerced keys.
-    ``None`` becomes an empty dict so callers can branch on emptiness
-    without an extra ``is None`` guard.
+    A bare :class:`Connectors` is bound under the name ``connectors`` so the
+    kernel local matches what the system prompt teaches the agent to call
+    (``await connectors["fred_fetch"](...)``) and the OSS quick-start
+    (``Agent(..., connectors=FRED)``) works unchanged. A mapping is
+    shallow-copied with string-coerced keys. ``None`` becomes an empty dict so
+    callers can branch on emptiness without an extra ``is None`` guard.
 
     The single normalisation point is the source of truth for what the
     executor's :meth:`set_connectors` accepts and what the per-turn
@@ -25,7 +26,7 @@ def normalize_connector_bundles(
     if connectors is None:
         return {}
     if isinstance(connectors, Connectors):
-        return {"client": connectors}
+        return {"connectors": connectors}
     if isinstance(connectors, Mapping):
         return {str(name): bundle for name, bundle in connectors.items()}
     raise TypeError(

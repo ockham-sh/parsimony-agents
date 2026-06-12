@@ -32,13 +32,14 @@ import json
 from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from parsimony_agents.artifacts import Chart, Dataset, Report, derive_live_name
+from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.chart_io import write_chart_bytes
 from parsimony_agents.dataset_io import write_dataset_bytes
 from parsimony_agents.identity import (
     ArtifactRef,
     SnapshotKind,
     content_sha,
+    slug_from_title,
 )
 from parsimony_agents.notebook import Script
 from parsimony_agents.notebook_io import serialize_notebook
@@ -226,7 +227,7 @@ async def persist_artifact(
 
     await _write_snapshot_verified(executor, path=ref.workspace_file_path, blob=blob)
 
-    live_name = artifact.live_name or derive_live_name(artifact.title or kind)
+    live_name = artifact.live_name or slug_from_title(artifact.title or kind)
     await _write_curation(
         executor,
         curation_path=f".ockham/{kind}s/{artifact.logical_id}/curation.json",

@@ -58,11 +58,17 @@ class StringPaginator:
         for t in self._tokens:
             char_offsets.append(char_offsets[-1] + len(t))
 
+        seen: set[int] = set()
         for raw_page in display_pages:
             try:
                 page = range(total_pages)[int(raw_page)]
             except (IndexError, ValueError, TypeError):
                 continue
+            # A short string resolves [0, -1] to the same page twice; emit each
+            # resolved page once (first-occurrence order).
+            if page in seen:
+                continue
+            seen.add(page)
             start, end = self._page_ranges[page]
             page_text = "".join(self._tokens[start:end])
             has_more = page < (total_pages - 1)
@@ -126,11 +132,18 @@ class TablePaginator:
 
         first_page = True
 
+        seen: set[int] = set()
         for raw_page in display_pages:
             try:
                 page = range(total_pages)[int(raw_page)]
             except (IndexError, ValueError, TypeError):
                 continue
+            # The default [0, 1, -2, -1] resolves to duplicate pages for a frame
+            # of 1-2 pages; emit each resolved page once (first-occurrence order)
+            # so the LLM never receives the same rows twice.
+            if page in seen:
+                continue
+            seen.add(page)
 
             start = page * rows_per_page
             end = start + rows_per_page

@@ -22,7 +22,7 @@ from parsimony_agents.execution.outputs import FetchLogEntry
 def test_normalize_connector_bundles_default_binding() -> None:
     bundle = Connectors([])
     out = normalize_connector_bundles(bundle)
-    assert out == {"client": bundle}
+    assert out == {"connectors": bundle}
 
 
 def test_normalize_connector_bundles_mapping_passthrough() -> None:

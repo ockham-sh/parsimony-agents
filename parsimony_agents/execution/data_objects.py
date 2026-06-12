@@ -109,7 +109,7 @@ def _canonicalize_arrow_table(table: pa.Table) -> pa.Table:
     full provenance JSON in schema metadata under
     ``parsimony.result``. That JSON includes ``fetched_at`` — but
     ``fetched_at`` does NOT participate in the artifact's logical
-    identity (§2.2), so two fetches with identical data must produce
+    identity, so two fetches with identical data must produce
     identical parquet bytes for content-addressing to dedup. We strip
     ``fetched_at`` from the JSON envelope before write so the parquet
     bytes are stable across refreshes.

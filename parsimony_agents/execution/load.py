@@ -1,6 +1,6 @@
 """``load_dataset(slug)`` — the kernel primitive for cross-notebook reuse.
 
-The contract (brief §4):
+The contract:
 
 - Reads an already-published dataset by its workspace-visible handle.
 - Reads, does not create. Unknown slug ⇒ ``KeyError`` with guidance.

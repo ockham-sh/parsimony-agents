@@ -43,6 +43,7 @@ from parsimony_agents.execution.outputs import (
 )
 from parsimony_agents.execution.run_scope import OriginLedger, VariableOrigin
 from parsimony_agents.execution.sanitize import assert_safe_code
+from parsimony_agents.execution.summaries import kernel_summaries_from_locals_map
 from parsimony_agents.theme import register_theme
 
 # ---------------------------------------------------------------------------
@@ -383,6 +384,17 @@ class BaseCodeExecutor(ABC):
     def get_locals(self) -> dict[str, Any]:
         return {}
 
+    async def kernel_summaries(self) -> list[dict[str, Any]]:
+        """Rich per-variable summaries of the kernel namespace, as JSON-ready dicts.
+
+        The default computes them here from :meth:`get_locals`. Out-of-process
+        executors override this to summarize inside the kernel — where the live
+        objects are — and ship the rows back, since :meth:`get_locals` cannot
+        return cross-process objects.
+        """
+        rows = kernel_summaries_from_locals_map(self.get_locals())
+        return [r.model_dump(mode="json") for r in rows]
+
     async def get_origin(self, name: str) -> VariableOrigin | None:
         """Return the producing-run origin for a kernel variable, or ``None``.
 
@@ -497,7 +509,8 @@ class CodeExecutor(BaseCodeExecutor):
         ``connectors`` is a mapping ``{binding_name: Connectors}``: each entry
         is bound as a local under ``binding_name``, with a shared fetch logger
         wrapping every connector. A single :class:`Connectors` is also accepted
-        and treated as ``{"client": connectors}`` for backwards compatibility.
+        and bound under the name ``connectors`` (the name the system prompt
+        teaches the agent to call).
         """
         self._connectors = normalize_connector_bundles(connectors)
         async with self._exec_lock:
@@ -511,7 +524,7 @@ class CodeExecutor(BaseCodeExecutor):
 
         Each bundle is wrapped by :class:`MemoizingConnectorBundle` so
         identical-arg calls within one kernel lifetime do not re-hit the
-        network (brief §10 — within-notebook P1). The post-fetch hooks
+        network. The post-fetch hooks
         run on every call, cached or not:
 
         - ``persister`` writes the canonical
@@ -797,13 +810,18 @@ class CodeExecutor(BaseCodeExecutor):
                     return eval(compiled, exec_locals)  # noqa: S307
 
             def _timeout_output() -> KernelOutput:
+                # Keep whatever the cell printed before it timed out, then reset
+                # the capturer for the next run — discarding the captured output
+                # would strip the agent's debugging signal on the timeout path.
+                captured = self.capturer.flush()
                 self.capturer = StructuredStreamCapturer(self._output_factory)
                 fetch_log = _drain_fetch_log(exec_locals)
                 return KernelOutput(
                     outputs=[
+                        *captured,
                         self._output_factory.from_value(
                             TimeoutError(f"Execution exceeded {timeout}s and was aborted")
-                        )
+                        ),
                     ],
                     fetch_log=fetch_log,
                 )
@@ -876,10 +894,12 @@ class CodeExecutor(BaseCodeExecutor):
                     fetch_log=fetch_log,
                 )
             except Exception as e:
-                self.capturer.flush()
+                # Keep the prints the cell emitted before raising — Jupyter
+                # parity: partial output + traceback, not traceback alone.
+                captured = self.capturer.flush()
                 fetch_log = _drain_fetch_log(exec_locals)
                 return KernelOutput(
-                    outputs=[self._output_factory.from_value(e)],
+                    outputs=[*captured, self._output_factory.from_value(e)],
                     fetch_log=fetch_log,
                 )
 
@@ -968,4 +988,16 @@ class CodeExecutor(BaseCodeExecutor):
             "read_excel",
             "read_pptx_text",
         }
-        return {k: v for k, v in self.locals.items() if k not in _prelude}
+        # The exec thread mutates self.locals while a cell runs, so a
+        # concurrent snapshot can hit "dictionary changed size during
+        # iteration". The window is only the copy itself — retry, then let the
+        # final attempt raise if the namespace is churning pathologically.
+        for _ in range(5):
+            try:
+                snapshot = dict(self.locals)
+                break
+            except RuntimeError:
+                continue
+        else:
+            snapshot = dict(self.locals)
+        return {k: v for k, v in snapshot.items() if k not in _prelude}
