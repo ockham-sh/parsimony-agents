@@ -61,39 +61,134 @@ _SAFE_BUILTINS: dict[str, object] = {
     name: getattr(builtins, name)
     for name in (
         # types & constructors
-        "bool", "bytearray", "bytes", "complex", "dict", "enumerate",
-        "float", "frozenset", "int", "list", "object", "range", "set",
-        "slice", "str", "tuple", "type",
+        "bool",
+        "bytearray",
+        "bytes",
+        "complex",
+        "dict",
+        "enumerate",
+        "float",
+        "frozenset",
+        "int",
+        "list",
+        "object",
+        "range",
+        "set",
+        "slice",
+        "str",
+        "tuple",
+        "type",
         # introspection
-        "callable", "chr", "dir", "getattr", "globals", "hasattr", "hash",
-        "hex", "id", "isinstance", "issubclass", "iter", "len", "next",
-        "oct", "ord", "repr", "round", "setattr", "sorted", "vars",
+        "callable",
+        "chr",
+        "dir",
+        "getattr",
+        "globals",
+        "hasattr",
+        "hash",
+        "hex",
+        "id",
+        "isinstance",
+        "issubclass",
+        "iter",
+        "len",
+        "next",
+        "oct",
+        "ord",
+        "repr",
+        "round",
+        "setattr",
+        "sorted",
+        "vars",
         # itertools / functional
-        "abs", "all", "any", "divmod", "filter", "map", "max", "min",
-        "pow", "reversed", "sum", "zip",
+        "abs",
+        "all",
+        "any",
+        "divmod",
+        "filter",
+        "map",
+        "max",
+        "min",
+        "pow",
+        "reversed",
+        "sum",
+        "zip",
         # I/O safe subset (print is overridden by capturer at call time; open is
         # allowed for workspace file access — the executor runs in the workspace cwd)
-        "format", "print", "open",
+        "format",
+        "print",
+        "open",
         # exceptions
-        "ArithmeticError", "AssertionError", "AttributeError", "BaseException",
-        "BlockingIOError", "BrokenPipeError", "BufferError", "BytesWarning",
-        "ChildProcessError", "ConnectionAbortedError", "ConnectionError",
-        "ConnectionRefusedError", "ConnectionResetError", "DeprecationWarning",
-        "EOFError", "EnvironmentError", "Exception", "FileExistsError",
-        "FileNotFoundError", "FloatingPointError", "FutureWarning",
-        "GeneratorExit", "IOError", "ImportError", "ImportWarning",
-        "IndentationError", "IndexError", "InterruptedError",
-        "IsADirectoryError", "KeyError", "KeyboardInterrupt", "LookupError",
-        "MemoryError", "ModuleNotFoundError", "NameError", "NotADirectoryError",
-        "NotImplemented", "NotImplementedError", "OSError", "OverflowError",
-        "PendingDeprecationWarning", "PermissionError", "ProcessLookupError",
-        "RecursionError", "ReferenceError", "ResourceWarning", "RuntimeError",
-        "RuntimeWarning", "StopAsyncIteration", "StopIteration", "SyntaxError",
-        "SyntaxWarning", "SystemError", "SystemExit", "TabError", "TimeoutError",
-        "True", "False", "None",
-        "TypeError", "UnboundLocalError", "UnicodeDecodeError",
-        "UnicodeEncodeError", "UnicodeError", "UnicodeTranslateError",
-        "UnicodeWarning", "UserWarning", "ValueError", "Warning", "ZeroDivisionError",
+        "ArithmeticError",
+        "AssertionError",
+        "AttributeError",
+        "BaseException",
+        "BlockingIOError",
+        "BrokenPipeError",
+        "BufferError",
+        "BytesWarning",
+        "ChildProcessError",
+        "ConnectionAbortedError",
+        "ConnectionError",
+        "ConnectionRefusedError",
+        "ConnectionResetError",
+        "DeprecationWarning",
+        "EOFError",
+        "EnvironmentError",
+        "Exception",
+        "FileExistsError",
+        "FileNotFoundError",
+        "FloatingPointError",
+        "FutureWarning",
+        "GeneratorExit",
+        "IOError",
+        "ImportError",
+        "ImportWarning",
+        "IndentationError",
+        "IndexError",
+        "InterruptedError",
+        "IsADirectoryError",
+        "KeyError",
+        "KeyboardInterrupt",
+        "LookupError",
+        "MemoryError",
+        "ModuleNotFoundError",
+        "NameError",
+        "NotADirectoryError",
+        "NotImplemented",
+        "NotImplementedError",
+        "OSError",
+        "OverflowError",
+        "PendingDeprecationWarning",
+        "PermissionError",
+        "ProcessLookupError",
+        "RecursionError",
+        "ReferenceError",
+        "ResourceWarning",
+        "RuntimeError",
+        "RuntimeWarning",
+        "StopAsyncIteration",
+        "StopIteration",
+        "SyntaxError",
+        "SyntaxWarning",
+        "SystemError",
+        "SystemExit",
+        "TabError",
+        "TimeoutError",
+        "True",
+        "False",
+        "None",
+        "TypeError",
+        "UnboundLocalError",
+        "UnicodeDecodeError",
+        "UnicodeEncodeError",
+        "UnicodeError",
+        "UnicodeTranslateError",
+        "UnicodeWarning",
+        "UserWarning",
+        "ValueError",
+        "Warning",
+        "ZeroDivisionError",
     )
     if hasattr(builtins, name)
 }
@@ -145,6 +240,7 @@ _used_ids: set[str] = set()
 # ---------------------------------------------------------------------------
 # Thread interruption helper
 # ---------------------------------------------------------------------------
+
 
 def _interrupt_thread(thread: threading.Thread) -> None:
     """Best-effort: inject SystemExit into *thread* at the next bytecode boundary.
@@ -527,16 +623,12 @@ class CodeExecutor(BaseCodeExecutor):
         from parsimony_agents.execution.fetch_log import make_fetch_logger
 
         persist_fn = make_data_object_persister(Path(self.cwd))
-        fetch_log, log_fetch = make_fetch_logger(
-            persist_fn, ledger=self.origin_ledger
-        )
+        fetch_log, log_fetch = make_fetch_logger(persist_fn, ledger=self.origin_ledger)
         # Re-use the kernel's connector cache across re-applies so refresh
         # / set_cwd doesn't lose memo state mid-turn unless the namespace
         # was actually cleared.
         for name, bundle in self._connectors.items():
-            self.locals[name] = MemoizingConnectorBundle(
-                bundle, self._connector_cache, post_hooks=(log_fetch,)
-            )
+            self.locals[name] = MemoizingConnectorBundle(bundle, self._connector_cache, post_hooks=(log_fetch,))
         self.locals["_fetch_log"] = fetch_log
 
     def _workspace_resolved_path(self, path: str) -> Path:
@@ -801,9 +893,7 @@ class CodeExecutor(BaseCodeExecutor):
                 fetch_log = _drain_fetch_log(exec_locals)
                 return KernelOutput(
                     outputs=[
-                        self._output_factory.from_value(
-                            TimeoutError(f"Execution exceeded {timeout}s and was aborted")
-                        )
+                        self._output_factory.from_value(TimeoutError(f"Execution exceeded {timeout}s and was aborted"))
                     ],
                     fetch_log=fetch_log,
                 )

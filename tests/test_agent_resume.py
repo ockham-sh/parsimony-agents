@@ -27,7 +27,8 @@ from parsimony_agents.agent.state import SuspensionRecord
 
 def _tc(tc_id: str, name: str, arguments: str) -> SimpleNamespace:
     return SimpleNamespace(
-        id=tc_id, type="function",
+        id=tc_id,
+        type="function",
         function=SimpleNamespace(name=name, arguments=arguments),
     )
 
@@ -35,7 +36,10 @@ def _tc(tc_id: str, name: str, arguments: str) -> SimpleNamespace:
 def _assembled(tool_calls: list[SimpleNamespace]) -> SimpleNamespace:
     """A litellm-shaped assembled message: tool_calls as attrs + model_dump."""
     msg = SimpleNamespace(
-        role="assistant", content=None, reasoning_content=None, tool_calls=tool_calls,
+        role="assistant",
+        content=None,
+        reasoning_content=None,
+        tool_calls=tool_calls,
     )
     msg.model_dump = lambda mode="json": {  # noqa: ARG005
         "role": "assistant",
@@ -142,9 +146,7 @@ async def test_run_suspends_then_resume_completes(monkeypatch: pytest.MonkeyPatc
     # run can be rebuilt on the same model the suspended run used.
     assert record.model_id == "premium"
 
-    resume_events = [
-        event async for event in agent.resume(record, "Use dataset A")
-    ]
+    resume_events = [event async for event in agent.resume(record, "Use dataset A")]
 
     # The resumed run reached return_done — its system tool event is present.
     done_events = [e for e in resume_events if getattr(e, "tool_name", None) == "return_done"]
@@ -153,9 +155,7 @@ async def test_run_suspends_then_resume_completes(monkeypatch: pytest.MonkeyPatc
     # A closing StateSnapshot is emitted and its transcript carries the reply.
     snapshots = [e for e in resume_events if isinstance(e, StateSnapshot)]
     assert snapshots, "resume should emit at least one StateSnapshot"
-    transcript = json.dumps(
-        [m.model_dump(mode="json") for m in snapshots[-1].context.messages], default=str
-    )
+    transcript = json.dumps([m.model_dump(mode="json") for m in snapshots[-1].context.messages], default=str)
     assert "Use dataset A" in transcript, "the user reply must be in the resumed transcript"
 
     # Only two LLM calls total: one before suspension, one after resume.

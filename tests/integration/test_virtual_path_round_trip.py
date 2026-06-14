@@ -64,14 +64,10 @@ def _seed_artifact(
         "live_name": live_name,
         "title": "Synthetic test artifact",
     }
-    (artifact_dir / "curation.json").write_text(
-        json.dumps(curation, sort_keys=True), encoding="utf-8"
-    )
+    (artifact_dir / "curation.json").write_text(json.dumps(curation, sort_keys=True), encoding="utf-8")
 
     log_entry = {"content_sha": content_sha, "ts": "2026-05-08T00:00:00Z"}
-    (artifact_dir / "log.jsonl").write_text(
-        json.dumps(log_entry) + "\n", encoding="utf-8"
-    )
+    (artifact_dir / "log.jsonl").write_text(json.dumps(log_entry) + "\n", encoding="utf-8")
     return snapshot
 
 
@@ -124,9 +120,7 @@ def test_resolver_picks_latest_content_sha(tmp_path: Path) -> None:
     (artifact_dir / "curation.json").write_text(
         json.dumps({"live_name": "foo", "logical_id": "lid-A"}), encoding="utf-8"
     )
-    (artifact_dir / "log.jsonl").write_text(
-        '{"content_sha": "v1"}\n{"content_sha": "v2"}\n', encoding="utf-8"
-    )
+    (artifact_dir / "log.jsonl").write_text('{"content_sha": "v1"}\n{"content_sha": "v2"}\n', encoding="utf-8")
 
     canonical = resolve_virtual_entry(tmp_path, "notebooks/foo.py", workspace_id="ws1")
     assert canonical == ".ockham/notebooks/lid-A/v2.py"
@@ -141,9 +135,7 @@ def test_resolver_returns_none_when_curation_missing(tmp_path: Path) -> None:
     """No curation.json → no live_name to match against → miss."""
     (tmp_path / ".ockham/notebooks/lid-X").mkdir(parents=True)
     (tmp_path / ".ockham/notebooks/lid-X/csha-X.py").write_bytes(b"x")
-    (tmp_path / ".ockham/notebooks/lid-X/log.jsonl").write_text(
-        '{"content_sha": "csha-X"}\n', encoding="utf-8"
-    )
+    (tmp_path / ".ockham/notebooks/lid-X/log.jsonl").write_text('{"content_sha": "csha-X"}\n', encoding="utf-8")
     assert resolve_virtual_entry(tmp_path, "notebooks/foo.py", workspace_id="w") is None
 
 
@@ -151,9 +143,7 @@ def test_resolver_returns_none_when_log_empty(tmp_path: Path) -> None:
     """curation matches but log.jsonl is empty → never persisted → miss."""
     artifact_dir = tmp_path / ".ockham/notebooks/lid-Y"
     artifact_dir.mkdir(parents=True)
-    (artifact_dir / "curation.json").write_text(
-        json.dumps({"live_name": "foo"}), encoding="utf-8"
-    )
+    (artifact_dir / "curation.json").write_text(json.dumps({"live_name": "foo"}), encoding="utf-8")
     (artifact_dir / "log.jsonl").write_text("", encoding="utf-8")
     assert resolve_virtual_entry(tmp_path, "notebooks/foo.py", workspace_id="w") is None
 
@@ -252,11 +242,7 @@ def test_latest_content_sha_handles_corrupted_lines(tmp_path: Path) -> None:
     """Mixed valid / corrupted JSONL lines: corrupted are skipped silently."""
     log = tmp_path / "log.jsonl"
     log.write_text(
-        "not-json\n"
-        '{"content_sha": "first"}\n'
-        '{"missing_sha": true}\n'
-        '{"content_sha": "second"}\n'
-        "garbage\n",
+        'not-json\n{"content_sha": "first"}\n{"missing_sha": true}\n{"content_sha": "second"}\ngarbage\n',
         encoding="utf-8",
     )
     assert latest_content_sha(log) == "second"

@@ -139,9 +139,7 @@ def test_state_cache_no_op_when_empty(sample_script: Script, tmp_path: Path) -> 
     assert not notebook_state_cache_path(sample_script, tmp_path).exists()
 
 
-def test_state_cache_survives_serialize_deserialize_round_trip(
-    sample_script: Script, tmp_path: Path
-) -> None:
+def test_state_cache_survives_serialize_deserialize_round_trip(sample_script: Script, tmp_path: Path) -> None:
     """Cache key is invariant under the on-disk round-trip (trailing newline handling)."""
     sample_script.output = KernelOutput(outputs=[PrimitiveObject(value=42)])
     save_notebook_state(sample_script, tmp_path)
@@ -202,8 +200,7 @@ async def test_read_latest_notebook_resolves_from_log() -> None:
     csha_new = "b" * 64
     files = {
         ".ockham/notebooks/foo/log.jsonl": (
-            f'{{"ts": "t1", "content_sha": "{csha_old}"}}\n'
-            f'{{"ts": "t2", "content_sha": "{csha_new}"}}\n'
+            f'{{"ts": "t1", "content_sha": "{csha_old}"}}\n{{"ts": "t2", "content_sha": "{csha_new}"}}\n'
         ).encode(),
         f".ockham/notebooks/foo/{csha_new}.py": b"x = 2\n",
         f".ockham/notebooks/foo/{csha_old}.py": b"x = 1\n",

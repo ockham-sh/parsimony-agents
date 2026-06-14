@@ -71,6 +71,7 @@ class SessionVectorStore:
     def _get_processor(self) -> Any:
         if self._output_processor is None:
             from parsimony_agents.rag.processors import OutputProcessor
+
             self._output_processor = OutputProcessor()
         return self._output_processor
 
@@ -84,9 +85,7 @@ class SessionVectorStore:
         embeddings = await embed_texts(contents)
         metadatas = [{**doc.metadata, "identifier": identifier} for doc in documents]
         ids = [doc.id for doc in documents]
-        self._collection.add(
-            ids=ids, embeddings=embeddings, documents=contents, metadatas=metadatas
-        )
+        self._collection.add(ids=ids, embeddings=embeddings, documents=contents, metadatas=metadatas)
         self._indexed.add(identifier)
         logger.info("Indexed %d chunks for '%s'", len(documents), identifier)
         return len(documents)
@@ -153,9 +152,7 @@ class SessionVectorStore:
         return chunks
 
     async def delete_documents(self, identifier: str) -> int:
-        results = self._collection.get(
-            where={"identifier": identifier}, include=["metadatas"]
-        )
+        results = self._collection.get(where={"identifier": identifier}, include=["metadatas"])
         if results["ids"]:
             self._collection.delete(ids=results["ids"])
             self._indexed.discard(identifier)
@@ -165,9 +162,7 @@ class SessionVectorStore:
 
     async def cleanup(self) -> None:
         try:
-            await asyncio.to_thread(
-                self._client.delete_collection, f"session_{self.session_id}"
-            )
+            await asyncio.to_thread(self._client.delete_collection, f"session_{self.session_id}")
             self._indexed.clear()
             logger.info("Cleaned up vector store for session %s...", self.session_id[:8])
         except Exception as e:

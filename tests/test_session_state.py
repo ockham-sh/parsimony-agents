@@ -77,14 +77,18 @@ async def test_read_artifact_tool_invokes_injected_fn() -> None:
         read_artifact_fn=_fn,
     )
     out = await agent.read_artifact(
-        live_name="n", kind="notebook", mode="summary",
+        live_name="n",
+        kind="notebook",
+        mode="summary",
         context=AgentContext(session_id="s"),
     )
     assert out.data.content is not None
     assert isinstance(out.data.content, Text)
     assert "notebook:n" in out.data.content.content
     out2 = await agent.read_artifact(
-        live_name="n", kind="notebook", mode="full",
+        live_name="n",
+        kind="notebook",
+        mode="full",
         context=AgentContext(session_id="s"),
     )
     assert out2.data.content is not None
@@ -102,9 +106,7 @@ def test_agent_context_snapshot_includes_session_state() -> None:
         session_state=SessionState(
             kernel=[KernelVariableSummary(name="df", kind="dataframe", detail="1×1")],
             workspace_artifacts=[
-                WorkspaceArtifactLine(
-                    path="n.py", kind="notebook", summary="x", live_name="my_notebook"
-                )
+                WorkspaceArtifactLine(path="n.py", kind="notebook", summary="x", live_name="my_notebook")
             ],
         ),
         seen_live_names_pairs=[("notebook", "my_notebook")],

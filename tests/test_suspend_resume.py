@@ -61,9 +61,7 @@ def _stream_chunk(*, content: str | None = None, tool_call: tuple[str, str, str]
         tc_id, name, args = tool_call
         tcs = [SimpleNamespace(id=tc_id, function=SimpleNamespace(name=name, arguments=args))]
     return SimpleNamespace(
-        choices=[
-            SimpleNamespace(delta=SimpleNamespace(content=content, reasoning_content=None, tool_calls=tcs))
-        ]
+        choices=[SimpleNamespace(delta=SimpleNamespace(content=content, reasoning_content=None, tool_calls=tcs))]
     )
 
 
@@ -153,9 +151,7 @@ async def test_suspend_then_resume_continues_with_user_reply() -> None:
         prior_tool_count = len(state.tool_call_history)
 
         # Resume with a user reply.
-        events2 = await _drain(
-            resume_run(agent, record, user_reply="use dataset A")
-        )
+        events2 = await _drain(resume_run(agent, record, user_reply="use dataset A"))
 
     # Resume produced events for the second turn.
     assert any(isinstance(e, ToolEvent) and e.tool_name == "return_done" for e in events2)
@@ -239,9 +235,7 @@ async def test_resume_with_preset_cancellation_yields_run_cancelled() -> None:
     cancellation = CancellationRequest()
     cancellation.set()
 
-    events = await _drain(
-        resume_run(agent, record, user_reply="hi", cancellation=cancellation)
-    )
+    events = await _drain(resume_run(agent, record, user_reply="hi", cancellation=cancellation))
     assert any(isinstance(e, RunCancelled) for e in events)
 
 

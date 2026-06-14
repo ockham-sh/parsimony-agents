@@ -169,8 +169,7 @@ def _ask_user_question_for(failure: Failure) -> tuple[str, str | None]:
         )
     if failure.kind is FailureKind.time_limit:
         return (
-            "I have hit the time budget for this task. "
-            "Want me to continue, or narrow it down to a sub-task?",
+            "I have hit the time budget for this task. Want me to continue, or narrow it down to a sub-task?",
             failure.explanation,
         )
     return (

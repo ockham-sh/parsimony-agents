@@ -143,9 +143,7 @@ def _persist_dataset(
     df: pd.DataFrame,
 ) -> tuple[ArtifactRef, Dataset]:
     """Build + write a dataset snapshot at v1 (mirrors persist_return_artifact)."""
-    lid = dataset_logical_id(
-        notebook_refs=notebook_refs, variable_name=variable_name, source_refs=source_refs
-    )
+    lid = dataset_logical_id(notebook_refs=notebook_refs, variable_name=variable_name, source_refs=source_refs)
     payload = DataFrameObject.from_pandas(df, local_dir=Path(executor.cwd) / "_dfo")
     dataset = Dataset(
         logical_id=lid,
@@ -161,13 +159,22 @@ def _persist_dataset(
     p = Path(executor.cwd) / ref.workspace_file_path
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(blob)
-    _write_log_entry(executor, "dataset", lid, csha, {
-        "notebooks": [r.content_sha for r in notebook_refs],
-        "sources": [r.content_sha for r in source_refs],
-    })
+    _write_log_entry(
+        executor,
+        "dataset",
+        lid,
+        csha,
+        {
+            "notebooks": [r.content_sha for r in notebook_refs],
+            "sources": [r.content_sha for r in source_refs],
+        },
+    )
     _write_curation(
-        executor, "dataset", lid,
-        title=title, variable_name=variable_name,
+        executor,
+        "dataset",
+        lid,
+        title=title,
+        variable_name=variable_name,
     )
     return ref, dataset.with_payload(payload)
 
@@ -203,14 +210,23 @@ def _persist_chart(
     p = Path(executor.cwd) / ref.workspace_file_path
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(blob)
-    _write_log_entry(executor, "chart", lid, csha, {
-        "notebook": notebook_ref.content_sha,
-        "source_datasets": [r.content_sha for r in source_dataset_refs],
-        "sources": [r.content_sha for r in source_refs],
-    })
+    _write_log_entry(
+        executor,
+        "chart",
+        lid,
+        csha,
+        {
+            "notebook": notebook_ref.content_sha,
+            "source_datasets": [r.content_sha for r in source_dataset_refs],
+            "sources": [r.content_sha for r in source_refs],
+        },
+    )
     _write_curation(
-        executor, "chart", lid,
-        title=title, variable_name=variable_name,
+        executor,
+        "chart",
+        lid,
+        title=title,
+        variable_name=variable_name,
     )
     return ref, chart.with_payload(spec)
 
@@ -240,14 +256,23 @@ def _persist_report(
     p = Path(executor.cwd) / ref.workspace_file_path
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(blob)
-    _write_log_entry(executor, "report", lid, csha, {
-        "embedded": [r.content_sha for r in embedded_refs],
-    })
+    _write_log_entry(
+        executor,
+        "report",
+        lid,
+        csha,
+        {
+            "embedded": [r.content_sha for r in embedded_refs],
+        },
+    )
     _write_curation(executor, "report", lid, title=title)
     report = Report(
-        logical_id=lid, title=title, markdown=markdown,
+        logical_id=lid,
+        title=title,
+        markdown=markdown,
         live_name_pins=pin_map,
-        formats=["html"], content_sha=csha,
+        formats=["html"],
+        content_sha=csha,
     )
     return ref, report
 
@@ -295,9 +320,7 @@ def _write_curation(
 def _nb_ref(name: str, code: str) -> ArtifactRef:
     from parsimony_agents.identity import notebook_content_sha
 
-    return ArtifactRef(
-        kind="notebook", logical_id=name, content_sha=notebook_content_sha(code)
-    )
+    return ArtifactRef(kind="notebook", logical_id=name, content_sha=notebook_content_sha(code))
 
 
 def _do_ref(provenance_id: str, content: str) -> ArtifactRef:
@@ -337,14 +360,19 @@ async def test_refresh_dataset_idempotent_when_nothing_changes(tmp_path: Path) -
     df_payload = DataFrameObject.from_pandas(df, local_dir=tmp_path / "_dfo1")
     executor.next_variables = {"df": df_payload}
     executor.next_executes = [
-        KernelOutput(outputs=[], fetch_log=[
-            FetchLogEntry(
-                provenance={"source": "fred", "source_description": "FRED", "params": {"id": "GDP"}},
-                row_count=3, column_names=["x"], columns=[],
-                data_object_ref=do,
-                version=1,
-            ),
-        ])
+        KernelOutput(
+            outputs=[],
+            fetch_log=[
+                FetchLogEntry(
+                    provenance={"source": "fred", "source_description": "FRED", "params": {"id": "GDP"}},
+                    row_count=3,
+                    column_names=["x"],
+                    columns=[],
+                    data_object_ref=do,
+                    version=1,
+                ),
+            ],
+        )
     ]
 
     out_a = await refresh_artifact(ref_v1, executor=executor)
@@ -352,14 +380,19 @@ async def test_refresh_dataset_idempotent_when_nothing_changes(tmp_path: Path) -
     df_payload2 = DataFrameObject.from_pandas(df, local_dir=tmp_path / "_dfo2")
     executor.next_variables = {"df": df_payload2}
     executor.next_executes = [
-        KernelOutput(outputs=[], fetch_log=[
-            FetchLogEntry(
-                provenance={"source": "fred", "source_description": "FRED", "params": {"id": "GDP"}},
-                row_count=3, column_names=["x"], columns=[],
-                data_object_ref=do,
-                version=1,
-            ),
-        ])
+        KernelOutput(
+            outputs=[],
+            fetch_log=[
+                FetchLogEntry(
+                    provenance={"source": "fred", "source_description": "FRED", "params": {"id": "GDP"}},
+                    row_count=3,
+                    column_names=["x"],
+                    columns=[],
+                    data_object_ref=do,
+                    version=1,
+                ),
+            ],
+        )
     ]
     out_b = await refresh_artifact(ref_v1, executor=executor)
 
@@ -386,9 +419,7 @@ async def test_refresh_dataset_advances_when_kernel_data_changes(tmp_path: Path)
         df=pd.DataFrame({"x": [1, 2, 3]}),
     )
 
-    fresh_payload = DataFrameObject.from_pandas(
-        pd.DataFrame({"x": [10, 20, 30]}), local_dir=tmp_path / "_dfo"
-    )
+    fresh_payload = DataFrameObject.from_pandas(pd.DataFrame({"x": [10, 20, 30]}), local_dir=tmp_path / "_dfo")
     executor.next_variables = {"df": fresh_payload}
     executor.next_executes = [KernelOutput(outputs=[], fetch_log=[])]
 
@@ -447,8 +478,10 @@ async def test_refresh_dataset_kernel_variable_missing_raises(tmp_path: Path) ->
     nb_ref = _nb_ref("macro", nb_code)
     ref, _ = _persist_dataset(
         executor,
-        notebook_refs=[nb_ref], source_refs=[],
-        variable_name="df", title="x",
+        notebook_refs=[nb_ref],
+        source_refs=[],
+        variable_name="df",
+        title="x",
         df=pd.DataFrame({"x": [1]}),
     )
     executor.next_variables = {}  # df not in kernel after re-run
@@ -475,23 +508,26 @@ async def test_refresh_chart_cascades_into_source_dataset(tmp_path: Path) -> Non
 
     ds_ref, _ = _persist_dataset(
         executor,
-        notebook_refs=[nb_ds_ref], source_refs=[],
-        variable_name="ds", title="Source",
+        notebook_refs=[nb_ds_ref],
+        source_refs=[],
+        variable_name="ds",
+        title="Source",
         df=pd.DataFrame({"x": [1]}),
     )
     chart_ref, _ = _persist_chart(
         executor,
         notebook_ref=nb_chart_ref,
-        source_dataset_refs=[ds_ref], source_refs=[],
-        variable_name="fig", title="Trend", spec=_vega_spec(1),
+        source_dataset_refs=[ds_ref],
+        source_refs=[],
+        variable_name="fig",
+        title="Trend",
+        spec=_vega_spec(1),
     )
 
     # When refreshing the chart, the orchestrator first refreshes the
     # source dataset (re-runs ds_nb, gets new ``ds``), then re-runs
     # chart_nb and gets ``fig`` with the new spec.
-    fresh_ds = DataFrameObject.from_pandas(
-        pd.DataFrame({"x": [42]}), local_dir=tmp_path / "_dfo"
-    )
+    fresh_ds = DataFrameObject.from_pandas(pd.DataFrame({"x": [42]}), local_dir=tmp_path / "_dfo")
     fresh_fig = _vega_spec(42)
     executor.next_variables = {"ds": fresh_ds, "fig": fresh_fig}
     executor.next_executes = [
@@ -538,33 +574,34 @@ async def test_refresh_report_rewrites_markdown_with_new_content_shas(
 
     ds_ref, _ = _persist_dataset(
         executor,
-        notebook_refs=[nb_ds_ref], source_refs=[],
-        variable_name="ds", title="Source",
+        notebook_refs=[nb_ds_ref],
+        source_refs=[],
+        variable_name="ds",
+        title="Source",
         df=pd.DataFrame({"x": [1]}),
     )
     chart_ref, _ = _persist_chart(
         executor,
         notebook_ref=nb_chart_ref,
-        source_dataset_refs=[ds_ref], source_refs=[],
-        variable_name="fig", title="Trend", spec=_vega_spec(1),
+        source_dataset_refs=[ds_ref],
+        source_refs=[],
+        variable_name="fig",
+        title="Trend",
+        spec=_vega_spec(1),
     )
 
     # Body addresses the embed by live_name; pin map ties live_name to
     # the chart's frozen ArtifactRef. After refresh the body is
     # byte-stable (same live_name), only the pin map's ref drifts.
-    markdown = (
-        "# Q1 review\n\n"
-        "![chart](file://./charts/trend.vl.json)\n"
-    )
+    markdown = "# Q1 review\n\n![chart](file://./charts/trend.vl.json)\n"
     report_ref, _ = _persist_report(
         executor,
         pin_map={"trend": chart_ref},
-        title="Q1 review", markdown=markdown,
+        title="Q1 review",
+        markdown=markdown,
     )
 
-    fresh_ds = DataFrameObject.from_pandas(
-        pd.DataFrame({"x": [99]}), local_dir=tmp_path / "_dfo"
-    )
+    fresh_ds = DataFrameObject.from_pandas(pd.DataFrame({"x": [99]}), local_dir=tmp_path / "_dfo")
     fresh_fig = _vega_spec(99)
     executor.next_variables = {"ds": fresh_ds, "fig": fresh_fig}
     executor.next_executes = [
@@ -577,6 +614,7 @@ async def test_refresh_report_rewrites_markdown_with_new_content_shas(
     assert out.content_sha != report_ref.content_sha
 
     from parsimony_agents.report_format import parse_snapshot
+
     new_text = (tmp_path / out.workspace_file_path).read_text()
     new_snap = parse_snapshot(new_text)
     # Body is byte-stable — embed URI still names the live_name.
@@ -626,14 +664,14 @@ async def test_refresh_reads_notebook_from_snapshot_not_working_copy(
 
     ref, _ = _persist_dataset(
         executor,
-        notebook_refs=[nb_ref], source_refs=[],
-        variable_name="df", title="Macro",
+        notebook_refs=[nb_ref],
+        source_refs=[],
+        variable_name="df",
+        title="Macro",
         df=pd.DataFrame({"x": [1]}),
     )
 
-    fresh = DataFrameObject.from_pandas(
-        pd.DataFrame({"x": [99]}), local_dir=tmp_path / "_dfo"
-    )
+    fresh = DataFrameObject.from_pandas(pd.DataFrame({"x": [99]}), local_dir=tmp_path / "_dfo")
     executor.next_variables = {"df": fresh}
     executor.next_executes = [KernelOutput(outputs=[], fetch_log=[])]
 
@@ -651,8 +689,10 @@ async def test_refresh_errors_when_notebook_log_missing(tmp_path: Path) -> None:
     nb_ref = ArtifactRef(kind="notebook", logical_id="ghost", content_sha="abc")
     ref, _ = _persist_dataset(
         executor,
-        notebook_refs=[nb_ref], source_refs=[],
-        variable_name="df", title="orphan",
+        notebook_refs=[nb_ref],
+        source_refs=[],
+        variable_name="df",
+        title="orphan",
         df=pd.DataFrame({"x": [1]}),
     )
     with pytest.raises(ValueError, match="no persisted snapshot"):
@@ -670,8 +710,10 @@ async def test_refresh_dataset_data_object_source_uses_fresh_fetch(tmp_path: Pat
     do_v1 = _do_ref("gdp", "v1")
     ref, _ = _persist_dataset(
         executor,
-        notebook_refs=[nb_ref], source_refs=[do_v1],
-        variable_name="df", title="GDP",
+        notebook_refs=[nb_ref],
+        source_refs=[do_v1],
+        variable_name="df",
+        title="GDP",
         df=pd.DataFrame({"x": [1]}),
     )
 
@@ -680,18 +722,23 @@ async def test_refresh_dataset_data_object_source_uses_fresh_fetch(tmp_path: Pat
         logical_id=do_v1.logical_id,  # same logical_id
         content_sha="new-csha-from-fresh-fetch",
     )
-    fresh_df = DataFrameObject.from_pandas(
-        pd.DataFrame({"x": [42]}), local_dir=tmp_path / "_dfo"
-    )
+    fresh_df = DataFrameObject.from_pandas(pd.DataFrame({"x": [42]}), local_dir=tmp_path / "_dfo")
     executor.next_variables = {"df": fresh_df}
-    executor.next_executes = [KernelOutput(outputs=[], fetch_log=[
-        FetchLogEntry(
-            provenance={"source": "fred", "source_description": "FRED", "params": {"id": "GDP"}},
-            row_count=1, column_names=["x"], columns=[],
-            data_object_ref=do_v2,
-            version=2,
-        ),
-    ])]
+    executor.next_executes = [
+        KernelOutput(
+            outputs=[],
+            fetch_log=[
+                FetchLogEntry(
+                    provenance={"source": "fred", "source_description": "FRED", "params": {"id": "GDP"}},
+                    row_count=1,
+                    column_names=["x"],
+                    columns=[],
+                    data_object_ref=do_v2,
+                    version=2,
+                ),
+            ],
+        )
+    ]
 
     out = await refresh_artifact(ref, executor=executor)
     # logical_id unchanged.
@@ -722,21 +769,27 @@ async def test_refresh_report_enforces_report_validator(tmp_path: Path) -> None:
 
     ds_ref, _ = _persist_dataset(
         executor,
-        notebook_refs=[nb_ds_ref], source_refs=[],
-        variable_name="ds", title="Source",
+        notebook_refs=[nb_ds_ref],
+        source_refs=[],
+        variable_name="ds",
+        title="Source",
         df=pd.DataFrame({"x": [1]}),
     )
     chart_ref, _ = _persist_chart(
         executor,
         notebook_ref=nb_chart_ref,
-        source_dataset_refs=[ds_ref], source_refs=[],
-        variable_name="fig", title="Trend", spec=_vega_spec(1),
+        source_dataset_refs=[ds_ref],
+        source_refs=[],
+        variable_name="fig",
+        title="Trend",
+        spec=_vega_spec(1),
     )
     markdown = "# Q1 review\n\n![chart](file://./charts/trend.vl.json)\n"
     report_ref, _ = _persist_report(
         executor,
         pin_map={"trend": chart_ref},
-        title="Q1 review", markdown=markdown,
+        title="Q1 review",
+        markdown=markdown,
     )
 
     fresh_ds = DataFrameObject.from_pandas(pd.DataFrame({"x": [99]}), local_dir=tmp_path / "_dfo")

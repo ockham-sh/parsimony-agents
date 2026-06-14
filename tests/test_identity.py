@@ -32,10 +32,9 @@ def test_artifact_ref_workspace_path_for_each_kind() -> None:
         ArtifactRef(kind="notebook", logical_id="lid", content_sha="csha").workspace_file_path
         == ".ockham/notebooks/lid/csha.py"
     )
-    assert (
-        ArtifactRef(kind="data_object", logical_id="csha", content_sha="csha").workspace_file_path
-        == object_pool_path("csha")
-    )
+    assert ArtifactRef(
+        kind="data_object", logical_id="csha", content_sha="csha"
+    ).workspace_file_path == object_pool_path("csha")
     assert (
         ArtifactRef(kind="dataset", logical_id="lid", content_sha="csha").workspace_file_path
         == ".ockham/datasets/lid/csha.parquet"
@@ -130,8 +129,7 @@ def test_artifact_ref_xml_attrs_format() -> None:
     ref = ArtifactRef(kind="dataset", logical_id="lid", content_sha="csha")
     assert ref.to_xml_attrs() == 'kind="dataset" logical_id="lid" content_sha="csha"'
     assert (
-        ref.to_self_closing_tag("notebook_ref")
-        == '<notebook_ref kind="dataset" logical_id="lid" content_sha="csha"/>'
+        ref.to_self_closing_tag("notebook_ref") == '<notebook_ref kind="dataset" logical_id="lid" content_sha="csha"/>'
     )
     assert ref.to_self_closing_tag().startswith("<ref ")
 
@@ -219,9 +217,7 @@ def _nb_ref(name: str, content_sha: str | None = None) -> ArtifactRef:
     independently exercises the post-R1 invariant that dataset/chart
     identity hashes notebook ``logical_id`` only, never ``content_sha``.
     """
-    return ArtifactRef(
-        kind="notebook", logical_id=name, content_sha=content_sha or name
-    )
+    return ArtifactRef(kind="notebook", logical_id=name, content_sha=content_sha or name)
 
 
 def _do_ref(lid: str, csha: str) -> ArtifactRef:
@@ -234,9 +230,7 @@ def test_dataset_logical_id_ordering_invariance() -> None:
     sources = [_do_ref("L1", "C1"), _do_ref("L2", "C2")]
     sources_swapped = [_do_ref("L2", "C2"), _do_ref("L1", "C1")]
     a = dataset_logical_id(notebook_refs=nb, variable_name="df", source_refs=sources)
-    b = dataset_logical_id(
-        notebook_refs=nb_swapped, variable_name="df", source_refs=sources_swapped
-    )
+    b = dataset_logical_id(notebook_refs=nb_swapped, variable_name="df", source_refs=sources_swapped)
     assert a == b
 
 
@@ -244,18 +238,18 @@ def test_dataset_logical_id_distinguishes_inputs() -> None:
     nb = [_nb_ref("aaa")]
     s1 = [_do_ref("L1", "C1")]
     s2 = [_do_ref("L2", "C1")]
-    assert dataset_logical_id(
-        notebook_refs=nb, variable_name="df", source_refs=s1
-    ) != dataset_logical_id(notebook_refs=nb, variable_name="df", source_refs=s2)
+    assert dataset_logical_id(notebook_refs=nb, variable_name="df", source_refs=s1) != dataset_logical_id(
+        notebook_refs=nb, variable_name="df", source_refs=s2
+    )
 
 
 def test_dataset_logical_id_uses_source_logical_id_not_content_sha() -> None:
     nb = [_nb_ref("aaa")]
     a = [_do_ref("L1", "C1")]
     b = [_do_ref("L1", "C99")]  # same logical_id, different content_sha
-    assert dataset_logical_id(
-        notebook_refs=nb, variable_name="df", source_refs=a
-    ) == dataset_logical_id(notebook_refs=nb, variable_name="df", source_refs=b)
+    assert dataset_logical_id(notebook_refs=nb, variable_name="df", source_refs=a) == dataset_logical_id(
+        notebook_refs=nb, variable_name="df", source_refs=b
+    )
 
 
 def test_dataset_logical_id_uses_notebook_logical_id_not_content_sha() -> None:
@@ -269,9 +263,9 @@ def test_dataset_logical_id_uses_notebook_logical_id_not_content_sha() -> None:
     src = [_do_ref("L1", "C1")]
     a = [_nb_ref("us_macro", content_sha="csha-v1")]
     b = [_nb_ref("us_macro", content_sha="csha-v2")]
-    assert dataset_logical_id(
-        notebook_refs=a, variable_name="df", source_refs=src
-    ) == dataset_logical_id(notebook_refs=b, variable_name="df", source_refs=src)
+    assert dataset_logical_id(notebook_refs=a, variable_name="df", source_refs=src) == dataset_logical_id(
+        notebook_refs=b, variable_name="df", source_refs=src
+    )
 
 
 def test_dataset_logical_id_distinguishes_notebook_logical_id() -> None:
@@ -279,9 +273,9 @@ def test_dataset_logical_id_distinguishes_notebook_logical_id() -> None:
     src = [_do_ref("L1", "C1")]
     a = [_nb_ref("us_macro")]
     b = [_nb_ref("eu_macro")]
-    assert dataset_logical_id(
-        notebook_refs=a, variable_name="df", source_refs=src
-    ) != dataset_logical_id(notebook_refs=b, variable_name="df", source_refs=src)
+    assert dataset_logical_id(notebook_refs=a, variable_name="df", source_refs=src) != dataset_logical_id(
+        notebook_refs=b, variable_name="df", source_refs=src
+    )
 
 
 def test_dataset_logical_id_rejects_empty_variable_name() -> None:
@@ -383,9 +377,7 @@ def test_report_logical_id_title_participates() -> None:
 def test_report_logical_id_uses_logical_id_not_content_sha() -> None:
     a = [_ds_ref("L1", "C1")]
     b = [_ds_ref("L1", "C99")]
-    assert report_logical_id(embedded_refs=a, title="t") == report_logical_id(
-        embedded_refs=b, title="t"
-    )
+    assert report_logical_id(embedded_refs=a, title="t") == report_logical_id(embedded_refs=b, title="t")
 
 
 def test_report_logical_id_rejects_empty_title() -> None:

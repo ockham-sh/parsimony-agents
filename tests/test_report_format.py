@@ -141,9 +141,7 @@ def test_parse_empty_formats_falls_back_to_default() -> None:
 )
 def test_round_trip_arbitrary_format_lists(formats: list[str]) -> None:
     body = "Body content.\n"
-    text = compose_snapshot(
-        formats, {"sales": _SALES_REF}, body, title="Report"
-    )
+    text = compose_snapshot(formats, {"sales": _SALES_REF}, body, title="Report")
     snap = parse_snapshot(text)
     assert snap.formats == formats
     assert snap.pins == {"sales": _SALES_REF}

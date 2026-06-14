@@ -32,9 +32,7 @@ def _bare_executor(tmp_path: Path) -> MagicMock:
 
     code = "result_df = 1\n"
     csha = notebook_content_sha(code)
-    files[f".ockham/notebooks/producer/{csha}.py"] = serialize_notebook(
-        Script(path="notebooks/producer.py", code=code)
-    )
+    files[f".ockham/notebooks/producer/{csha}.py"] = serialize_notebook(Script(path="notebooks/producer.py", code=code))
     files[".ockham/notebooks/producer/log.jsonl"] = (
         json.dumps({"ts": "t1", "content_sha": csha, "inputs": {}}) + "\n"
     ).encode("utf-8")
@@ -44,10 +42,12 @@ def _bare_executor(tmp_path: Path) -> MagicMock:
     ex.get_origin = AsyncMock(side_effect=lambda name: ex.origin_ledger.get(name))
     ex.cwd = str(tmp_path)
     ex.write_workspace_file = AsyncMock(side_effect=lambda p, d: files.update({p: d}))
+
     async def _read(p):
         if p not in files:
             raise FileNotFoundError(p)
         return files[p]
+
     ex.read_workspace_file = AsyncMock(side_effect=_read)
     ex.execute = AsyncMock(return_value=KernelOutput(outputs=[]))
     ex.clear_namespace = AsyncMock()
@@ -167,9 +167,7 @@ async def test_return_report_pins_embedded_live_names(tmp_path: Path) -> None:
     # Seed a published dataset with live_name "sales".
     blob = b"FAKE_PARQUET_BYTES"
     csha = content_sha(blob)
-    await ex.write_workspace_file(
-        f".ockham/datasets/lid_x/{csha}.parquet", blob
-    )
+    await ex.write_workspace_file(f".ockham/datasets/lid_x/{csha}.parquet", blob)
     await ex.write_workspace_file(
         ".ockham/datasets/lid_x/curation.json",
         _json.dumps({"live_name": "sales"}).encode("utf-8"),
@@ -179,10 +177,7 @@ async def test_return_report_pins_embedded_live_names(tmp_path: Path) -> None:
         (_json.dumps({"ts": "t1", "content_sha": csha, "inputs": {}}) + "\n").encode("utf-8"),
     )
 
-    md = (
-        "# Title\n\nSee the dataset:\n\n"
-        "![](file://./data/sales.parquet)\n"
-    )
+    md = "# Title\n\nSee the dataset:\n\n![](file://./data/sales.parquet)\n"
     r = await agent.return_report(
         context=ctx,
         title="My Title",

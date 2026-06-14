@@ -29,6 +29,7 @@ def _make_executor(tmp_path: Path) -> CodeExecutor:
 # Test: infinite loop times out, result is a graceful TimeoutError output
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_execute_infinite_loop_times_out(tmp_path: Path) -> None:
     """execute("while True: pass", timeout_seconds=1) must return within ~3 s."""
@@ -52,6 +53,7 @@ async def test_execute_infinite_loop_times_out(tmp_path: Path) -> None:
 # Test: executor is still usable after a timeout (no wedge)
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_executor_still_usable_after_timeout(tmp_path: Path) -> None:
     """After a timeout the executor must not be permanently wedged."""
@@ -71,9 +73,7 @@ async def test_executor_still_usable_after_timeout(tmp_path: Path) -> None:
     # Step 3: eval should see the assignment from step 2.
     eval_out = await asyncio.wait_for(ex.eval("x", timeout_seconds=5), timeout=10)
     assert len(eval_out.outputs) == 1
-    assert not isinstance(eval_out.outputs[0], ExceptionObject), (
-        f"eval after timeout raised: {eval_out.outputs[0]}"
-    )
+    assert not isinstance(eval_out.outputs[0], ExceptionObject), f"eval after timeout raised: {eval_out.outputs[0]}"
     # The output value for the integer 1 should contain '1'.
     assert "1" in str(eval_out.outputs[0])
 
@@ -81,6 +81,7 @@ async def test_executor_still_usable_after_timeout(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Test: normal multi-cell namespace persistence is unaffected
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_namespace_persistence_unaffected(tmp_path: Path) -> None:
@@ -99,6 +100,7 @@ async def test_namespace_persistence_unaffected(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Test: top-level await cell still executes correctly
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_top_level_await_cell_works(tmp_path: Path) -> None:
@@ -126,6 +128,7 @@ async def test_top_level_await_cell_works(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 # Test: execute_workspace with an infinite loop also times out gracefully
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_execute_workspace_infinite_loop_times_out(tmp_path: Path) -> None:

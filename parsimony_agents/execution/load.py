@@ -87,7 +87,7 @@ def resolve_dataset_slug(
         raise LoadDatasetError(
             f"No published dataset has live_name {slug!r}. "
             "Check the available datasets in <turn_artifacts> (look at "
-            "the live_name attribute on each <artifact kind=\"dataset\">), "
+            'the live_name attribute on each <artifact kind="dataset">), '
             "or mint a new one with return_dataset."
         )
 
@@ -102,8 +102,7 @@ def resolve_dataset_slug(
     log = entry_dir / "log.jsonl"
     if not log.is_file():
         raise LoadDatasetError(
-            f"Dataset {slug!r} has no log.jsonl — it has not been "
-            "published yet. Mint it via return_dataset first."
+            f"Dataset {slug!r} has no log.jsonl — it has not been published yet. Mint it via return_dataset first."
         )
 
     last_csha: str | None = None
@@ -119,17 +118,11 @@ def resolve_dataset_slug(
         if isinstance(sha, str) and sha:
             last_csha = sha
     if last_csha is None:
-        raise LoadDatasetError(
-            f"Dataset {slug!r} log.jsonl has no usable entries. "
-            "Republish it via return_dataset."
-        )
+        raise LoadDatasetError(f"Dataset {slug!r} log.jsonl has no usable entries. Republish it via return_dataset.")
     # Cross-terminal gate: a dataset whose live_name we have never seen
     # belongs to a sibling terminal. Raise the canonical collision error
     # so the caller surfaces the standard recovery instruction.
-    if (
-        seen_live_names is not None
-        and ("dataset", slug) not in seen_live_names
-    ):
+    if seen_live_names is not None and ("dataset", slug) not in seen_live_names:
         raise LiveNameCollisionError(
             live_name=slug,
             existing_logical_id=logical_id,
@@ -180,13 +173,11 @@ def build_load_dataset(
             raise TypeError(
                 f"load_dataset takes a live_name string, got "
                 f"{type(slug).__name__}. Use the live_name shown in "
-                "<turn_artifacts> on the <artifact kind=\"dataset\"> row."
+                '<turn_artifacts> on the <artifact kind="dataset"> row.'
             )
         slug_clean = slug.strip()
         if not slug_clean:
-            raise ValueError(
-                "load_dataset: live_name must be a non-empty string."
-            )
+            raise ValueError("load_dataset: live_name must be a non-empty string.")
         root = workspace_root_provider()
         seen = seen_live_names_provider() if seen_live_names_provider else None
         try:

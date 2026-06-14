@@ -438,9 +438,7 @@ async def test_notebook_persist_failure_skips_event_and_warns(monkeypatch: pytes
 
     blob = " ".join(str(getattr(e, "llm_content", "")) + str(getattr(e, "result", "")) for e in events)
     assert "could not be saved" in blob, "notebook persist-failure warning was not surfaced to the LLM"
-    completed_code = [
-        e for e in events if getattr(e, "tool_type", None) == "code" and getattr(e, "completed", False)
-    ]
+    completed_code = [e for e in events if getattr(e, "tool_type", None) == "code" and getattr(e, "completed", False)]
     assert completed_code == [], "no completed code event may be emitted when the snapshot did not persist"
     nb_dir = cwd / ".ockham" / "notebooks"
     assert not nb_dir.exists() or not list(nb_dir.rglob("*.py")), "no notebook snapshot should exist on failure"

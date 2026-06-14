@@ -62,9 +62,7 @@ def make_fetch_logger(
             entry["row_count"] = len(df)
             entry["column_names"] = list(df.columns)
             entry["head"] = json.loads(df.head(5).to_json(orient="table"))
-            entry["tail"] = (
-                json.loads(df.tail(5).to_json(orient="table")) if len(df) > 10 else None
-            )
+            entry["tail"] = json.loads(df.tail(5).to_json(orient="table")) if len(df) > 10 else None
         else:
             entry["row_count"] = 1
             entry["column_names"] = []

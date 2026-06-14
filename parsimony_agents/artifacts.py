@@ -137,9 +137,7 @@ class Dataset(_ArtifactBase):
             {"type": "text", "text": f'<dataset title="{escape_attr(title)}">\n'},
         ]
         if self.description:
-            blocks.append(
-                {"type": "text", "text": f"<description>{escape_text(self.description)}</description>\n"}
-            )
+            blocks.append({"type": "text", "text": f"<description>{escape_text(self.description)}</description>\n"})
         if self.notes:
             blocks.append({"type": "text", "text": "<notes>\n"})
             blocks.extend({"type": "text", "text": f"- {escape_text(note)}\n"} for note in self.notes)
@@ -168,9 +166,7 @@ class Dataset(_ArtifactBase):
         from parsimony_agents.dataset_io import write_dataset_bytes
 
         if self._payload is None:
-            raise ValueError(
-                "Dataset.save: no payload attached. Call .with_payload(...) first."
-            )
+            raise ValueError("Dataset.save: no payload attached. Call .with_payload(...) first.")
         target = Path(path)
         if target.suffix != ".parquet":
             raise ValueError(f"Dataset.save: path must end in .parquet, got {path!r}")
@@ -245,9 +241,7 @@ class Chart(_ArtifactBase):
             {"type": "text", "text": f'<chart title="{escape_attr(title)}">\n'},
         ]
         if self.description:
-            blocks.append(
-                {"type": "text", "text": f"<description>{escape_text(self.description)}</description>\n"}
-            )
+            blocks.append({"type": "text", "text": f"<description>{escape_text(self.description)}</description>\n"})
         if self.notes:
             blocks.append({"type": "text", "text": "<notes>\n"})
             blocks.extend({"type": "text", "text": f"- {escape_text(note)}\n"} for note in self.notes)
@@ -278,9 +272,7 @@ class Chart(_ArtifactBase):
         from parsimony_agents.chart_io import write_chart_bytes
 
         if self._payload is None:
-            raise ValueError(
-                "Chart.save: no payload attached. Call .with_payload(...) first."
-            )
+            raise ValueError("Chart.save: no payload attached. Call .with_payload(...) first.")
         target = Path(path)
         if "".join(target.suffixes[-2:]) != ".vl.json":
             raise ValueError(f"Chart.save: path must end in .vl.json, got {path!r}")
@@ -360,9 +352,7 @@ class Report(_ArtifactBase):
             {"type": "text", "text": f'<report title="{escape_attr(title)}">\n'},
         ]
         if self.description:
-            blocks.append(
-                {"type": "text", "text": f"<description>{escape_text(self.description)}</description>\n"}
-            )
+            blocks.append({"type": "text", "text": f"<description>{escape_text(self.description)}</description>\n"})
         if self.notes:
             blocks.append({"type": "text", "text": "<notes>\n"})
             blocks.extend({"type": "text", "text": f"- {escape_text(note)}\n"} for note in self.notes)

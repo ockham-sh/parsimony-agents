@@ -76,9 +76,7 @@ def _vega_spec(value: int) -> FigureObject:
 
 
 def _nb_ref(name: str, code: str) -> ArtifactRef:
-    return ArtifactRef(
-        kind="notebook", logical_id=name, content_sha=notebook_content_sha(code)
-    )
+    return ArtifactRef(kind="notebook", logical_id=name, content_sha=notebook_content_sha(code))
 
 
 def _do_ref(provenance_id: str, content: str) -> ArtifactRef:
@@ -205,11 +203,7 @@ def _write_log(
 def _index_of(refs: list[ArtifactRef], target: ArtifactRef) -> int:
     """Index of ``target`` in ``refs`` by ``(kind, logical_id, content_sha)``."""
     for i, r in enumerate(refs):
-        if (
-            r.kind == target.kind
-            and r.logical_id == target.logical_id
-            and r.content_sha == target.content_sha
-        ):
+        if r.kind == target.kind and r.logical_id == target.logical_id and r.content_sha == target.content_sha:
             return i
     raise AssertionError(f"ref not in closure: {target}")
 
@@ -217,8 +211,7 @@ def _index_of(refs: list[ArtifactRef], target: ArtifactRef) -> int:
 def _assert_before(closure: list[ArtifactRef], dep: ArtifactRef, dependent: ArtifactRef) -> None:
     """Assert ``dep`` precedes ``dependent`` in a topological closure."""
     assert _index_of(closure, dep) < _index_of(closure, dependent), (
-        f"{dep.kind}/{dep.logical_id} must come before "
-        f"{dependent.kind}/{dependent.logical_id} in topological order"
+        f"{dep.kind}/{dep.logical_id} must come before {dependent.kind}/{dependent.logical_id} in topological order"
     )
 
 
@@ -268,9 +261,7 @@ class TestChildRefs:
         assert refs[1].logical_id == do.logical_id
 
     @pytest.mark.asyncio
-    async def test_chart_emits_notebook_then_source_datasets_then_source_refs(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_chart_emits_notebook_then_source_datasets_then_source_refs(self, tmp_path: Path) -> None:
         executor = _ReadOnlyExecutor(tmp_path)
         nb_code = "fig = {'mark': 'line'}"
         nb = _nb_ref("chart_nb", nb_code)
@@ -335,11 +326,7 @@ class TestChildRefs:
             executor,
             pin_map={"my_chart": ch, "my_data": ds},
             title="R",
-            markdown=(
-                "# R\n\n"
-                "![chart](file://./charts/my_chart.vl.json)\n\n"
-                "![data](file://./data/my_data.parquet)\n"
-            ),
+            markdown=("# R\n\n![chart](file://./charts/my_chart.vl.json)\n\n![data](file://./data/my_data.parquet)\n"),
         )
 
         refs = await child_refs(report, executor=executor)
@@ -359,6 +346,7 @@ class TestChildRefs:
     @pytest.mark.asyncio
     async def test_unsupported_kind_raises(self, tmp_path: Path) -> None:
         executor = _ReadOnlyExecutor(tmp_path)
+
         # ArtifactRef rejects unknown kinds at construction, so synthesise a
         # bare object with the right shape to exercise the closure guard.
         class _FakeRef:
@@ -408,9 +396,7 @@ class TestEnumerateClosure:
         assert len(closure) == 3
 
     @pytest.mark.asyncio
-    async def test_full_chain_report_chart_dataset_notebook_data_object(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_full_chain_report_chart_dataset_notebook_data_object(self, tmp_path: Path) -> None:
         executor = _ReadOnlyExecutor(tmp_path)
         # Source notebook + data_object
         ds_nb_code = "import pandas as pd\nds = pd.DataFrame({'x': [1]})"
@@ -444,11 +430,7 @@ class TestEnumerateClosure:
             executor,
             pin_map={"my_chart": ch, "my_data": ds},
             title="R",
-            markdown=(
-                "# R\n\n"
-                "![chart](file://./charts/my_chart.vl.json)\n\n"
-                "![data](file://./data/my_data.parquet)\n"
-            ),
+            markdown=("# R\n\n![chart](file://./charts/my_chart.vl.json)\n\n![data](file://./data/my_data.parquet)\n"),
         )
 
         closure = await enumerate_closure(report, executor=executor)
@@ -471,9 +453,7 @@ class TestEnumerateClosure:
         _assert_before(closure, ds, report)
 
     @pytest.mark.asyncio
-    async def test_diamond_dag_deduplicates_shared_dependency(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_diamond_dag_deduplicates_shared_dependency(self, tmp_path: Path) -> None:
         """Two charts share a dataset → dataset appears once in the closure."""
         executor = _ReadOnlyExecutor(tmp_path)
         ds_nb_code = "ds = 1"
@@ -515,11 +495,7 @@ class TestEnumerateClosure:
             executor,
             pin_map={"line": ch1, "bar": ch2},
             title="R",
-            markdown=(
-                "# R\n\n"
-                "![](file://./charts/line.vl.json)\n\n"
-                "![](file://./charts/bar.vl.json)\n"
-            ),
+            markdown=("# R\n\n![](file://./charts/line.vl.json)\n\n![](file://./charts/bar.vl.json)\n"),
         )
 
         closure = await enumerate_closure(report, executor=executor)
@@ -527,9 +503,7 @@ class TestEnumerateClosure:
         ds_count = sum(1 for r in closure if r.kind == "dataset" and r.logical_id == ds.logical_id)
         assert ds_count == 1
         # Shared dataset's source notebook appears exactly once.
-        nb_count = sum(
-            1 for r in closure if r.kind == "notebook" and r.logical_id == "etl"
-        )
+        nb_count = sum(1 for r in closure if r.kind == "notebook" and r.logical_id == "etl")
         assert nb_count == 1
         # Both charts present.
         chart_lids = {r.logical_id for r in closure if r.kind == "chart"}
@@ -602,9 +576,7 @@ class TestEnumerateClosure:
         assert closure[-1] == ds
 
     @pytest.mark.asyncio
-    async def test_uncommon_chart_from_data_objects_reaches_them(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_uncommon_chart_from_data_objects_reaches_them(self, tmp_path: Path) -> None:
         """The 'uncommon' case (chart.source_refs holds data_objects directly)
         must include those data_objects in the closure — that's the only path
         by which they're reachable, since notebooks don't statically expose

@@ -134,25 +134,22 @@ class IndexPolicyLinter(ast.NodeVisitor):
         Returns the variable name if matched, else None.
         """
         # x = x.reset_index(...)
-        if (
-            isinstance(stmt, ast.Assign)
-            and len(stmt.targets) == 1
-            and isinstance(stmt.targets[0], ast.Name)
-        ):
+        if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
             target_name = stmt.targets[0].id
-            if isinstance(stmt.value, ast.Call) and isinstance(
-                stmt.value.func, ast.Attribute
-            ) and (
-                stmt.value.func.attr == "reset_index"
-                and _get_base_name(stmt.value.func.value) == target_name
+            if (
+                isinstance(stmt.value, ast.Call)
+                and isinstance(stmt.value.func, ast.Attribute)
+                and (stmt.value.func.attr == "reset_index" and _get_base_name(stmt.value.func.value) == target_name)
             ):
                 return target_name
 
         # x.reset_index(..., inplace=True)
         if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
             call = stmt.value
-            if isinstance(call.func, ast.Attribute) and call.func.attr == "reset_index" and _has_kw_true(
-                call, kw_name="inplace"
+            if (
+                isinstance(call.func, ast.Attribute)
+                and call.func.attr == "reset_index"
+                and _has_kw_true(call, kw_name="inplace")
             ):
                 return _get_base_name(call.func.value)
 
@@ -295,9 +292,7 @@ class FrameworkImportLinter(ast.NodeVisitor):
     def _is_forbidden(self, name: str | None) -> bool:
         if not name:
             return False
-        return any(
-            name == p or name.startswith(p + ".") for p in self._FORBIDDEN_PREFIXES
-        )
+        return any(name == p or name.startswith(p + ".") for p in self._FORBIDDEN_PREFIXES)
 
     def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
         for alias in node.names:

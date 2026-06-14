@@ -70,9 +70,7 @@ def test_import_parsimony_agents_module_is_flagged() -> None:
 
 
 def test_from_parsimony_agents_submodule_is_flagged() -> None:
-    issues = check_code(
-        "from parsimony_agents.execution.load import load_dataset\n"
-    )
+    issues = check_code("from parsimony_agents.execution.load import load_dataset\n")
     assert _has_issue(issues, "pre-injected")
 
 

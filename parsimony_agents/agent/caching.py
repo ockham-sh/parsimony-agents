@@ -48,9 +48,7 @@ def _mark_last_text_block(message: dict[str, Any]) -> None:
     """
     content = message.get("content")
     if isinstance(content, str):
-        message["content"] = [
-            {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
-        ]
+        message["content"] = [{"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}]
         return
     if isinstance(content, list) and content:
         # Walk from the end; cache_control belongs on the last text-shaped

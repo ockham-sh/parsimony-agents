@@ -32,9 +32,7 @@ def _ctx_with_seen(session_id: str, kind: str, live_name: str) -> AgentContext:
         messages=[
             AgentMessage(
                 role="assistant",
-                content=Text(
-                    content=f'<artifact_ref kind="{kind}" live_name="{live_name}"/>'
-                ),
+                content=Text(content=f'<artifact_ref kind="{kind}" live_name="{live_name}"/>'),
             )
         ],
     )
@@ -115,9 +113,7 @@ def _seed_report(
     log_path = f".ockham/reports/{logical_id}/log.jsonl"
     cur_path = f".ockham/reports/{logical_id}/curation.json"
     executor.files[snap_path] = blob
-    executor.files[log_path] = (
-        json.dumps({"ts": "t1", "content_sha": csha, "inputs": {}}) + "\n"
-    ).encode("utf-8")
+    executor.files[log_path] = (json.dumps({"ts": "t1", "content_sha": csha, "inputs": {}}) + "\n").encode("utf-8")
     executor.files[cur_path] = json.dumps(
         {
             "kind": "report",
@@ -139,6 +135,7 @@ def _make_agent(executor: _ReportExecutor) -> Agent:
         session_id="s",
     )
     agent.code_executor = executor  # type: ignore[assignment]
+
     # Bypass ref-resolve validation: that helper queries the workspace
     # API; for unit tests we trust the stub FS.
     async def _accept(_refs):
@@ -217,8 +214,7 @@ async def test_edit_report_errors_when_log_missing() -> None:
     ex = _ReportExecutor()
     # Seed a curation but no snapshot/log files.
     ex.files[".ockham/reports/ghost/curation.json"] = json.dumps(
-        {"kind": "report", "logical_id": "ghost", "title": "T",
-         "tags": [], "notes": [], "live_name": "ghost-slug"}
+        {"kind": "report", "logical_id": "ghost", "title": "T", "tags": [], "notes": [], "live_name": "ghost-slug"}
     ).encode("utf-8")
     agent = _make_agent(ex)
     ctx = _ctx_with_seen("s", "report", "ghost-slug")
@@ -274,8 +270,10 @@ async def test_edit_report_resolves_to_latest_snapshot() -> None:
     snap_path2 = f".ockham/reports/rep4/{csha2}.qmd"
     ex.files[snap_path2] = md2.encode("utf-8")
     ex.files[".ockham/reports/rep4/log.jsonl"] = (
-        json.dumps({"ts": "t1", "content_sha": csha1, "inputs": {}}) + "\n"
-        + json.dumps({"ts": "t2", "content_sha": csha2, "inputs": {}}) + "\n"
+        json.dumps({"ts": "t1", "content_sha": csha1, "inputs": {}})
+        + "\n"
+        + json.dumps({"ts": "t2", "content_sha": csha2, "inputs": {}})
+        + "\n"
     ).encode("utf-8")
     ex.files[".ockham/reports/rep4/curation.json"] = json.dumps(
         {"kind": "report", "logical_id": "rep4", "title": "T", "tags": [], "notes": [], "live_name": "report-4"}

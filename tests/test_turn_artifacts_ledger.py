@@ -94,8 +94,8 @@ def test_fuse_preserves_cross_turn_order_with_appended_minted() -> None:
     out = fuse_workspace_artifacts(cross_turn, minted)
     assert [a.kind for a in out] == ["notebook", "dataset", "chart"]
     assert out[0].new is False  # notebook unchanged
-    assert out[1].new is True   # dataset advanced
-    assert out[2].new is True   # chart brand-new
+    assert out[1].new is True  # dataset advanced
+    assert out[2].new is True  # chart brand-new
 
 
 # ---------------------------------------------------------------------------
@@ -228,9 +228,7 @@ def test_turn_state_starts_with_empty_minted_refs() -> None:
     state = TurnState()
     assert state.minted_refs == []
     assert state.minted_live_names == {}
-    state.minted_refs.append(
-        ArtifactRef(kind="dataset", logical_id="lid", content_sha="cs")
-    )
+    state.minted_refs.append(ArtifactRef(kind="dataset", logical_id="lid", content_sha="cs"))
     state.minted_live_names["dataset:lid"] = "my_slug"
     assert len(state.minted_refs) == 1
     assert state.minted_live_names == {"dataset:lid": "my_slug"}

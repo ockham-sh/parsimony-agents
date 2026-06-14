@@ -130,9 +130,7 @@ async def test_persisted_file_carries_only_result_provenance(tmp_path: Path) -> 
 
     persist = make_data_object_persister(tmp_path)
     df = pd.DataFrame({"date": ["2024-01-01"], "value": [1.5]})
-    out = await persist(
-        _make_result(df, source="fred_fetch", params={"series_id": "UNRATE"})
-    )
+    out = await persist(_make_result(df, source="fred_fetch", params={"series_id": "UNRATE"}))
     assert out is not None
     ref, _ = out
     blob = (tmp_path / ref.workspace_file_path).read_bytes()

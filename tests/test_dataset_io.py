@@ -73,9 +73,7 @@ def test_write_dataset_bytes_roundtrips(sample_df: pd.DataFrame, tmp_path: Path)
     assert recovered.logical_id == "lid-abc"
 
 
-def test_serialize_dataset_alias_matches_write_dataset_bytes(
-    sample_df: pd.DataFrame, tmp_path: Path
-) -> None:
+def test_serialize_dataset_alias_matches_write_dataset_bytes(sample_df: pd.DataFrame, tmp_path: Path) -> None:
     """``serialize_dataset`` is the dispatcher-friendly alias and must behave identically."""
 
     dataset = Dataset(title="Streaming", tags=["streaming"])
@@ -102,9 +100,7 @@ def test_deserialize_handles_vanilla_parquet(sample_df: pd.DataFrame, tmp_path: 
     assert dataset.notebook_refs == []
 
 
-def test_deserialize_returns_empty_dataset_for_vanilla_parquet(
-    sample_df: pd.DataFrame, tmp_path: Path
-) -> None:
+def test_deserialize_returns_empty_dataset_for_vanilla_parquet(sample_df: pd.DataFrame, tmp_path: Path) -> None:
     r = TabularResult(
         data=sample_df,
         provenance=Provenance(source="fred", source_description="fred", params={"series_id": "GDPC1"}),
@@ -118,9 +114,7 @@ def test_deserialize_returns_empty_dataset_for_vanilla_parquet(
     assert result.provenance.params == {"series_id": "GDPC1"}
 
 
-def test_write_dataset_bytes_persists_variable_name(
-    sample_df: pd.DataFrame, tmp_path: Path
-) -> None:
+def test_write_dataset_bytes_persists_variable_name(sample_df: pd.DataFrame, tmp_path: Path) -> None:
     """R2: ``variable_name`` survives the parquet round-trip via embedded curation."""
     dataset = Dataset(
         title="Demo",
@@ -181,5 +175,3 @@ def test_metadata_key_is_present_on_disk(sample_df: pd.DataFrame, tmp_path: Path
     metadata = table.schema.metadata or {}
     assert CURATION_META_KEY in metadata
     assert b"parsimony.result" in metadata
-
-

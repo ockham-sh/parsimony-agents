@@ -68,8 +68,10 @@ def trace_tool_execution(
                         if has_error:
                             error_message = tool_result.exception_message
 
-                    if not has_error and hasattr(tool_result, "data") and hasattr(
-                        tool_result.data, "exception_message"
+                    if (
+                        not has_error
+                        and hasattr(tool_result, "data")
+                        and hasattr(tool_result.data, "exception_message")
                     ):
                         has_error = tool_result.data.exception_message is not None
                         if has_error:

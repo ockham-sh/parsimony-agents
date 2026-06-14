@@ -83,34 +83,64 @@ def test_snapshot_dedup_no_op_when_zero_or_one_snapshot() -> None:
 
 def test_mode_heuristic_compacts_old_tool_observations() -> None:
     """Tool messages before the iteration cutoff render minimal; at/after → default."""
-    assert infer_message_mode(
-        index=2, is_last_tool_message=False, role="tool", default_cutoff=4,
-    ) == "minimal"
-    assert infer_message_mode(
-        index=6, is_last_tool_message=False, role="tool", default_cutoff=4,
-    ) == "default"
+    assert (
+        infer_message_mode(
+            index=2,
+            is_last_tool_message=False,
+            role="tool",
+            default_cutoff=4,
+        )
+        == "minimal"
+    )
+    assert (
+        infer_message_mode(
+            index=6,
+            is_last_tool_message=False,
+            role="tool",
+            default_cutoff=4,
+        )
+        == "default"
+    )
 
 
 def test_mode_heuristic_non_tool_roles_never_compacted() -> None:
     """Assistant / user messages always render default — they carry the reasoning thread."""
     for role in ("assistant", "user"):
-        assert infer_message_mode(
-            index=0, is_last_tool_message=False, role=role, default_cutoff=99,
-        ) == "default"
+        assert (
+            infer_message_mode(
+                index=0,
+                is_last_tool_message=False,
+                role=role,
+                default_cutoff=99,
+            )
+            == "default"
+        )
 
 
 def test_mode_heuristic_last_tool_message_is_default() -> None:
     """The last role='tool' message is always default even before the iteration cutoff."""
-    assert infer_message_mode(
-        index=2, is_last_tool_message=True, role="tool", default_cutoff=99,
-    ) == "default"
+    assert (
+        infer_message_mode(
+            index=2,
+            is_last_tool_message=True,
+            role="tool",
+            default_cutoff=99,
+        )
+        == "default"
+    )
 
 
 def test_mode_heuristic_system_role_always_default() -> None:
     """System-tool messages always render at full fidelity (exact error text matters)."""
-    assert infer_message_mode(
-        index=0, is_last_tool_message=False, role="system", default_cutoff=99,
-    ) == "default"
+    assert (
+        infer_message_mode(
+            index=0,
+            is_last_tool_message=False,
+            role="system",
+            default_cutoff=99,
+        )
+        == "default"
+    )
 
 
 def test_recent_iterations_cutoff_delimits_by_assistant() -> None:
@@ -272,12 +302,12 @@ def test_only_last_tool_message_gets_default_mode() -> None:
     """An old tool observation compacts; the recent one and the last tool stay default."""
     msgs: list[_StubMsg] = [
         _StubMsg(role="user", content="u0"),
-        _StubMsg(role="assistant", content="a1"),    # idx 1 — iteration 1
+        _StubMsg(role="assistant", content="a1"),  # idx 1 — iteration 1
         _StubMsg(role="tool", content="early-tool"),  # idx 2 — old observation
-        _StubMsg(role="assistant", content="a2"),    # idx 3 — iteration 2 (cutoff)
-        _StubMsg(role="tool", content="mid-tool"),    # idx 4 — recent observation
-        _StubMsg(role="assistant", content="a3"),    # idx 5 — iteration 3
-        _StubMsg(role="tool", content="late-tool"),   # idx 6 — the last tool
+        _StubMsg(role="assistant", content="a2"),  # idx 3 — iteration 2 (cutoff)
+        _StubMsg(role="tool", content="mid-tool"),  # idx 4 — recent observation
+        _StubMsg(role="assistant", content="a3"),  # idx 5 — iteration 3
+        _StubMsg(role="tool", content="late-tool"),  # idx 6 — the last tool
     ]
     state = RunState(run_id="r1", session_id="s1", messages=msgs)
     render_for_llm(state, instructions="agent")
