@@ -240,7 +240,7 @@ the recovery funnel, not the call site.
 ### Connectors as tools
 
 A bundle passed to `Agent(connectors=...)` is wrapped per-kernel by a memoizing layer. The LLM
-calls connectors as kernel locals — `result = await client['fred_fetch'](series_id='GDPC1')`.
+calls connectors as kernel locals — `result = client['fred_fetch'](series_id='GDPC1')`.
 Identical-argument calls within one kernel lifetime return the cached result instead of
 re-hitting the network, but post-fetch hooks (the data-object persister and the fetch logger)
 run on every call so lineage and logs stay truthful. Connectors are **not** dumped into the
