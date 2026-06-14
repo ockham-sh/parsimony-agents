@@ -34,11 +34,10 @@ workspace is deleted.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import io
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -57,17 +56,18 @@ __all__ = ["make_data_object_persister"]
 
 def make_data_object_persister(
     workspace_root: Path,
-) -> Callable[[Any], Awaitable[tuple[ArtifactRef, None] | None]]:
-    """Build an async connector callback that snapshots each ``Result``.
+) -> Callable[[Any], tuple[ArtifactRef, None] | None]:
+    """Build a connector callback that snapshots each ``Result``.
 
-    Returns ``(ref, None)`` on success or ``None`` on failure. Data objects
-    are not versioned — each fetch is an immutable pool entry keyed by
-    ``content_sha``.
+    The callback is synchronous — connectors are sync, so the post-fetch
+    hook chain runs inline on the calling thread. Returns ``(ref, None)``
+    on success or ``None`` on failure. Data objects are not versioned —
+    each fetch is an immutable pool entry keyed by ``content_sha``.
     """
 
     root = workspace_root.resolve()
 
-    def _do_persist_sync(result: Any) -> tuple[ArtifactRef, None] | None:
+    def _persist(result: Any) -> tuple[ArtifactRef, None] | None:
         try:
             table = _canonicalize_arrow_table(result.to_arrow())
             logical_id = data_object_logical_id(result.provenance)
@@ -90,9 +90,6 @@ def make_data_object_persister(
             return ref, None
         except Exception:
             return None
-
-    async def _persist(result: Any) -> tuple[ArtifactRef, None] | None:
-        return await asyncio.to_thread(_do_persist_sync, result)
 
     return _persist
 
