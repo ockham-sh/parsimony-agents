@@ -593,7 +593,8 @@ class CodeExecutor(BaseCodeExecutor):
         ``connectors`` is a mapping ``{binding_name: Connectors}``: each entry
         is bound as a local under ``binding_name``, with a shared fetch logger
         wrapping every connector. A single :class:`Connectors` is also accepted
-        and treated as ``{"client": connectors}`` for backwards compatibility.
+        and treated as ``{"connectors": connectors}`` (same binding as the
+        terminal product and the agent system prompt).
         """
         self._connectors = normalize_connector_bundles(connectors)
         async with self._exec_lock:

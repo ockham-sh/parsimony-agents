@@ -27,7 +27,7 @@ class TestAgentResult:
         assert r.text == ""
         assert r.datasets == {}
         assert r.charts == {}
-        assert r.code == {}
+        assert r.reports == {}
         assert r.context is None
         assert r.events == []
         assert r.ok is True
@@ -65,7 +65,6 @@ class TestAgentResult:
         mock_ctx = MagicMock()
         r._collect(StateSnapshot(context=mock_ctx))
         assert r.context is mock_ctx
-        assert r.code == {}
 
 
 # ---------------------------------------------------------------------------

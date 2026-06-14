@@ -84,7 +84,7 @@ Discover before fetching unless the user gave exact identifiers. Discovery is La
 
 ## Within-notebook re-fetch is free
 
-Identical connector calls within one kernel lifetime are memoized — the second `await connectors["fred_series"](series_id="GDPC1", ...)` with the same params does not re-hit the network. Iterate freely; `restart_kernel` if you need a clean slate.
+Identical connector calls within one kernel lifetime are memoized — the second `connectors["fred_series"](series_id="GDPC1", ...)` with the same params does not re-hit the network. Iterate freely; `restart_kernel` if you need a clean slate.
 
 ## Validation in dry_execute_code
 
@@ -212,7 +212,7 @@ Your text response is conversational narrative — what you found, what's notewo
 
 # H. Connectors and Dynamic Dates
 
-`dry_execute_code` and notebooks have a single `connectors` bundle in scope. Each entry is a typed awaitable: `result = await connectors["<name>"](param=value, ...)`. The result has `.data` (DataFrame), `.columns`, and `.provenance`.
+`dry_execute_code` and notebooks have a single `connectors` bundle in scope. Each entry is a typed callable: `result = connectors["<name>"](param=value, ...)`. The result has `.data` (DataFrame), `.columns`, and `.provenance`.
 
 Authoritative names, parameters, and output schemas appear in the `<available_connectors>` block. Use only names listed there. Search before fetching unless the user already gave exact identifiers, and batch discovery calls in one dry_execute_code block.
 
