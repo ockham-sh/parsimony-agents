@@ -14,7 +14,7 @@ Prerequisites::
 
 Run::
 
-    python -m parsimony_agents.examples.event_stream
+    python -m examples.event_stream
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ async def main() -> None:
         return
 
     agent = Agent(
-        model="claude-sonnet-4-6",
+        model="gemini/gemini-2.5-flash",
         connectors=FRED.bind(api_key=fred_key),
     )
 

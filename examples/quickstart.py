@@ -8,14 +8,14 @@ Prerequisites::
 
 Run::
 
-    python -m parsimony_agents.examples.quickstart
+    python -m examples.quickstart
 
 For direct event access (custom UIs, websockets), see ``event_stream.py``.
 
 This example uses FRED (free API key) but you can compose any connectors. A
 :class:`~parsimony.Connectors` collection combines with ``+``::
 
-    from parsimony_sdmx import CONNECTORS as SDMX
+    from parsimony_sdmx import CONNECTORS as SDMX  # pip install parsimony-sdmx (pulls catalog stack)
 
     connectors = FRED.bind(api_key="...") + SDMX
 """
@@ -38,7 +38,7 @@ async def main() -> None:
         return
 
     agent = Agent(
-        model="gemini/gemini-3-flash-preview",
+        model="gemini/gemini-2.5-flash",
         connectors=FRED.bind(api_key=fred_key),
     )
 

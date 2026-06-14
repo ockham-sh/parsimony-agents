@@ -28,10 +28,10 @@ class TestRenderConnectorCatalog:
     def test_none_yields_empty_string(self) -> None:
         assert render_connector_catalog(None) == ""
 
-    def test_bare_connectors_renders_under_client_binding(self) -> None:
+    def test_bare_connectors_renders_under_connectors_binding(self) -> None:
         bundle = _bundle("### foo\n", length=3)
         text = render_connector_catalog(bundle)
-        assert text.startswith("## `client` (3)")
+        assert text.startswith("## `connectors` (3)")
         assert "### foo" in text
 
     def test_mapping_renders_each_binding_in_order(self) -> None:

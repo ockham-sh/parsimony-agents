@@ -45,7 +45,7 @@ discipline is what makes the loop predictable enough to embed in a product.
 - **Code-writing agent loop.** A single ReAct loop (`run_loop`) with three detector phases
   (pre-step / post-LLM / post-tool), one LLM chokepoint, and one failure-recovery funnel.
 - **Connectors as tools.** Bring any `parsimony` `Connectors` bundle; the agent calls them as
-  kernel locals (`client['fred_fetch'](series_id=...)`) and they're memoized per kernel.
+  kernel locals (`connectors['fred_fetch'](series_id=...)`) and they're memoized per kernel.
 - **Typed artifacts.** `Dataset` → Parquet, `Chart` → Vega-Lite JSON, `Report` → Quarto `.qmd`.
   Open formats with embedded curation/lineage metadata that round-trip through pure codecs.
 - **Streamed events.** `Agent.run()` is an async generator of typed events (`TextDelta`,
@@ -136,10 +136,9 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`Agent.ask()` returns an `AgentResult` — a dataclass with `text`, `datasets` and `charts`
-(keyed by `logical_id`), `context` (for multi-turn continuation), `events` (the full event
-log), and an `ok` property. (There is also a `code` field, but the result collector only
-populates `datasets` and `charts`, so `code` is currently always an empty dict.)
+`Agent.ask()` returns an `AgentResult` — a dataclass with `text`, `datasets`, `charts`, and
+`reports` (keyed by `logical_id`), `context` (for multi-turn continuation), `events` (the full
+event log), and an `ok` property.
 
 ### Streaming the raw event loop
 
@@ -190,7 +189,7 @@ result = await stream_to_display(agent, "Now show me how it changed since 2020",
 ### Composing connectors
 
 `connectors=` accepts a single `parsimony` `Connectors` bundle (bound under the kernel local
-name `client`) or a `Mapping[str, Connectors]` to name each bundle. Combine several into one
+name `connectors`) or a `Mapping[str, Connectors]` to name each bundle. Combine several into one
 with the `+` operator (`Connectors.__add__` concatenates two bundles; `Connectors.bind(**kwargs)`
 returns a bound copy):
 
@@ -240,7 +239,7 @@ the recovery funnel, not the call site.
 ### Connectors as tools
 
 A bundle passed to `Agent(connectors=...)` is wrapped per-kernel by a memoizing layer. The LLM
-calls connectors as kernel locals — `result = client['fred_fetch'](series_id='GDPC1')`.
+calls connectors as kernel locals — `result = connectors['fred_fetch'](series_id='GDPC1')`.
 Identical-argument calls within one kernel lifetime return the cached result instead of
 re-hitting the network, but post-fetch hooks (the data-object persister and the fetch logger)
 run on every call so lineage and logs stay truthful. Connectors are **not** dumped into the
@@ -392,7 +391,7 @@ Top-level imports (`from parsimony_agents import ...`):
 | Symbol | What it is |
 |---|---|
 | `Agent` | The data-analysis agent. `ask()` → `AgentResult`; `run()` → event stream; `resume()` → resume a suspended run |
-| `AgentResult` | Structured result: `text`, `datasets`, `charts`, `code`, `context`, `events`, `.ok` |
+| `AgentResult` | Structured result: `text`, `datasets`, `charts`, `reports`, `context`, `events`, `.ok` |
 | `Chart`, `Dataset`, `Report` | The typed deliverables (Vega-Lite / Parquet / Quarto) |
 | `Script`, `ScriptPreview` | A workspace notebook (`.py`) and its UI projection |
 | `serialize_chart` / `deserialize_chart` / `read_chart` | Chart codec |

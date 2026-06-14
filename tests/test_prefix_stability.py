@@ -50,8 +50,8 @@ def test_catalog_render_sorts_bundles_by_binding_name():
 
 def test_catalog_render_with_single_bundle_is_stable():
     """Single-bundle path is also deterministic across repeated renders."""
-    a = render_connector_catalog({"client": _bundle("### s\n", length=1)})
-    b = render_connector_catalog({"client": _bundle("### s\n", length=1)})
+    a = render_connector_catalog({"connectors": _bundle("### s\n", length=1)})
+    b = render_connector_catalog({"connectors": _bundle("### s\n", length=1)})
     assert a == b
 
 
