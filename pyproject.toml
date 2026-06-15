@@ -49,7 +49,6 @@ documents = [
 ]
 examples = [
     "parsimony-fred",
-    "parsimony-sdmx",
     "parsimony-fmp",
     "python-dotenv>=1.2.2",
 ]

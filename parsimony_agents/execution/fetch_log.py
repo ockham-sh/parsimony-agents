@@ -17,9 +17,8 @@ the producing notebook's lineage automatically accumulates fetch edges
 
 from __future__ import annotations
 
-import inspect
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
@@ -27,18 +26,18 @@ import pandas as pd
 from parsimony_agents.execution.run_scope import OriginLedger
 from parsimony_agents.identity import ArtifactRef
 
-PersistFn = Callable[
-    [Any],
-    Awaitable[tuple[ArtifactRef, int | None] | None] | tuple[ArtifactRef, int | None] | None,
-]
+PersistFn = Callable[[Any], tuple[ArtifactRef, int | None] | None]
 
 
 def make_fetch_logger(
     persist_fn: PersistFn | None = None,
     *,
     ledger: OriginLedger | None = None,
-) -> tuple[list[dict[str, Any]], Callable[[Any], Awaitable[None]]]:
-    """Create a fetch-log list and an async callback that appends to it.
+) -> tuple[list[dict[str, Any]], Callable[[Any], None]]:
+    """Create a fetch-log list and a callback that appends to it.
+
+    The callback is synchronous: connectors are sync, so the post-fetch
+    hook chain runs inline on the calling thread.
 
     When *persist_fn* is supplied, it is invoked with each ``Result`` and
     its ``(ref, version)`` return is split onto the entry as
@@ -52,7 +51,7 @@ def make_fetch_logger(
 
     fetch_log: list[dict[str, Any]] = []
 
-    async def _log_fetch(result: Any) -> None:
+    def _log_fetch(result: Any) -> None:
         entry: dict[str, Any] = {
             "provenance": result.provenance,
             "columns": [c.model_dump(mode="json") for c in result.columns],
@@ -69,8 +68,7 @@ def make_fetch_logger(
             entry["head"] = {"data": str(result.data)[:500]}
             entry["tail"] = None
         if persist_fn is not None:
-            ret = persist_fn(result)
-            value = await ret if inspect.isawaitable(ret) else ret
+            value = persist_fn(result)
             if value is not None:
                 ref, version = value
                 entry["data_object_ref"] = ref

@@ -1071,7 +1071,7 @@ async def stream_to_display(
             (default False — the in-terminal summary is always shown).
 
     Returns:
-        AgentResult with ``.text``, ``.datasets``, ``.code``, ``.charts``, ``.reports``, ``.context``.
+        AgentResult with ``.text``, ``.datasets``, ``.charts``, ``.reports``, ``.context``.
     """
     # Suppress noisy internal logging during display
     _quiet_loggers = [
@@ -1165,7 +1165,7 @@ async def stream_to_display(
         display.show_fetches(fetch_entries)
 
     if show_code:
-        display.show_code(result.code, max_lines=max_code_lines)
+        display.show_code({}, max_lines=max_code_lines)
 
     if show_data:
         display.show_datasets(result.datasets, max_rows=max_table_rows, context=result.context)
@@ -1181,7 +1181,7 @@ async def stream_to_display(
         tool_count=tool_count,
         dataset_count=len(result.datasets),
         chart_count=len(result.charts),
-        notebook_count=len(result.code),
+        notebook_count=0,
         error_count=error_count,
         report_count=len(result.reports),
     )
@@ -1216,7 +1216,7 @@ def display_result(
         display.show_fetches(fetch_entries)
 
     if show_code:
-        display.show_code(result.code, max_lines=max_code_lines)
+        display.show_code({}, max_lines=max_code_lines)
 
     if show_data:
         display.show_datasets(result.datasets, max_rows=max_table_rows, context=result.context)
@@ -1233,7 +1233,7 @@ def display_result(
         ),
         dataset_count=len(result.datasets),
         chart_count=len(result.charts),
-        notebook_count=len(result.code),
+        notebook_count=0,
         error_count=sum(1 for e in result.events if getattr(e, "type", None) == "error"),
         report_count=len(result.reports),
     )

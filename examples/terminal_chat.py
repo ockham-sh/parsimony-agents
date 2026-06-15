@@ -16,7 +16,7 @@ Prerequisites::
 
 Run::
 
-    python -m parsimony_agents.examples.terminal_chat
+    python -m examples.terminal_chat
 
 Type "exit" or press Ctrl+D to quit. Press Ctrl+C to cancel a response.
 
@@ -49,7 +49,7 @@ async def main() -> None:
     connectors = discover.load_all()
 
     agent = Agent(
-        model="gemini/gemini-3-flash-preview",
+        model="gemini/gemini-2.5-flash",
         connectors=connectors,
     )
 

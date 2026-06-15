@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import tempfile
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
@@ -12,6 +13,8 @@ from datetime import UTC
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
+
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 import litellm
 import pandas as pd
@@ -156,9 +159,6 @@ class AgentResult:
 
     reports: dict[str, Report] = field(default_factory=dict)
     """Returned :class:`Report` objects keyed by ``logical_id``."""
-
-    code: dict[str, Script] = field(default_factory=dict)
-    """Returned :class:`Script` objects keyed by notebook path (execution order preserved)."""
 
     context: AgentContext | None = None
     """Final :class:`AgentContext` — use for multi-turn continuation or inspection."""
@@ -466,8 +466,7 @@ class Agent:
 
             result = await agent.ask("Show me US GDP trends")
             print(result.text)        # assistant's text response
-            print(result.datasets)    # {"us_gdp": DataFrame}
-            print(result.code)        # {"main": "import pandas as ..."}
+            print(result.datasets)    # Dataset objects keyed by logical_id
             assert result.ok
         """
         result = AgentResult()

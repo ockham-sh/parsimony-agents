@@ -175,7 +175,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-A bare `Connectors` bundle is exposed to the kernel under the binding name `client`. To expose
+A bare `Connectors` bundle is exposed to the kernel under the binding name `connectors`. To expose
 several bundles, pass a mapping — each key becomes the binding name the agent sees in the
 connector catalog:
 
