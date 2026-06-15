@@ -23,8 +23,8 @@ discovery (`parsimony.discover`) used throughout the framework.
 
 ## pip install parsimony-agents
 
-The base install gives you the full agent loop, in-process code execution, charts
-(Altair / Vega-Lite), and the streaming event API:
+The base install gives you the full agent loop, code execution (with optional
+out-of-process sandboxing when deployed), charts (Altair / Vega-Lite), and the streaming event API:
 
 ```bash
 pip install parsimony-agents

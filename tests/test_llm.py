@@ -25,8 +25,31 @@ from parsimony_agents.agent.llm import (
     LLMResponse,
     LLMTextDelta,
     LLMToolCallStarted,
+    _classify_litellm_exception,
     call_llm,
 )
+
+
+class _AuthenticationError(Exception):
+    """Stand-in matching litellm's permanent-class name for classification."""
+
+
+_AuthenticationError.__name__ = "AuthenticationError"
+
+
+def test_classify_redacts_secrets_in_provider_message() -> None:
+    # A provider error whose message embeds a request URL with an api_key must
+    # not carry that key into the recorder metadata (an audit viewer may show it).
+    exc = _AuthenticationError("401 from https://api.provider.test/v1/chat?api_key=sk-secret-123&model=x")
+    failure = _classify_litellm_exception(exc)
+    detail = failure.metadata["detail"]
+    assert failure.kind is FailureKind.capability_gap
+    # The key value is masked; the rest of the URL (host, param names) survives,
+    # proving the message was redacted in place rather than just dropped.
+    assert "sk-secret-123" not in detail
+    assert "api.provider.test" in detail
+    assert "api_key" in detail
+
 
 # ---------------------------------------------------------------------------
 # Helpers: stub litellm-style streaming response

@@ -38,7 +38,7 @@ You cannot pass both `model=` and `model_config=` — the constructor treats `mo
 
 ## Bind a connector for data
 
-On its own the agent can reason and run code, but it has no way to reach external data sources. **Connectors** are the bridge. A connector package exports a `CONNECTORS` object — a [`Connectors`](../concepts/connectors.md) collection — and you bind any required secrets onto it before handing it to the agent.
+On its own the agent can reason and run code, but it has no way to reach external data sources. **Connectors** are the bridge. A connector package exports a `CONNECTORS` object — a [`Connectors`](../concepts/connectors.md) collection — and you bind any required secrets onto it before passing it to the agent's constructor. Behind the scenes, under the sandbox the agent's code only ever sees a name-routed `RemoteConnector` stub for each connector — the credentialed connector stays in the trusted supervisor. Under the out-of-process sandbox (bubblewrap on Linux) the agent's code runs in a separate, no-network kernel and bound credentials never enter it; in the in-process fallback there is no process boundary. See [Code execution](../concepts/code-execution.md) for the boundary tiers.
 
 The FRED connector (Federal Reserve Economic Data) is a good first connector because the API key is free. Get one at <https://fred.stlouisfed.org/docs/api/api_key.html>.
 

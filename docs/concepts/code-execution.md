@@ -2,10 +2,13 @@
 
 When an agent answers a data question, it does not hand you a paragraph — it
 writes Python, runs it, and shows you the result. This page explains the engine
-that runs that code: a persistent in-process kernel that injects analysis
-libraries and connectors, captures every result as a *typed* output, sandboxes
-the code against secret-leaking system calls, enforces per-cell timeouts, and
-records who produced each variable so artifacts stay traceable.
+that runs that code: an isolated kernel that runs in a separate process (under
+bwrap network/IPC/pid isolation on Linux, or in-process as a fallback on
+non-Linux self-host), injects analysis libraries and connector proxies,
+captures every result as a *typed* output, enforces per-cell timeouts, and
+records who produced each variable so artifacts stay traceable. Credentials are
+never sent to the kernel—they are held in a trusted supervisor process and
+accessed only via RPC.
 
 If you only embed the [`Agent`](../reference/agent.md), you rarely touch the
 executor directly — it is created and driven for you. But understanding it tells
@@ -13,9 +16,14 @@ you exactly what the agent's code can and cannot do, what comes back from each
 cell, and how to extend the kernel (custom output types, remote sandboxes,
 storage backends) when you host Parsimony Agents in your own application.
 
-The executor lives in `parsimony_agents.execution`. The in-process default is
-`CodeExecutor`; the abstract contract every executor satisfies is
-`BaseCodeExecutor`.
+The executor lives in `parsimony_agents.execution`. The abstract contract every
+executor satisfies is `BaseCodeExecutor`. On Linux with bubblewrap support,
+`SandboxedCodeExecutor` runs the kernel in a separate process under bwrap
+network/pid/ipc/uts/user isolation (the "namespaces" capability tier). On
+non-Linux self-host or when bwrap is unavailable, execution falls back to
+in-process (the "none" capability tier, with a loud warning). The capability
+tier is the trust signal behind credential isolation and is exposed on the
+executor service /health endpoint.
 
 ```python
 from pathlib import Path
@@ -77,10 +85,10 @@ the common analysis stack:
 | `datetime`, `timedelta`, `timezone` | the corresponding classes from the `datetime` module |
 | `load_dataset` | the dataset-loading primitive (see below) |
 | `read_pdf_text`, `read_excel`, `read_pptx_text` | document readers (see below) |
-| each bound connector | injected via `set_connectors` |
+| each connector (e.g. `fred`) | bound via `set_connectors` as a name-routed `RemoteConnector` stub; the real connector (with credentials) stays in the broker |
 
-Connectors are injected separately with `set_connectors`, which accepts a single
-`Connectors` bundle or a `Mapping[str, Connectors]` for named bindings:
+Connectors are bound in the supervisor and exposed to the kernel via `set_connectors`,
+which accepts a `Connectors` bundle or `Mapping[str, Connectors]` for named bindings:
 
 ```python
 from parsimony_fred import CONNECTORS as FRED
@@ -92,11 +100,16 @@ await executor.set_connectors({"fred": FRED.bind(api_key="...")})
 result = await executor.execute('gdp = fred["GDPC1"](series_id="GDPC1")')
 ```
 
-Under the hood each bundle is wrapped in a `MemoizingConnectorBundle`: identical
-calls (same connector, same canonical args) are served from a per-kernel
-`ConnectorCache` instead of re-fetching. The cache is a kernel-lifetime concern —
-`set_cwd()` and `clear_namespace()` clear it. See [Connectors](connectors.md)
-for the connector model itself.
+Under the hood, `set_connectors` ships only the connector **names** to the
+kernel. The kernel builds a `RemoteConnector` for each — a name-routed stub with
+no metadata, no credentials, no bound arguments, and no function body. Calling a
+stub RPCs the `ConnectorBroker` in the supervisor (over the kernel's one socket),
+which holds the bound connectors and runs the real fetch. In-process (no
+boundary), the agent instead gets the real connectors wrapped in the same
+memoizing layer. Memoization is transparent: identical calls are served from a
+per-kernel cache on every call (cached or not), so the fetch log stays truthful.
+The cache is a kernel-lifetime concern — `set_cwd()` and `clear_namespace()`
+clear it. See [Connectors](connectors.md) for the connector model itself.
 
 `clear_namespace()` resets the kernel to that base state (dropping any
 agent-defined names), re-applies connectors, and re-runs any registered setup
@@ -200,17 +213,20 @@ Each `FetchLogEntry` carries the fetch `provenance`, `row_count`,
 content-addressed data-object pool. The fetch log is how the agent — and you —
 know what raw data a cell pulled, independent of what it assigned. Post-fetch
 hooks (the data-object persister and the fetch logger) run on *every* connector
-call, cached or not, so the log stays truthful even when `MemoizingConnectorBundle`
+call, cached or not, so the log stays truthful even when the memoizing transport
 serves a result from cache.
 
 `KernelOutput.to_llm()` renders the whole bundle into the list of
 `{type, text|image_url}` blocks the model consumes, paginating large tables and
 strings per the view configuration.
 
-## Safe builtins + AST sanitizer (blocked env/subprocess access)
+## Defense-in-depth: safe builtins + AST sanitizer (blocked env/subprocess access)
 
-Agent-written code runs in-process, so the kernel restricts what it can reach.
-Two layers do this.
+When agent code runs out-of-process under bwrap (the "namespaces" capability
+tier on Linux), the kernel environment is already cleared, network is
+unavailable, and the filesystem is restricted to the workspace. The sanitizer
+and safe builtins are best-effort defense-in-depth for the in-process fallback
+only (non-Linux self-host, "none" capability tier). They are not the boundary.
 
 **Restricted `__builtins__`.** The exec namespace is given a curated
 `_SAFE_BUILTINS` dict rather than the full builtin set. It keeps the
@@ -235,16 +251,19 @@ assert isinstance(result.outputs[0], ExceptionObject)
 # message: "os.getenv is blocked in agent code (secrets are not in scope)"
 ```
 
-The point is that connector credentials and other server secrets live in the
-host process's real environment; agent code has no business reading them, so the
-sanitizer makes the attempt fail loudly instead of silently exfiltrating a key
-through a returned value. Note that `import subprocess` itself is permitted (it
-is just a name) — what fails is every attribute access on it.
+Under in-process execution, agent code shares the host process's real environment,
+so the sanitizer makes an attempt to read credentials fail loudly instead of
+silently exfiltrating them. Note that `import subprocess` itself is permitted
+(it is just a name) — what fails is every attribute access on it.
 
 There is one escape hatch for local debugging: set the environment variable
 `OCKHAM_DISABLE_SANITIZE` to `1`, `true`, or `yes` and `assert_safe_code`
 becomes a no-op. Leave it unset in any deployment that runs untrusted
 agent-authored code.
+
+To force in-process execution on Linux (overriding the bwrap default), set
+`OCKHAM_SANDBOX_BOUNDARY=none` (mainly for debugging). The default is
+`OCKHAM_SANDBOX_BOUNDARY=auto`, which picks the strongest available boundary.
 
 ## Timeouts and the daemon-thread execution model
 

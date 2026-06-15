@@ -31,6 +31,12 @@ from parsimony_agents.execution import (
     set_default_local_root,
     get_default_local_root,
 )
+from parsimony_agents.execution.sandbox import (
+    SandboxedCodeExecutor,
+    create_executor,
+    selected_capability_tier,
+    detect_bwrap_support,
+)
 ```
 
 This is the low-level substrate that the agent loop drives. Most host
@@ -227,10 +233,14 @@ await executor.set_connectors(FRED.bind(api_key="..."))
 await executor.set_connectors({"fred": FRED.bind(api_key="...")})
 ```
 
-Accepts a `Connectors` bundle or a `Mapping[str, Connectors]`. Each bundle is
-wrapped in a `MemoizingConnectorBundle` for within-kernel memoization (see
-[Memoization](#memoization-connectorcache-memoizingconnectorbundle)). See
-[Connectors](../concepts/connectors.md) for what a bundle is.
+Accepts a `Connectors` bundle or a `Mapping[str, Connectors]`. The credentialed
+connectors are held supervisor-side in the broker; only the connector **names**
+are shipped to the kernel, which builds a name-routed `RemoteConnector` stub for
+each (no metadata, no credential). Each stub is wrapped in a memoizing layer that
+shares a per-kernel cache and runs the post-fetch hooks (data-object persister,
+fetch logger) so lineage stays truthful across cached and uncached calls. See
+[Connectors](../concepts/connectors.md) for the connector model and
+[Memoization](#memoization-connectorcache-memoizingconnector) below.
 
 #### Timeout behaviour
 
@@ -561,11 +571,12 @@ result = await executor.execute(
 See [Artifacts, identity & lineage](../concepts/artifacts.md) for the full
 lineage model.
 
-## Memoization (ConnectorCache, MemoizingConnectorBundle)
+## Memoization (ConnectorCache, MemoizingConnector)
 
 Connector calls are memoized within one kernel lifetime so an agent re-running
 the same fetch doesn't hit the network twice. `set_connectors` wires this up
-automatically; the two types below are the moving parts.
+automatically. The kernel receives a `Mapping[str, RemoteConnector]` wrapped in a
+memoizing layer; the pieces below are the moving parts.
 
 ### ConnectorCache
 
@@ -579,28 +590,29 @@ class ConnectorCache:
 A store keyed by `(connector_name, canonical_args_key)` → `Result`. Cleared on
 `clear_namespace`/`set_cwd`.
 
-### MemoizingConnectorBundle
+### MemoizingConnector and memoizing_bundle
 
-```python
-class MemoizingConnectorBundle(Mapping[str, _MemoizingConnector]):
-    def __init__(
-        self,
-        bundle: Connectors,
-        cache: ConnectorCache,
-        post_hooks: tuple[Callable[[Result], Any], ...],
-    ): ...
-```
-
-A drop-in replacement for a `Connectors` bundle. It wraps each connector so
-identical-argument calls return the cached `Result`. Crucially, the
-`post_hooks` (the data-object persister and the fetch logger) run on **every**
-call — cached or not — so the `fetch_log` and lineage stay truthful even when a
-fetch is served from cache.
+Each connector the agent calls is wrapped in a `_MemoizingConnector` that
+memoizes `__call__` on canonical arguments against the shared `ConnectorCache`
+and runs the post-fetch hooks on **every** call — cached or not — so the
+`fetch_log` and lineage stay truthful even when a fetch is served from cache.
+`memoizing_bundle(inners, cache, post_hooks)` builds the `{name: wrapper}` dict;
+the wrapped `inner` is a real `Connector` in-process, or a `RemoteConnector` stub
+in the out-of-process kernel.
 
 ```python
 result = await executor.execute('data = fred["gdpc1"](series_id="GDPC1")')
 # result.fetch_log has one FetchLogEntry with a persisted data_object_ref
 ```
+
+### RemoteConnector — the kernel-side stub
+
+The kernel never receives a bound `Connector` (which would carry the credential
+in its `bound_arguments`). It receives only the connector **name** and builds a
+`RemoteConnector` — a stub holding the name plus the supervisor socket, with no
+metadata and no credential. Calling it RPCs the `ConnectorBroker` in the
+supervisor, which runs the real connector. Connector metadata (the cards the
+model reads) is rendered host-side into the prompt, never shipped into the kernel.
 
 ## Pagination (StringPaginator, TablePaginator) and StructuredStreamCapturer
 

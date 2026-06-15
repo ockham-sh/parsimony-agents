@@ -70,6 +70,17 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: uv sync --all-extras
+      - name: Set up bubblewrap (so the bwrap boundary test runs, not skips)
+        # Ubuntu 24.04 (ubuntu-latest) restricts unprivileged user namespaces via
+        # AppArmor; relax it so bwrap can create them. The key is absent on 22.04,
+        # hence `|| true`.
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Verify the bwrap boundary is available (keep the guarantee honest)
+        # If this fails, the live boundary test would silently skip — which is
+        # exactly the regression this step exists to catch.
+        run: uv run python -c "from parsimony_agents.execution.sandbox import detect_bwrap_support; assert detect_bwrap_support(), 'bwrap boundary unavailable in CI'"
       # Coverage floor tracks the current level (~70%); ratchet toward 80 as
       # display/pagination/rag coverage improves. See CHANGELOG follow-ups.
       - run: uv run pytest tests/ -v -m "not integration" --cov=parsimony_agents --cov-report=term-missing --cov-fail-under=68
