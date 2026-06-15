@@ -44,9 +44,9 @@ def _make_result(
     )
 
 
-async def test_persister_returns_typed_artifact_ref_without_version(tmp_path: Path) -> None:
+def test_persister_returns_typed_artifact_ref_without_version(tmp_path: Path) -> None:
     persist = make_data_object_persister(tmp_path)
-    out = await persist(_make_result(pd.DataFrame({"a": [1, 2, 3]})))
+    out = persist(_make_result(pd.DataFrame({"a": [1, 2, 3]})))
     assert out is not None
     ref, version = out
     assert isinstance(ref, ArtifactRef)
@@ -57,12 +57,12 @@ async def test_persister_returns_typed_artifact_ref_without_version(tmp_path: Pa
     assert version is None
 
 
-async def test_same_provenance_same_data_dedupes_file(tmp_path: Path) -> None:
+def test_same_provenance_same_data_dedupes_file(tmp_path: Path) -> None:
     """Same logical_id + same content_sha → one pool file."""
     persist = make_data_object_persister(tmp_path)
     df = pd.DataFrame({"a": [1, 2, 3]})
-    a = await persist(_make_result(df, fetched_at=datetime(2024, 1, 1)))
-    b = await persist(_make_result(df, fetched_at=datetime(2025, 6, 1)))
+    a = persist(_make_result(df, fetched_at=datetime(2024, 1, 1)))
+    b = persist(_make_result(df, fetched_at=datetime(2025, 6, 1)))
     assert a is not None and b is not None
     ref_a, _ = a
     ref_b, _ = b
@@ -71,23 +71,23 @@ async def test_same_provenance_same_data_dedupes_file(tmp_path: Path) -> None:
     assert len(parquets) == 1
 
 
-async def test_persister_distinguishes_params(tmp_path: Path) -> None:
+def test_persister_distinguishes_params(tmp_path: Path) -> None:
     """Different params → different logical_id."""
     persist = make_data_object_persister(tmp_path)
     df = pd.DataFrame({"a": [1]})
-    a = await persist(_make_result(df, params={"x": 1}))
-    b = await persist(_make_result(df, params={"x": 2}))
+    a = persist(_make_result(df, params={"x": 1}))
+    b = persist(_make_result(df, params={"x": 2}))
     assert a is not None and b is not None
     ref_a, _ = a
     ref_b, _ = b
     assert ref_a.logical_id != ref_b.logical_id
 
 
-async def test_same_logical_id_different_content_writes_two_pool_files(tmp_path: Path) -> None:
+def test_same_logical_id_different_content_writes_two_pool_files(tmp_path: Path) -> None:
     """Same provenance + different bytes → two pool entries, same logical_id."""
     persist = make_data_object_persister(tmp_path)
-    a = await persist(_make_result(pd.DataFrame({"a": [1, 2]})))
-    b = await persist(_make_result(pd.DataFrame({"a": [1, 2, 3]})))
+    a = persist(_make_result(pd.DataFrame({"a": [1, 2]})))
+    b = persist(_make_result(pd.DataFrame({"a": [1, 2, 3]})))
     assert a is not None and b is not None
     ref_a, _ = a
     ref_b, _ = b
@@ -97,10 +97,10 @@ async def test_same_logical_id_different_content_writes_two_pool_files(tmp_path:
     assert (tmp_path / ref_b.workspace_file_path).exists()
 
 
-async def test_persisted_file_is_readable_parquet(tmp_path: Path) -> None:
+def test_persisted_file_is_readable_parquet(tmp_path: Path) -> None:
     persist = make_data_object_persister(tmp_path)
     df = pd.DataFrame({"date": ["2024-01-01"], "value": [1.5]})
-    out = await persist(_make_result(df, source="us_cpi", params={"q": "cpi"}))
+    out = persist(_make_result(df, source="us_cpi", params={"q": "cpi"}))
     assert out is not None
     ref, _ = out
     blob = (tmp_path / ref.workspace_file_path).read_bytes()
@@ -111,7 +111,7 @@ async def test_persisted_file_is_readable_parquet(tmp_path: Path) -> None:
     assert round_tripped.provenance.params == {"q": "cpi"}
 
 
-async def test_persister_swallows_codec_failures(tmp_path: Path) -> None:
+def test_persister_swallows_codec_failures(tmp_path: Path) -> None:
     """A misbehaving codec must not kill the agent turn — graceful ``None``."""
     persist = make_data_object_persister(tmp_path)
 
@@ -121,16 +121,16 @@ async def test_persister_swallows_codec_failures(tmp_path: Path) -> None:
         def to_arrow(self):  # noqa: D401
             raise RuntimeError("boom")
 
-    assert await persist(_Bad()) is None
+    assert persist(_Bad()) is None
 
 
-async def test_persisted_file_carries_only_result_provenance(tmp_path: Path) -> None:
+def test_persisted_file_carries_only_result_provenance(tmp_path: Path) -> None:
     """A data_object is the leaf of the lineage graph — its identity is the fetch."""
     from parsimony_agents.dataset_io import deserialize_dataset
 
     persist = make_data_object_persister(tmp_path)
     df = pd.DataFrame({"date": ["2024-01-01"], "value": [1.5]})
-    out = await persist(_make_result(df, source="fred_fetch", params={"series_id": "UNRATE"}))
+    out = persist(_make_result(df, source="fred_fetch", params={"series_id": "UNRATE"}))
     assert out is not None
     ref, _ = out
     blob = (tmp_path / ref.workspace_file_path).read_bytes()
