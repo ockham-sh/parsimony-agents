@@ -34,6 +34,26 @@ def test_fetch_log_default_mode_renders_full_entries():
     assert 'rows="200"' in rendered
 
 
+def test_fetch_log_default_renders_governed_columns():
+    """Default mode surfaces the governed column schema (role + namespace),
+    rendered via the framework's Column.llm_annotation, and drops
+    exclude_from_llm_view columns."""
+    entry = FetchLogEntry(
+        provenance=Provenance(source="fred", source_description="fred", params={}),
+        row_count=10,
+        column_names=["date", "value", "internal"],
+        columns=[
+            {"name": "date", "role": "key", "namespace": "fred_series"},
+            {"name": "value", "role": "data"},
+            {"name": "internal", "role": "metadata", "exclude_from_llm_view": True},
+        ],
+    )
+    rendered = KernelOutput(outputs=[], fetch_log=[entry])._fetch_log_to_llm(mode="default")
+    assert "date (KEY ns:fred_series)" in rendered
+    assert "value (DATA)" in rendered
+    assert "internal" not in rendered
+
+
 def test_fetch_log_minimal_mode_collapses_to_summary():
     output = KernelOutput(outputs=[], fetch_log=[_entry(), _entry(), _entry()])
     rendered = output._fetch_log_to_llm(mode="minimal")

@@ -95,6 +95,22 @@ implementation, `CodeExecutor`, runs in-process. To run code somewhere else —
 a subprocess, a container, a remote sandbox — subclass `BaseCodeExecutor` and
 implement the abstract surface the loop uses.
 
+!!! tip "You usually don't need to subclass"
+    The framework ships a sandboxed executor. Call
+    `parsimony_agents.execution.sandbox.create_executor(cwd=..., scratch_root=...)`
+    to get a `SandboxedCodeExecutor` that runs the kernel out-of-process behind a
+    `bwrap` boundary (no network, cleared env, workspace-only filesystem) when the
+    host supports it, falling back to in-process otherwise. (`scratch_root` is the
+    single knob for where display-dataframe parquets go; `output_factory` is an
+    optional advanced override for the in-process fallback only.) Credentials never
+    enter that kernel: it receives connectors as name-routed `RemoteConnector` stubs
+    and calls back to a broker in this (supervisor) process, which holds the bound
+    connectors. `selected_capability_tier()` reports which boundary you'd get
+    (`namespaces` when bwrap confines the kernel, otherwise `none`) so you can
+    surface it to operators; `executor.capability_tier` is the source of truth when
+    you construct a `SandboxedCodeExecutor` directly with `confine=False` — an
+    unconfined plain subprocess, which reports `process`.
+
 `BaseCodeExecutor` declares all of the following as `@abstractmethod`, so a
 subclass that leaves any of them unimplemented cannot be instantiated (Python
 raises `TypeError` at construction). The parameters below are positional-or-

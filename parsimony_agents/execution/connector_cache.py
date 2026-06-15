@@ -1,4 +1,4 @@
-"""Per-kernel connector memoization (brief §10 — within-notebook P1).
+"""Per-kernel connector memoization.
 
 A connector call with identical canonical parameters within one kernel
 lifetime should not re-hit the network. The data hasn't changed by the
@@ -25,13 +25,13 @@ content-addressed; fetch logger appends one entry per call).
 
 from __future__ import annotations
 
-__all__ = ["ConnectorCache", "MemoizingConnectorBundle"]
+__all__ = ["ConnectorCache", "MemoizingConnectorBundle", "memoizing_bundle"]
 
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
-from parsimony.connector import Connector, Connectors
+from parsimony.connector import Connectors
 from parsimony.result import Result
 
 
@@ -71,13 +71,21 @@ def _canonical_args(args: tuple[Any, ...], kwargs: dict[str, Any]) -> str:
 
 
 class _MemoizingConnector:
-    """Callable proxy: cache the connector's ``__call__`` per kernel."""
+    """Callable wrapper: memoize a connector's ``__call__`` per kernel.
+
+    ``inner`` is whatever the agent should be able to call: a real
+    :class:`~parsimony.connector.Connector` in-process, or a ``RemoteConnector``
+    stub in the out-of-process kernel. Both expose ``.name`` and an awaitable
+    ``__call__``; attribute access falls through to ``inner`` — so in-process,
+    introspection like ``to_llm()`` reaches the real connector, while the
+    name-only kernel stub deliberately carries no such metadata.
+    """
 
     __slots__ = ("_inner", "_cache", "_post_hooks")
 
     def __init__(
         self,
-        inner: Connector,
+        inner: Any,
         cache: ConnectorCache,
         post_hooks: tuple[Callable[[Result], None], ...],
     ) -> None:
@@ -89,13 +97,9 @@ class _MemoizingConnector:
     def name(self) -> str:
         return self._inner.name
 
-    @property
-    def description(self) -> str:
-        return self._inner.description
-
     def __getattr__(self, item: str) -> Any:
         # Fall through to the underlying connector for everything else
-        # (param_schema, describe, to_llm, etc.).
+        # (in-process: describe, to_llm, etc.; the kernel stub has only .name).
         return getattr(self._inner, item)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Result:
@@ -109,6 +113,21 @@ class _MemoizingConnector:
         for hook in self._post_hooks:
             hook(result)
         return result
+
+
+def memoizing_bundle(
+    inners: Iterable[Any],
+    cache: ConnectorCache,
+    post_hooks: tuple[Callable[[Result], Any], ...],
+) -> dict[str, _MemoizingConnector]:
+    """Wrap each inner in a memoizing proxy keyed by ``.name``, sharing one cache.
+
+    The in-process path passes real :class:`~parsimony.connector.Connector`
+    objects; the out-of-process kernel passes ``RemoteConnector`` stubs. Both
+    expose ``.name`` + an awaitable ``__call__``, so both yield the same
+    ``{name: callable}`` surface the agent sees as ``connectors``.
+    """
+    return {inner.name: _MemoizingConnector(inner, cache, post_hooks) for inner in inners}
 
 
 class MemoizingConnectorBundle(Mapping[str, _MemoizingConnector]):
@@ -132,9 +151,7 @@ class MemoizingConnectorBundle(Mapping[str, _MemoizingConnector]):
     ) -> None:
         self._cache = cache
         self._post_hooks = post_hooks
-        self._items: dict[str, _MemoizingConnector] = {
-            c.name: _MemoizingConnector(c, cache, post_hooks) for c in bundle
-        }
+        self._items: dict[str, _MemoizingConnector] = memoizing_bundle(bundle, cache, post_hooks)
 
     def __getitem__(self, key: str) -> _MemoizingConnector:
         return self._items[key]

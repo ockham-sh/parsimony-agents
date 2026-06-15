@@ -30,6 +30,14 @@ on ``os`` is fragile (introspection bypass, ``__dict__``, re-exports) and
 runs per-call. Refusing at compile-time means the agent gets a single
 :class:`SanitizationError` instead of a successful read that leaks data.
 
+Scope: this is a best-effort *nudge*, not a boundary — it's trivially
+bypassable (``getattr(os, "environ")``, ``vars(os)``, a computed ``/proc``
+path). It earns its keep only on the in-process / no-boundary fallback
+(non-Linux self-host where bwrap is unavailable). In production the bwrap
+substrate is the boundary: the kernel runs with ``--clearenv`` and no network,
+so there is no secret in its env to reach and this guard is redundant. Never
+treat it as containment.
+
 The guard is opt-in via :func:`assert_safe_code`; the executor calls it
 before every ``compile()``. Set ``OCKHAM_DISABLE_SANITIZE=1`` in the env to
 bypass — escape hatch for local debugging only; never on a hosted deploy.

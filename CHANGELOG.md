@@ -6,16 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [0.1.4] - Unreleased
 
+### Added
+
+- **Out-of-process kernel** (`parsimony_agents.execution.sandbox`): agent code can
+  run in a separate, credential-free kernel process that reaches connectors only
+  by RPC back to a `ConnectorBroker` in the trusted supervisor, so a bound
+  connector is the sole network egress. Ships the duplex RPC protocol, the broker,
+  the Arrow-IPC result codec, the name-routed `RemoteConnector` stub,
+  `SandboxedCodeExecutor`, `bwrap` confinement (no network, cleared env,
+  workspace-only filesystem via `confine=True`), and `create_executor` /
+  `selected_capability_tier` for boundary selection (bwrap → in-process fallback).
+  Connectors stay synchronous across both paths — the kernel stub bridges its RPC
+  to the kernel event loop, so agent code calls `connectors["name"](...)` with no
+  `await` whether in-process or sandboxed.
+- `BaseCodeExecutor.capability_tier` and `BaseCodeExecutor.kernel_summaries()` (an
+  overridable seam — out-of-process executors summarize kernel-side and ship JSON
+  rows back) for the out-of-process path.
+- `display(...)` of a connector `Result` is a dual projection: a displayed
+  `TabularResult` yields a `DataFrameObject` so the human UI keeps the full
+  interactive table, while the LLM sees the result's governed `to_llm()` (schema +
+  sample, `exclude_from_llm_view` columns enforced) carried on
+  `DataFrameObject.governed_llm_text`. An opaque `Result` renders as a structural
+  `to_llm()` preview. Neither dumps an unbounded payload into context.
+- The `KernelOutput` fetch log now renders each fetch's governed column schema
+  (role + namespace via `Column.llm_annotation`, `exclude_from_llm_view` enforced).
+- `parsimony_agents.lineage_diff.diff_artifacts(before, after, executor=...)`
+  compares the dependency closures of two snapshots of one artifact and reports
+  changed / added / removed lineage nodes plus a readable `summary()`.
+
 ### Security
 
 - Raised the minimum `urllib3` to `>=2.7.0` and `python-dotenv` to `>=1.2.2` to
   clear known CVEs in the install surface.
+- `list_workspace_files` now confines its `prefix` to the workspace root (a `..`
+  or absolute prefix lists nothing instead of escaping), matching the
+  read/write/delete path. A frame the output factory cannot Arrow-serialize
+  degrades to a text repr instead of killing the cell.
+- Classified LLM provider errors route `str(exc)` through `redact_sensitive_text`
+  before reaching recorder metadata or logs (litellm chains can embed keyed URLs).
 
 ### Changed
 
 - Normalized the codebase with `ruff format` and tightened CI: `ruff` lint and
   format checks, a coverage floor, and a published-pin install check now run on
-  every push and pull request.
+  every push and pull request. CI installs bubblewrap and verifies the bwrap
+  boundary is available so the live boundary test runs instead of skipping.
 
 ## [0.1.3] - 2026-06-05
 

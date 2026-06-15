@@ -12,8 +12,6 @@ import inspect
 import io
 import logging
 import os
-import secrets
-import string
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -234,9 +232,6 @@ def _global_execution_lock() -> asyncio.Lock:
     return _loop_global_locks[loop_id]
 
 
-_used_ids: set[str] = set()
-
-
 # ---------------------------------------------------------------------------
 # Thread interruption helper
 # ---------------------------------------------------------------------------
@@ -376,15 +371,6 @@ def _drain_fetch_log(exec_locals: dict[str, Any]) -> list[FetchLogEntry]:
     return out
 
 
-def generate_cell_id(length: int = 6) -> str:
-    chars = string.ascii_lowercase + string.digits
-    while True:
-        uid = "".join(secrets.choice(chars) for _ in range(length))
-        if uid not in _used_ids:
-            _used_ids.add(uid)
-            return uid
-
-
 def print_to_string(*args, **kwargs):
     buf = io.StringIO()
     kwargs_copy = kwargs.copy()
@@ -429,6 +415,12 @@ class StructuredStreamCapturer:
 
 class BaseCodeExecutor(ABC):
     """Abstract base class for code execution."""
+
+    #: Isolation strength of this executor. In-process executors are ``"none"``
+    #: (no boundary); out-of-process ones report their substrate's tier
+    #: (``"process"`` / ``"namespaces"``). Lets callers see what boundary, if
+    #: any, agent code is actually running behind.
+    capability_tier: str = "none"
 
     #: Per-kernel ledger of "which producing run assigned this variable".
     #: Concrete subclasses must own one so the agent's return tools can
@@ -479,6 +471,21 @@ class BaseCodeExecutor(ABC):
     def get_locals(self) -> dict[str, Any]:
         return {}
 
+    async def kernel_summaries(self) -> list[dict[str, Any]]:
+        """Rich per-variable summaries of the kernel namespace, as JSON-ready dicts.
+
+        The default computes them here from :meth:`get_locals`. Out-of-process
+        executors override this to summarize inside the kernel — where the live
+        objects are — and ship the rows back, since :meth:`get_locals` cannot
+        return cross-process objects.
+        """
+        # Lazy import: session_state lives in the agent layer, which depends on
+        # execution; importing it at module load would cycle.
+        from parsimony_agents.agent.session_state import kernel_summaries_from_locals_map
+
+        rows = kernel_summaries_from_locals_map(self.get_locals())
+        return [r.model_dump(mode="json") for r in rows]
+
     async def get_origin(self, name: str) -> VariableOrigin | None:
         """Return the producing-run origin for a kernel variable, or ``None``.
 
@@ -492,9 +499,31 @@ class BaseCodeExecutor(ABC):
             return None
         return self.origin_ledger.get(name)
 
-    async def set_connectors(self, connectors: Any) -> None:  # noqa: B027
-        """Inject connectors into the execution namespace. Override in subclasses."""
-        pass
+    async def set_connectors(self, connectors: Any) -> None:
+        """Inject connectors into the execution namespace.
+
+        No-op for an empty/absent bundle. A **non-empty** bundle with no override
+        is a silent connector-drop trap — the prompt advertises the connector
+        catalog regardless, so the LLM is told connectors exist while the kernel
+        has none, and the failure surfaces later as a ``NameError`` far from the
+        cause. Custom executors that accept connectors MUST override this.
+        """
+        if connectors:
+            raise NotImplementedError(
+                f"{type(self).__name__}.set_connectors must be overridden to bind connectors; "
+                "the agent injects the connector catalog into the prompt either way, so a "
+                "non-empty bundle that the executor drops would NameError inside agent code."
+            )
+
+    async def execute_sql(self, sql_query: str) -> KernelOutput:
+        """Execute a SQL query against DataFrames in the kernel namespace (DuckDB).
+
+        Part of the executor contract — the in-process, sandboxed, and remote
+        executors all implement it. Not ``@abstractmethod`` so connector-less
+        partial stubs still instantiate; the default raises if a host routes SQL
+        to an executor that does not support it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support execute_sql")
 
     def add_setup_snippet(self, code: str) -> None:  # noqa: B027
         pass
@@ -564,6 +593,10 @@ class CodeExecutor(BaseCodeExecutor):
         self.capturer = StructuredStreamCapturer(output_factory)
         self._setup_snippets: list[str] = []
         self._connectors: dict[str, Connectors] = {}
+        # Out-of-process kernels inject memoizing wrappers over remote-connector
+        # stubs via a binder (connector names + a socket back to the broker)
+        # instead of real Connectors; mutually exclusive with self._connectors.
+        self._remote_binder: Callable[[ConnectorCache, tuple[Callable[..., Any], ...]], dict[str, Any]] | None = None
         register_theme()
 
     def _base_locals(self) -> dict[str, Any]:
@@ -597,6 +630,24 @@ class CodeExecutor(BaseCodeExecutor):
         terminal product and the agent system prompt).
         """
         self._connectors = normalize_connector_bundles(connectors)
+        self._remote_binder = None
+        async with self._exec_lock:
+            self._apply_connectors()
+
+    async def _set_remote_connectors(
+        self,
+        binder: Callable[[ConnectorCache, tuple[Callable[..., Any], ...]], dict[str, Any]],
+    ) -> None:
+        """Inject remote connector bundles produced by *binder* (out-of-process path).
+
+        The kernel process has no real connectors — only each connector's name
+        plus a socket back to the broker. *binder* turns the shared cache and the
+        per-call post-hooks into ``{binding: {name: callable}}`` (memoizing
+        wrappers over remote stubs); it is re-run on every namespace rebuild so
+        connectors survive a reset.
+        """
+        self._remote_binder = binder
+        self._connectors = {}
         async with self._exec_lock:
             self._apply_connectors()
 
@@ -606,9 +657,8 @@ class CodeExecutor(BaseCodeExecutor):
         Must be called with :attr:`_exec_lock` held; does not take the
         lock itself.
 
-        Each bundle is wrapped by :class:`MemoizingConnectorBundle` so
-        identical-arg calls within one kernel lifetime do not re-hit the
-        network (brief §10 — within-notebook P1). The post-fetch hooks
+        Each bundle becomes a memoizing wrapper so identical-arg calls within
+        one kernel lifetime do not re-hit the network. The post-fetch hooks
         run on every call, cached or not:
 
         - ``persister`` writes the canonical
@@ -618,18 +668,24 @@ class CodeExecutor(BaseCodeExecutor):
           kernel output and records the data_object ref on the current
           :class:`RunScope` (if any).
         """
-        if not self._connectors:
+        if not self._connectors and self._remote_binder is None:
             return
         from parsimony_agents.execution.data_objects import make_data_object_persister
         from parsimony_agents.execution.fetch_log import make_fetch_logger
 
         persist_fn = make_data_object_persister(Path(self.cwd))
         fetch_log, log_fetch = make_fetch_logger(persist_fn, ledger=self.origin_ledger)
-        # Re-use the kernel's connector cache across re-applies so refresh
-        # / set_cwd doesn't lose memo state mid-turn unless the namespace
-        # was actually cleared.
-        for name, bundle in self._connectors.items():
-            self.locals[name] = MemoizingConnectorBundle(bundle, self._connector_cache, post_hooks=(log_fetch,))
+        # was actually cleared. The remote binder (out-of-process kernel) and
+        # the local bundles are mutually exclusive sources of the same shape.
+        if self._remote_binder is not None:
+            bundles: dict[str, Any] = self._remote_binder(self._connector_cache, (log_fetch,))
+        else:
+            bundles = {
+                name: MemoizingConnectorBundle(bundle, self._connector_cache, post_hooks=(log_fetch,))
+                for name, bundle in self._connectors.items()
+            }
+        for name, bundle in bundles.items():
+            self.locals[name] = bundle
         self.locals["_fetch_log"] = fetch_log
 
     def _workspace_resolved_path(self, path: str) -> Path:
@@ -681,7 +737,15 @@ class CodeExecutor(BaseCodeExecutor):
 
         def _scan(cwd: str, pfx: str) -> list[tuple[str, int]]:
             root = Path(cwd).resolve()
-            base = (root / pfx) if pfx else root
+            # Resolve the prefix and confine it to the workspace: a prefix with
+            # ``..`` or an absolute path must not let the scan escape the root
+            # (read/write/delete go through _workspace_resolved_path; list must
+            # too). An escaping prefix lists nothing rather than leaking the host.
+            base = (root / pfx).resolve() if pfx else root
+            try:
+                base.relative_to(root)
+            except ValueError:
+                return []
             if not base.exists():
                 return []
             out: list[tuple[str, int]] = []

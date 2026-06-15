@@ -1585,7 +1585,7 @@ dev = [
 
 [[package]]
 name = "parsimony-core"
-version = "0.7.0"
+version = "0.7.2"
 source = { editable = "../parsimony" }
 dependencies = [
     { name = "httpx" },

@@ -150,6 +150,17 @@ swap point for remote or sandboxed kernels** — a host that wants process
 isolation, a remote runtime, or a hardened sandbox subclasses it and overrides
 the abstract methods, and the rest of the system is unchanged.
 
+`parsimony_agents.execution.sandbox` ships the in-tree implementation of that
+boundary. `SandboxedCodeExecutor` runs the kernel as a separate process —
+confined under `bwrap` when `confine=True` (Linux: no network, cleared env,
+workspace-only filesystem) or as a plain subprocess for dev/test;
+`create_executor` selects the strongest available and reports it as
+`capability_tier`. Credentials never enter that process: the kernel receives
+only the connector **names** and builds a name-routed `RemoteConnector` stub for
+each (no metadata, no credential), and connector calls RPC back to a
+`ConnectorBroker` in the trusted supervisor, which holds the bound connectors
+and is the sole egress.
+
 The core abstract surface:
 
 ```python
@@ -423,4 +434,4 @@ the only place that wires all four pillars together.
 - [Artifacts, identity & lineage](concepts/artifacts.md) — `.ockham`, refs, reuse.
 - [Failure handling & recovery](concepts/failure-and-recovery.md) — the spine in detail.
 - [Embedding in a host application](guides/embedding-in-a-host.md) — hooks, custom executors, custom policies.
-- [Agent, AgentResult, AgentConfig, AgentGuardrails](reference/agent.md) — the API reference.
+- [Agent, AgentResult, AgentGuardrails](reference/agent.md) — the API reference.

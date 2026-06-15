@@ -1,4 +1,4 @@
-"""Code execution: local kernel, outputs, dataframe refs, metadata."""
+"""Code execution: local kernel, outputs, dataframe refs."""
 
 from parsimony_agents.execution.dataframe_ref import (
     DataframeRef,
@@ -11,15 +11,8 @@ from parsimony_agents.execution.executor import (
     BaseCodeExecutor,
     CodeExecutor,
     StructuredStreamCapturer,
-    generate_cell_id,
 )
 from parsimony_agents.execution.factory import OutputFactory
-from parsimony_agents.execution.metadata import (
-    DatasetRefreshRecipe,
-    MetadataItem,
-    PrimitiveTypes,
-    RefreshStatus,
-)
 from parsimony_agents.execution.outputs import (
     DataFrameObject,
     ExceptionObject,
@@ -37,23 +30,18 @@ __all__ = [
     "CodeExecutor",
     "DataFrameObject",
     "DataframeRef",
-    "DatasetRefreshRecipe",
     "ExceptionObject",
     "FetchLogEntry",
     "FigureObject",
     "KernelOutput",
     "KernelOutputType",
-    "MetadataItem",
     "OutputFactory",
     "PrimitiveObject",
-    "PrimitiveTypes",
-    "RefreshStatus",
     "StorageBackend",
     "StringPaginator",
     "StructuredStreamCapturer",
     "TablePaginator",
     "finalize_spec",
-    "generate_cell_id",
     "get_default_local_root",
     "get_output_header",
     "set_default_backend",

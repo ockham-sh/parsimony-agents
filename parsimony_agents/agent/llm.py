@@ -38,6 +38,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import litellm
+from parsimony.transport import redact_sensitive_text
 
 from parsimony_agents.agent.caching import apply_anthropic_cache_markers
 from parsimony_agents.agent.cancellation import CancellationRequest
@@ -120,6 +121,11 @@ def _classify_litellm_exception(exc: BaseException) -> Failure:
     ``Failure(kind=capability_gap)`` for permanent failures (auth, bad request).
     """
     cls_name = exc.__class__.__name__
+    # litellm auth/bad-request messages (and their __cause__/__context__ chains)
+    # routinely embed the request URL with key query params. Redact before this
+    # text is logged or stored in recorder metadata (an audit viewer may surface
+    # it). Mirrors tools.py, which redacts exception text the same way.
+    detail = redact_sensitive_text(str(exc))
     transient_classes = {
         "RateLimitError",
         "InternalServerError",
@@ -137,7 +143,7 @@ def _classify_litellm_exception(exc: BaseException) -> Failure:
         return Failure(
             kind=FailureKind.transient_provider,
             explanation="The AI model had a temporary problem responding.",
-            metadata={"provider_error": cls_name, "detail": str(exc)},
+            metadata={"provider_error": cls_name, "detail": detail},
         )
     if cls_name in permanent_classes:
         # Permanent failures route straight to handoff (no retry), and the
@@ -147,7 +153,7 @@ def _classify_litellm_exception(exc: BaseException) -> Failure:
         # payload, model/org identifiers, and redacted-but-present auth fragments.
         # The raw provider message is logged server-side and kept in metadata for
         # recorders only — never surfaced verbatim to the user.
-        _logger.warning("permanent LLM failure class=%s exc=%s", cls_name, exc)
+        _logger.warning("permanent LLM failure class=%s exc=%s", cls_name, detail)
         return Failure(
             kind=FailureKind.capability_gap,
             explanation=(
@@ -155,15 +161,15 @@ def _classify_litellm_exception(exc: BaseException) -> Failure:
                 "means the model is misconfigured — e.g. a missing or invalid API "
                 "key. Check the server logs for the provider's full message."
             ),
-            metadata={"provider_error": cls_name, "detail": str(exc)},
+            metadata={"provider_error": cls_name, "detail": detail},
         )
     # Default: treat unknown LLM errors as transient (retryable) but log so we
     # can audit the classification later. Retry budget will eventually kick in.
-    _logger.warning("unclassified LLM exception class=%s exc=%s", cls_name, exc)
+    _logger.warning("unclassified LLM exception class=%s exc=%s", cls_name, detail)
     return Failure(
         kind=FailureKind.transient_provider,
         explanation="The AI model had a temporary problem responding.",
-        metadata={"provider_error": cls_name, "unclassified": True, "detail": str(exc)},
+        metadata={"provider_error": cls_name, "unclassified": True, "detail": detail},
     )
 
 
