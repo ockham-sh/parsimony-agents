@@ -127,6 +127,17 @@ def _narrow_scope_instruction(failure: Failure) -> str:
     had really been trying to ask the user a question. Other narrow_scope kinds
     (``scope_too_large``, ``kernel_invalidated``) keep the shrink-the-step framing.
     """
+    if failure.kind is FailureKind.time_limit:
+        return (
+            "You have hit the time budget. Do NOT start new fetches, searches, or "
+            "exploration, and do not switch to a different flow or approach. Pick the "
+            "option that fits: if you already have usable data — a fetched result still "
+            "in the kernel, a frame you built, or codes you resolved — publish it now "
+            "(return_dataset / return_chart) and then return_done; if you are blocked, "
+            "call return_unable with the blocker; if finishing genuinely needs the user "
+            "(a real choice or more time), call ask_user. This is your last turn before "
+            "the run ends."
+        )
     if failure.kind is FailureKind.no_progress:
         return (
             "Your previous turn was text only — no tool call — so the run could "

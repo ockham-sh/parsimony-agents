@@ -218,3 +218,30 @@ async def test_lessons_learned_caps_at_five_distinct_kinds() -> None:
     remaining_kinds = {f.kind for f in state.lessons_learned}
     assert FailureKind.tool_error not in remaining_kinds
     assert FailureKind.kernel_invalidated in remaining_kinds
+
+
+@pytest.mark.asyncio
+async def test_time_limit_grants_one_finalize_turn_then_hands_off() -> None:
+    """First time_limit → narrow_scope 'publish what you have' turn; second → handoff."""
+    state = RunState(run_id="r1", session_id="s1")
+    failure = Failure(kind=FailureKind.time_limit, explanation="hit the 300s budget")
+
+    # First strike: finalize turn, run continues (not suspended).
+    events = await _collect(handle_failure(failure, agent=_agent(), state=state))
+    assert len(events) == 1
+    assert isinstance(events[0], AgentError)
+    assert state.done is False
+    instr = state.pending_instruction
+    assert instr is not None
+    # Must steer to publish-in-hand-then-terminate, not keep exploring; the
+    # resume-friendly ask_user escape hatch stays available for the needs-more case.
+    assert "return_dataset" in instr
+    assert "return_done" in instr
+    assert "return_unable" in instr
+    assert "ask_user" in instr
+    assert state.failure_attempts[FailureKind.time_limit] == 1
+
+    # Second strike (grace exhausted): bounded — hands off, run ends.
+    events2 = await _collect(handle_failure(failure, agent=_agent(), state=state))
+    assert any(isinstance(e, Handoff) for e in events2)
+    assert state.done is True

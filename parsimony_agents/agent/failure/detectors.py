@@ -97,6 +97,11 @@ def record_tool_call(state: RunState, tool_name: str, args: dict[str, Any]) -> s
 # ---------------------------------------------------------------------------
 
 
+#: Wall-clock grace, in seconds, granted after the time budget is first crossed so the
+#: agent gets one bounded "publish what you have" turn before the run hands off.
+_TIME_LIMIT_FINALIZE_GRACE_S = 45.0
+
+
 def pre_step(state: RunState, guardrails: AgentGuardrails) -> Failure | None:
     """Pre-iteration checks. Returns the first failure under the precedence rule.
 
@@ -116,15 +121,24 @@ def pre_step(state: RunState, guardrails: AgentGuardrails) -> Failure | None:
         )
 
     elapsed = state.elapsed_seconds()
-    if elapsed >= guardrails.max_execution_time_s:
-        return Failure(
-            kind=FailureKind.time_limit,
-            explanation=(
-                f"The run reached its {guardrails.max_execution_time_s:.0f}-second "
-                "time limit before the task was finished."
-            ),
-            metadata={"max_execution_time_s": guardrails.max_execution_time_s, "elapsed_s": elapsed},
-        )
+    limit = guardrails.max_execution_time_s
+    if elapsed >= limit:
+        # The first crossing fires time_limit; recovery maps it to narrow_scope, which
+        # injects a "publish what you have" instruction and grants the agent one more
+        # turn instead of discarding in-hand work. pre_step runs at the top of every
+        # iteration, so without suppression it would re-fire here and hit the narrow_scope
+        # second-strike (handoff) before that finalize turn could run. Suppress re-firing
+        # within a short grace window; crossing the grace ceiling fires again -> handoff.
+        # Bounds the overrun to the grace window.
+        warned = state.failure_attempts.get(FailureKind.time_limit, 0) >= 1
+        if not warned or elapsed >= limit + _TIME_LIMIT_FINALIZE_GRACE_S:
+            return Failure(
+                kind=FailureKind.time_limit,
+                explanation=(
+                    f"The run reached its {limit:.0f}-second time limit before the task was finished."
+                ),
+                metadata={"max_execution_time_s": limit, "elapsed_s": elapsed},
+            )
 
     silence = time.monotonic() - state.last_event_time_s
     if silence > guardrails.stall_threshold_s:
