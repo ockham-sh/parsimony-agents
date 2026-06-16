@@ -32,6 +32,7 @@ from parsimony_agents.agent.events import (
 from parsimony_agents.agent.helpers import (
     TurnState,
     render_connector_catalog,
+    render_connector_skills,
 )
 from parsimony_agents.agent.helpers import (
     parse_cell_ref as _parse_cell_ref,
@@ -222,6 +223,34 @@ def _inject_connector_catalog(ctx: AgentContext, connectors: Any) -> None:
                 metadata={"connectors_catalog": True},
             ),
         )
+
+
+def _inject_connector_skills(ctx: AgentContext, connectors: Any) -> None:
+    """Place the connector skills as a stable ``role="user"`` message in the cached prefix.
+
+    Like the connector catalog (see :func:`_inject_connector_catalog`), the skills are static
+    for the whole session, so they sit in the provider's cached prefix — billed once — rather
+    than the volatile per-iteration snapshot. Inserted right after the catalog message (or the
+    system prompt when there are no connectors) so ordering, and therefore the cached prefix,
+    stays byte-stable. Filtered-then-reinserted so a connector rebind refreshes it. No-op when
+    no bound bundle carries a skill.
+    """
+    ctx.messages = [m for m in ctx.messages if not m.metadata.get("connector_skills", False)]
+    skills_text = render_connector_skills(connectors)
+    if not skills_text:
+        return
+    after_catalog = next(
+        (i for i, m in enumerate(ctx.messages) if m.metadata.get("connectors_catalog", False)),
+        0,
+    )
+    ctx.messages.insert(
+        after_catalog + 1,
+        AgentMessage(
+            role="user",
+            content=Text(content=f"<connector_skills>\n{skills_text}\n</connector_skills>"),
+            metadata={"connector_skills": True},
+        ),
+    )
 
 
 class Agent:
@@ -523,8 +552,9 @@ class Agent:
 
         await self._setup_connectors()
 
-        # Connector catalog → stable cached-prefix message (see helper docstring).
+        # Connector catalog + skills → stable cached-prefix messages (see helper docstrings).
         _inject_connector_catalog(ctx, self._connectors)
+        _inject_connector_skills(ctx, self._connectors)
 
         # Standalone: rebuild session_state from the local .ockham/ tree at the
         # start of every turn so <turn_artifacts> lists prior-turn work the agent
@@ -675,8 +705,9 @@ class Agent:
 
         await self._setup_connectors()
 
-        # Connector catalog → stable cached-prefix message (see helper docstring).
+        # Connector catalog + skills → stable cached-prefix messages (see helper docstrings).
         _inject_connector_catalog(ctx, self._connectors)
+        _inject_connector_skills(ctx, self._connectors)
 
         # Standalone: rebuild session_state from the local .ockham/ tree so the
         # resumed turn sees prior artifacts in <turn_artifacts> (mirrors run();
