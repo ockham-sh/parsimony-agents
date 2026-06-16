@@ -486,10 +486,17 @@ async def run_loop(
             continue
 
         # --- Execute tool calls ---
+        # Both branches must refresh ``last_event_time_s`` after every yielded
+        # event: it feeds the ``no_progress`` stall detector, which measures time
+        # since the last event at the next iteration's ``pre_step``. A single slow
+        # tool call (e.g. a multi-series data fetch) yields no events mid-await, so
+        # without this the stall timer keeps running through execution and trips
+        # ``no_progress`` the moment one tool exceeds ``stall_threshold_s``.
         try:
             if dispatch is not None:
                 async for event in dispatch(state, response, cancellation=cancellation):
                     yield event
+                    state.last_event_time_s = time.monotonic()
             else:
                 async for event in _execute_tool_calls(
                     tool_calls=response.tool_calls,

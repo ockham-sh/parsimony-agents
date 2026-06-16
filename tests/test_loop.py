@@ -16,6 +16,7 @@ Covers (PLAN Phase 7 test criteria):
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
@@ -180,6 +181,71 @@ async def test_happy_path_return_done_terminates_loop() -> None:
     # Expect at least one ToolEvent for return_done (started + completed).
     completed_tool_events = [e for e in events if isinstance(e, ToolEvent) and e.completed]
     assert any(e.tool_name == "return_done" for e in completed_tool_events)
+
+
+@pytest.mark.asyncio
+async def test_slow_custom_dispatch_tool_does_not_trip_no_progress() -> None:
+    """A slow custom-dispatch tool call must refresh the stall timer.
+
+    The workspace agent runs tools via ``dispatch_tools`` (the custom-dispatch
+    branch). A single tool call that runs longer than ``stall_threshold_s`` yields
+    no events mid-flight; the loop must still refresh ``last_event_time_s`` after the
+    dispatch so the *next* iteration's ``pre_step`` does not false-fire ``no_progress``
+    and abort the run. Regression for slow multi-series data fetches handing off.
+    """
+    from parsimony_agents.agent.loop import _tool_result_message
+
+    stall = AgentGuardrails(max_iterations=10).stall_threshold_s
+
+    async def dispatch_tools(state: Any, response: Any, *, cancellation: Any) -> Any:
+        for tc in response.tool_calls:
+            name = tc.function.name
+            if name != "return_done":
+                # Simulate a tool that ran well past the stall threshold while
+                # emitting no intermediate events (the bug: timer goes stale).
+                state.last_event_time_s = time.monotonic() - (stall + 60)
+            state.messages.append(
+                _tool_result_message(tool_call_id=tc.id, tool_name=name, result_text="ok")
+            )
+            yield ToolEvent(
+                tool_name=name,
+                tool_call_id=tc.id,
+                tool_type="utility",
+                completed=True,
+                result=None,
+            )
+            if name == "return_done":
+                state.done = True
+
+    script = _LLMScript(
+        turns=[
+            (
+                [_stream_chunk(tool_call=("call_1", "slow_fetch", "{}"))],
+                _assembled(tool_calls=[("call_1", "slow_fetch", "{}")]),
+            ),
+            (
+                [_stream_chunk(tool_call=("call_2", "return_done", ""))],
+                _assembled(tool_calls=[("call_2", "return_done", '{"summary": "done"}')]),
+            ),
+        ]
+    )
+
+    with (
+        patch("litellm.acompletion", side_effect=script.acompletion),
+        patch("litellm.stream_chunk_builder", side_effect=script.stream_chunk_builder),
+        patch("litellm.completion_cost", return_value=0.001),
+    ):
+        agent = _agent()
+        agent.dispatch_tools = dispatch_tools
+        state = RunState(run_id="r1", session_id="s1")
+        events = await _drain(run_loop(agent, state))
+
+    # With the bug, turn 2's pre_step would fire no_progress → Handoff and
+    # return_done never runs. With the fix, the run completes cleanly.
+    assert state.done is True
+    assert not any(isinstance(e, Handoff) for e in events)
+    completed = [e for e in events if isinstance(e, ToolEvent) and e.completed]
+    assert any(e.tool_name == "return_done" for e in completed)
 
 
 # ---------------------------------------------------------------------------
