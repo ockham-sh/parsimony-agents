@@ -88,8 +88,7 @@ are restored whenever the kernel resets: `clear_namespace()` re-seeds the base n
 `load_dataset`.
 
 The practical consequence: agent-written code uses the helpers directly, with **no import
-statement**. In fact, importing framework helpers is flagged by the `FrameworkImportLinter`
-(see below) — they are pre-injected, so `from parsimony_agents... import` is both wrong and
+statement** — they are pre-injected, so `from parsimony_agents... import` is both wrong and
 unnecessary. A cell the agent might write looks like this:
 
 ```python
@@ -130,109 +129,11 @@ hands you a pandas `DataFrame` back — which then flows through the kernel's ty
 lineage machinery exactly like any other table.
 
 A note on how SQL results are handled downstream: the framework prefers **typed dataset I/O**
-over raw Parquet round-trips. The `RawParquetIOLinter` softly discourages
-`df.to_parquet(...)` and `pd.read_parquet(...)` in agent code, steering toward `return_dataset()`
-for writes (which embeds curation metadata) and the typed read path for reads. So SQL is the
-right tool for *querying*, while persisting a result as an artifact goes through the dataset
-return tools rather than a bare Parquet dump. See
+over raw Parquet round-trips. Steer toward `return_dataset()` for writes (which embeds curation
+metadata) and the typed read path for reads, rather than `df.to_parquet(...)` /
+`pd.read_parquet(...)`. So SQL is the right tool for *querying*, while persisting a result as an
+artifact goes through the dataset return tools rather than a bare Parquet dump. See
 [Artifacts, identity & lineage](../concepts/artifacts.md).
-
-## Data-quality helpers (`inspect_object`, `series_na_report`, `check_code`)
-
-Reading from files and querying with SQL both invite data-quality problems — stray nulls,
-unexpected gaps, index surprises. `parsimony_agents.quality` exposes three helpers the agent
-uses to catch these early. All three are pure functions you can also call yourself.
-
-```python
-from parsimony_agents.quality import (
-    check_code,
-    inspect_object,
-    series_na_report,
-)
-```
-
-### `inspect_object(obj)` — quick NA report for a DataFrame or Series
-
-```python
-inspect_object(obj: pd.DataFrame | pd.Series) -> str | None
-```
-
-Generates a data-quality inspection report. For a `DataFrame`, it reports NA (null) stats per
-column; for a `Series`, it delegates to `series_na_report`. Returns a formatted multi-line
-string (or `None`).
-
-```python
-import pandas as pd
-from parsimony_agents.quality import inspect_object
-
-df = pd.DataFrame({
-    "A": [1, 2, None, None, None, 6, 7],
-    "B": [None] * 7,  # 100% missing
-})
-print(inspect_object(df))
-```
-
-### `series_na_report(series, ...)` — null-run detection on a single Series
-
-```python
-series_na_report(series: pd.Series, top_k: int = 5, min_run: int = 2) -> str
-```
-
-Produces a compact NA report for one Series: the global NA ratio plus the top-`k` largest
-*consecutive* NA runs. Runs that are both highly concentrated and large are flagged as
-`WARNING`. `min_run` is the smallest consecutive-NA cluster size worth reporting — raise it to
-ignore isolated or paired nulls and focus on real gaps.
-
-```python
-from parsimony_agents.quality import series_na_report
-
-s = pd.Series([1, None, None, 3, 4, None] * 5)
-print(series_na_report(s, top_k=3, min_run=3))
-```
-
-### `check_code(code, ...)` — advisory linting of analysis code
-
-```python
-check_code(code: str, type_map: dict[str, type] | None = None) -> list[str]
-```
-
-Runs the four AST-based linters over a string of Python and returns a list of **advisory**
-issues (it never raises, and it never blocks execution):
-
-- **`IndexPolicyLinter`** — flags reads of `.index` and index-producing operations (`groupby`,
-  `pivot`, `merge`, `join`, `set_index`, `sort_index`, `reindex`, `stack`, `unstack`,
-  `resample`) that aren't cleared with a following `.reset_index()`.
-- **`RollingLinter`** — flags `.rolling(...)` calls with no explicit `min_periods`, which can
-  silently introduce NAs.
-- **`RawParquetIOLinter`** — discourages raw `df.to_parquet(...)` / `pd.read_parquet(...)` in
-  favor of typed dataset I/O.
-- **`FrameworkImportLinter`** — rejects `import parsimony_agents...` / `from parsimony_agents...`,
-  since framework helpers are pre-injected.
-
-```python
-from parsimony_agents.quality import check_code
-
-code = """
-df = df.groupby('category').sum()   # missing reset_index!
-df.to_parquet('output.parquet')     # should use return_dataset
-"""
-
-for issue in check_code(code):
-    print(issue)
-```
-
-Pass a `type_map` (variable name → type) to scope the pandas-specific checks precisely and
-avoid false positives on non-pandas objects:
-
-```python
-type_map = {"df": pd.DataFrame}
-issues = check_code(code, type_map=type_map)
-```
-
-These are **soft** lints by design: the agent sees the issues alongside its notebook output and
-can self-correct on the next turn, rather than being hard-stopped. See
-[Failure handling & recovery](../concepts/failure-and-recovery.md) for how the loop responds to
-harder problems.
 
 ## Putting files in front of the agent (`file_store` / `files_dir`)
 
