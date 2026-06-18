@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import logging
 import shutil
 import tempfile
@@ -44,6 +45,46 @@ def set_default_local_root(path: Path | str | None) -> None:
 
 def get_default_local_root() -> Path | None:
     return _default_local_root
+
+
+def _stringify_cell(value: object) -> object:
+    """Render a nested/unhashable cell (list/dict/ndarray) as a stable string.
+
+    Used only for columns ``hash_pandas_object`` and Arrow cannot handle
+    directly. ``None`` / NaN pass through untouched so null semantics survive.
+    JSON with ``sort_keys`` keeps the hash deterministic across runs regardless
+    of dict insertion order; ``default=str`` copes with non-JSON leaf types.
+    """
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return value
+    try:
+        return json.dumps(value, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _stringify_unhashable_columns(dataframe: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """Return a copy of *dataframe* with hash-incompatible columns stringified.
+
+    Connector results sometimes carry structured metadata in a column (e.g. an
+    SDMX ``dsd`` column of dimension descriptors). Such list/dict/ndarray cells
+    are neither hashable by ``hash_pandas_object`` nor reliably Arrow-serializable,
+    which used to abort both the content hash and the parquet write — collapsing
+    the whole display to a plain-text dump. Stringifying only the offending
+    columns lets the rest of the frame render and persist as a normal table. The
+    caller's live frame is never mutated (copy-on-first-write).
+    """
+    out = dataframe
+    bad_cols: list[str] = []
+    for col in dataframe.columns:
+        try:
+            pd.util.hash_pandas_object(dataframe[col], index=True)
+        except TypeError:
+            if out is dataframe:
+                out = dataframe.copy()
+            out[col] = dataframe[col].map(_stringify_cell)
+            bad_cols.append(col)
+    return out, bad_cols
 
 
 class DataframeRef(BaseModel):
@@ -125,19 +166,22 @@ class DataframeRef(BaseModel):
             row_hashes = pd.util.hash_pandas_object(dataframe, index=True).values
             content_hash = hashlib.md5(row_hashes.tobytes()).hexdigest()
         except TypeError as e:
-            if "unhashable" in str(e).lower():
-                df = dataframe if isinstance(dataframe, pd.DataFrame) else dataframe.to_frame()
-                bad_cols = []
-                for col in df.columns:
-                    try:
-                        pd.util.hash_pandas_object(df[col], index=True)
-                    except TypeError:
-                        bad_cols.append(col)
-                logger.error(
-                    "DataFrame has unhashable columns (list/array/dict): %s. Flatten or drop these before caching.",
-                    bad_cols,
-                )
-            raise
+            if "unhashable" not in str(e).lower():
+                raise
+            # Nested columns (list/dict/ndarray cells) break both the content
+            # hash and the parquet write. Stringify just those columns so the
+            # frame still renders and persists as a table instead of collapsing
+            # to a text dump. ``dataframe`` is reassigned to the stringified copy
+            # so the to_parquet below operates on the same safe frame; the live
+            # in-kernel frame the caller holds is untouched.
+            frame = dataframe if isinstance(dataframe, pd.DataFrame) else dataframe.to_frame()
+            dataframe, bad_cols = _stringify_unhashable_columns(frame)
+            logger.debug(
+                "DataFrame has unhashable columns (list/array/dict): %s; stringifying for hash + parquet.",
+                bad_cols,
+            )
+            row_hashes = pd.util.hash_pandas_object(dataframe, index=True).values
+            content_hash = hashlib.md5(row_hashes.tobytes()).hexdigest()
 
         base = Path(local_dir).resolve()
         local_path = base / ref / f"{content_hash}.parquet"

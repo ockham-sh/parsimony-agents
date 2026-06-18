@@ -88,9 +88,7 @@ async def main() -> None:
         sys.stdout.write(_CLEAR_LINE)
         sys.stdout.flush()
 
-        task = asyncio.create_task(
-            stream_to_display(agent, user_input, ctx=ctx, console=console)
-        )
+        task = asyncio.create_task(stream_to_display(agent, user_input, ctx=ctx, console=console))
         loop.add_signal_handler(signal.SIGINT, task.cancel)
 
         try:

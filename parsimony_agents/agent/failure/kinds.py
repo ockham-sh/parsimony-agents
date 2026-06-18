@@ -80,7 +80,9 @@ _DEFAULT_ACTION_BY_KIND: Mapping[FailureKind, Action] = MappingProxyType(
         FailureKind.policy_violation: Action.handoff,
         FailureKind.kernel_invalidated: Action.narrow_scope,
         FailureKind.iteration_limit: Action.ask_user,
-        FailureKind.time_limit: Action.ask_user,
+        # time_limit grants one bounded "publish what you have" turn (narrow_scope),
+        # then the narrow_scope second-strike hands off. See detectors.pre_step.
+        FailureKind.time_limit: Action.narrow_scope,
     }
 )
 

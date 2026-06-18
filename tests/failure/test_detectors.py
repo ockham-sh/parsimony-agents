@@ -314,3 +314,34 @@ def test_record_tool_call_appends_history_and_counter() -> None:
     assert state.tool_call_history == [sig1, sig2, sig3]
     assert state.last_repeat_counts[sig1] == 2
     assert state.last_repeat_counts[sig3] == 1
+
+
+def test_time_limit_suppressed_within_finalize_grace_then_refires() -> None:
+    """After the first time_limit, pre_step grants a grace window (no re-fire), then
+    re-fires past the grace ceiling so the run can hand off."""
+    from parsimony_agents.agent.failure.detectors import _TIME_LIMIT_FINALIZE_GRACE_S
+
+    guard = AgentGuardrails(max_execution_time_s=10.0)
+
+    # Already warned once (the finalize turn is in progress), elapsed just over the
+    # budget but within the grace window → suppressed so the finalize turn can run.
+    within = RunState(
+        run_id="r1",
+        session_id="s1",
+        started_at=datetime.now(UTC) - timedelta(seconds=12),
+        last_event_time_s=time.monotonic(),
+        failure_attempts={FailureKind.time_limit: 1},
+    )
+    assert pre_step(within, guard) is None
+
+    # Past the grace ceiling → re-fires time_limit (→ second-strike handoff upstream).
+    beyond = RunState(
+        run_id="r1",
+        session_id="s1",
+        started_at=datetime.now(UTC) - timedelta(seconds=10 + _TIME_LIMIT_FINALIZE_GRACE_S + 5),
+        last_event_time_s=time.monotonic(),
+        failure_attempts={FailureKind.time_limit: 1},
+    )
+    failure = pre_step(beyond, guard)
+    assert failure is not None
+    assert failure.kind == FailureKind.time_limit

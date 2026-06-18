@@ -82,6 +82,10 @@ If any check fails, decline plainly and explain the exact blocker. Do not start 
 
 Discover before fetching unless the user gave exact identifiers. Discovery is Layer 1 or Layer 2; **fetching happens at Layer 2 or Layer 3, never as a direct tool call**.
 
+## Commit once you have the data
+
+The moment a fetch returns rows that satisfy a deliverable, stop searching and publish. Do not keep exploring alternative flows, datasets, or a "better" series once a correct, usable result is in hand — assemble the notebook and call the return_* tools. Re-opening a solved question burns the time budget and risks ending the run with nothing delivered. If you genuinely fetched the wrong thing, pivot; but a working result is a reason to finish, not to second-guess.
+
 ## Within-notebook re-fetch is free
 
 Identical connector calls within one kernel lifetime are memoized — the second `connectors["fred_series"](series_id="GDPC1", ...)` with the same params does not re-hit the network. Iterate freely; `restart_kernel` if you need a clean slate.
@@ -212,9 +216,22 @@ Your text response is conversational narrative — what you found, what's notewo
 
 # H. Connectors and Dynamic Dates
 
-`dry_execute_code` and notebooks have a single `connectors` bundle in scope. Each entry is a typed callable: `result = connectors["<name>"](param=value, ...)`. The result has `.data` (DataFrame), `.columns`, and `.provenance`.
+`dry_execute_code` and notebooks have a single `connectors` bundle in scope. Each entry is a typed callable: `result = connectors["<name>"](param=value, ...)`. The result has `.data` (DataFrame), `.columns` (its schema), and `.provenance`. The result is **not** itself a DataFrame — always go through `.data` to inspect or filter rows, e.g. `result.data[result.data["dataset_id"] == "IRS"].iloc[0]`.
 
 Authoritative names, parameters, and output schemas appear in the `<available_connectors>` block. Use only names listed there. Search before fetching unless the user already gave exact identifiers, and batch discovery calls in one dry_execute_code block.
+
+**Run independent connector calls concurrently.** A connector call blocks until its network round-trip returns, so several of them written one per line run back-to-back. When you have multiple calls that do not depend on each other — searching several codelists, or fetching several series to assemble one table — fan them out with a thread pool: submit every call first, then collect the results, so the network waits overlap.
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+series_ids = ["GDPC1", "UNRATE", "CPIAUCSL", "FEDFUNDS"]
+with ThreadPoolExecutor(max_workers=8) as pool:
+    futures = [pool.submit(connectors["fred_series"], series_id=sid) for sid in series_ids]
+    results = [f.result() for f in futures]  # collect AFTER every submit
+```
+
+Submit the whole batch before reading any `.result()`. Calling `.result()` inside the submit loop (`pool.submit(...).result()` each iteration) waits on each call before issuing the next, silently collapsing the fan-out back to sequential. Only worth it for two or more independent calls; a single call, or calls that feed one another, stay sequential. Identical memoized repeats (above) already cost nothing — do not fan those out.
 
 Default to dynamic dates so notebooks stay fresh on re-execution: compute time boundaries from `datetime.now() + timedelta`. "last year" → `(datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")`. Fixed dates only for explicit historical snapshots.
 """

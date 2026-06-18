@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.resources
 import re
 from collections.abc import Mapping
 
@@ -95,9 +96,56 @@ def render_connector_catalog(
     return "\n\n".join(sections)
 
 
+def render_connector_skills(
+    connectors: Connectors | Mapping[str, Connectors] | None,
+) -> str:
+    """Render the agent playbooks (``SKILL.md``) shipped by the bound connectors' packages.
+
+    A skill is a native Anthropic ``SKILL.md`` a provider ships at
+    ``<package>/skills/<name>/SKILL.md`` — procedural knowledge that belongs to no single verb
+    (e.g. how to resolve an SDMX series key). Relevance is *package-presence*: a skill is
+    included when its package contributed at least one connector to the bound bundles, resolved
+    from each connector's defining module. Each body is emitted with its YAML frontmatter
+    stripped (that is file-host discovery metadata, not prompt content), deduped by skill
+    directory name and sorted so the block is byte-stable across iterations (it sits in the
+    cached prefix, like the connector catalog). Returns the empty string when no bound package
+    ships a skill, so callers can skip the ``<connector_skills>`` block entirely.
+    """
+    bundles = normalize_connector_bundles(connectors)
+    if not bundles:
+        return ""
+
+    packages = sorted({(c.fn.__module__ or "").split(".")[0] for bundle in bundles.values() for c in bundle})
+
+    bodies: list[str] = []
+    seen: set[str] = set()
+    for pkg in packages:
+        if not pkg:
+            continue
+        try:
+            skills_dir = importlib.resources.files(pkg) / "skills"
+        except (ModuleNotFoundError, TypeError):
+            continue
+        if not skills_dir.is_dir():
+            continue
+        for entry in sorted(skills_dir.iterdir(), key=lambda e: e.name):
+            if entry.name in seen or not entry.is_dir():
+                continue
+            md = entry / "SKILL.md"
+            if not md.is_file():
+                continue
+            seen.add(entry.name)
+            text = md.read_text(encoding="utf-8")
+            # Strip the SKILL.md frontmatter; the body is the prompt content.
+            body = text.split("---", 2)[-1] if text.startswith("---") else text
+            bodies.append(body.strip())
+    return "\n\n".join(bodies)
+
+
 __all__ = [
     "TurnState",
     "parse_cell_ref",
     "render_connector_catalog",
+    "render_connector_skills",
     "system_error",
 ]
