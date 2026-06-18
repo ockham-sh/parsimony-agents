@@ -38,7 +38,7 @@ from typing import Any
 import pyarrow as pa
 from parsimony import errors as _errors
 from parsimony.connector import Connectors
-from parsimony.result import Result, TabularResult
+from parsimony.result import Result
 
 from parsimony_agents.execution.sandbox.protocol import RpcEndpoint, RpcError
 
@@ -47,7 +47,7 @@ from parsimony_agents.execution.sandbox.protocol import RpcEndpoint, RpcError
 
 def encode_result(result: Result) -> tuple[dict[str, Any], bytes]:
     """Return ``(meta, blob)`` — tabular results put the table in *blob* as Arrow IPC."""
-    if isinstance(result, TabularResult):
+    if result.is_tabular:
         table = result.to_arrow()
         sink = pa.BufferOutputStream()
         with pa.ipc.new_stream(sink, table.schema) as writer:
@@ -61,7 +61,7 @@ def decode_result(meta: dict[str, Any], blob: bytes) -> Result:
     if kind == "tabular":
         with pa.ipc.open_stream(pa.py_buffer(blob)) as reader:
             table = reader.read_all()
-        return TabularResult.from_arrow(table)
+        return Result.from_arrow(table)
     if kind == "result":
         return Result.model_validate(meta["result"])
     raise ValueError(f"unknown result wire kind: {kind!r}")

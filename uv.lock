@@ -1483,7 +1483,7 @@ wheels = [
 
 [[package]]
 name = "parsimony-agents"
-version = "0.1.4"
+version = "0.1.5"
 source = { editable = "." }
 dependencies = [
     { name = "altair" },
@@ -1585,7 +1585,7 @@ dev = [
 
 [[package]]
 name = "parsimony-core"
-version = "0.7.2"
+version = "0.7.3"
 source = { editable = "../parsimony" }
 dependencies = [
     { name = "httpx" },

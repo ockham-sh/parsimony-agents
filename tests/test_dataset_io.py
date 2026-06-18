@@ -24,7 +24,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
-from parsimony.result import Provenance, TabularResult
+from parsimony.result import Provenance, Result
 
 from parsimony_agents import Dataset, deserialize_dataset, serialize_dataset
 from parsimony_agents.dataset_io import CURATION_META_KEY, write_dataset_bytes
@@ -101,7 +101,7 @@ def test_deserialize_handles_vanilla_parquet(sample_df: pd.DataFrame, tmp_path: 
 
 
 def test_deserialize_returns_empty_dataset_for_vanilla_parquet(sample_df: pd.DataFrame, tmp_path: Path) -> None:
-    r = TabularResult(
+    r = Result(
         data=sample_df,
         provenance=Provenance(source="fred", source_description="fred", params={"series_id": "GDPC1"}),
     )
