@@ -21,7 +21,6 @@ from contextlib import contextmanager
 import pandas as pd
 import pytest
 from parsimony.connector import connector
-from parsimony.result import TabularResult
 
 from parsimony_agents.execution.sandbox.connector_rpc import RemoteConnector, encode_result
 
@@ -74,7 +73,7 @@ def test_stub_call_emits_canonical_rpc_and_round_trips() -> None:
     with _running_loop() as loop:
         result = RemoteConnector("plain_fetch", "connectors", rpc, loop)("GDPC1")
 
-    assert isinstance(result, TabularResult)
+    assert result.is_tabular
     assert list(result.data["value"]) == [1.0]
     method, params = rpc.calls[0]
     assert method == "connector_invoke"

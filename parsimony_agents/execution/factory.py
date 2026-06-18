@@ -20,7 +20,7 @@ from typing import Any
 import altair as alt
 import numpy as np
 import pandas as pd
-from parsimony.result import Result, TabularResult
+from parsimony.result import Result
 
 from parsimony_agents.execution.dataframe_ref import DataframeRef, StorageBackend
 from parsimony_agents.execution.outputs import (
@@ -100,26 +100,26 @@ class OutputFactory:
                 return PrimitiveObject(value=str(value))
         if isinstance(value, alt.TopLevelMixin):
             return self._from_altair(value)
-        if isinstance(value, TabularResult):
-            # Dual projection. The human UI gets the full interactive table; the
-            # LLM gets the result's own governed view (schema + sample, hidden
-            # columns enforced). One DataFrameObject carries both — the frame
-            # feeds the frontend table, governed_llm_text feeds the prompt.
-            try:
-                return DataFrameObject(
-                    ref=DataframeRef.from_pandas(
-                        value.data,
-                        ref=ref,
-                        local_dir=self._local_dir,
-                        backend=self._backend,
-                    ),
-                    governed_llm_text=value.to_llm(),
-                )
-            except Exception:
-                logger.warning("could not serialize %s for display; falling back to text", type(value).__name__)
-                return PrimitiveObject(value=value.to_llm())
         if isinstance(value, Result):
-            # Opaque payload — no frame to render. Governed structural preview
+            if value.is_tabular:
+                # One projection. The human UI gets the full interactive table
+                # (to_frontend_dict); the LLM gets the governed render — the
+                # ``columns`` schema rides on the object so exclude_from_llm_view
+                # is enforced on the same paginated path a plain frame uses.
+                try:
+                    return DataFrameObject(
+                        ref=DataframeRef.from_pandas(
+                            value.frame,
+                            ref=ref,
+                            local_dir=self._local_dir,
+                            backend=self._backend,
+                        ),
+                        columns=value.columns,
+                    )
+                except Exception:
+                    logger.warning("could not serialize %s for display; falling back to text", type(value).__name__)
+                    return PrimitiveObject(value=value.to_llm())
+            # Opaque payload — no frame to render. Bounded structural preview
             # (O(shape)), never an unbounded dump into LLM context.
             return PrimitiveObject(value=value.to_llm())
         if isinstance(value, (str, int, float, bool)) or value is None:

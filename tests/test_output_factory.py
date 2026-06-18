@@ -44,13 +44,13 @@ def test_from_value_object_column_of_exotic_type_degrades(tmp_path) -> None:  # 
 
 
 def test_displayed_tabular_result_is_dual_projection(tmp_path) -> None:  # noqa: ANN001
-    """A displayed connector TabularResult: full table for the UI, governed
+    """A displayed connector Result: full table for the UI, governed
     view for the LLM. Hidden columns reach the human (UI) but not the LLM."""
-    from parsimony.result import Column, ColumnRole, OutputConfig, TabularResult
+    from parsimony.result import Column, ColumnRole, OutputConfig, Result
 
     of = OutputFactory(local_dir=tmp_path)
 
-    tab = TabularResult(
+    tab = Result(
         data=pd.DataFrame({"date": ["2020-01-01"], "value": [1.0], "internal_id": ["XYZ-SECRET"]}),
         output_schema=OutputConfig(
             columns=[

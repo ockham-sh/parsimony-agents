@@ -20,7 +20,7 @@ import litellm
 import pandas as pd
 from opentelemetry import trace
 from parsimony.connector import Connectors
-from parsimony.result import TabularResult
+from parsimony.result import Result
 from pydantic import TypeAdapter
 
 from parsimony_agents.agent.cancellation import CancellationRequest
@@ -62,7 +62,7 @@ from parsimony_agents.execution import (
 )
 from parsimony_agents.execution.executor import BaseCodeExecutor
 from parsimony_agents.execution.factory import OutputFactory as FrameworkOutputFactory
-from parsimony_agents.execution.outputs import KernelOutput
+from parsimony_agents.execution.outputs import KernelOutput, KernelOutputType
 from parsimony_agents.execution.parquet_helpers import parquet_summary
 from parsimony_agents.identity import (
     ArtifactRef,
@@ -99,6 +99,10 @@ if TYPE_CHECKING:
 # Used by ``_emit_cancelled_tool_events`` below; the loop body that also referenced
 # it moved to ``workspace_hooks.py`` (which keeps its own copy).
 CANCELLED_TOOL_TEXT = "Cancelled by user before the tool completed."
+
+#: Max content-addressed output handles retained for retrieval (bounded so a
+#: long session can't grow the map without limit; oldest drop first).
+_OUTPUT_HANDLE_LIMIT = 512
 
 logger = logging.getLogger("parsimony_agents")
 error_logger = logging.getLogger("parsimony_agents.errors")
@@ -349,6 +353,17 @@ class Agent:
         self._output_factory = output_factory
 
         self.figures = []
+
+        # Content-addressed retrieval map: handle -> the output object the agent
+        # last saw under it. Populated from every KernelOutput the agent
+        # receives, so output_read/output_search can resolve a result by handle
+        # even after a dry_run cell — where the producing variable no longer
+        # exists in the kernel namespace the sandbox discards. Lives here on the
+        # agent (not in kernel locals) so it survives dry_run for the lifetime of
+        # this in-process Agent (i.e. within a session). NOTE: a cross-process
+        # resume() rebuilds the Agent and starts this map empty — pre-suspension
+        # dry_run handles are not carried across a suspend/resume boundary.
+        self._output_handles: dict[str, KernelOutputType] = {}
 
         # Standalone artifact discovery. A workspace host (terminal) injects
         # read/list fns and populates session_state itself. The OSS front door
@@ -864,16 +879,41 @@ class Agent:
             ]
         return []
 
+    def _register_outputs(self, ko: KernelOutput) -> None:
+        """Record each retrievable output under its content-addressed handle.
+
+        The handle survives a ``dry_run`` cell — it lives here on the agent,
+        not in the kernel namespace the sandbox copies and discards — so
+        ``output_read`` / ``output_search`` can reach a scratch result whose
+        producing variable is gone. The map is bounded; oldest entries drop
+        first (insertion order) so a long session can't grow it without limit.
+        """
+        for out in ko.outputs:
+            handle = getattr(out, "handle", None)
+            if not handle:
+                continue
+            # Re-insert at the end so a re-seen handle counts as most-recent, then
+            # evict from the front until within bound. The just-inserted entry is
+            # newest, so it is never the one evicted.
+            self._output_handles.pop(handle, None)
+            self._output_handles[handle] = out
+            while len(self._output_handles) > _OUTPUT_HANDLE_LIMIT:
+                self._output_handles.pop(next(iter(self._output_handles)))
+
     @toolmethod(
         name="output_read",
         description=(
-            "Read pages from an in-kernel value (DataFrame or primitive). For persisted "
-            "files use read_artifact. variable_name='df[row,col]' paginates a single cell."
+            "Read pages from an in-kernel value (DataFrame or primitive) or a result handle "
+            "(the id in a result's retrieval cue — resolves even after a dry_run cell). For "
+            "persisted files use read_artifact. variable_name='df[row,col]' paginates a single cell."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
-                "variable_name": {"type": "string", "description": "Kernel variable, or 'df[row,col]' cell ref."},
+                "variable_name": {
+                    "type": "string",
+                    "description": "Kernel variable, result handle, or 'df[row,col]' cell ref.",
+                },
                 "pages": {
                     "type": "array",
                     "description": "Up to 5 pages.",
@@ -893,6 +933,14 @@ class Agent:
         pages = pages[:5]
         display_pages = [p - 1 for p in pages]
 
+        # Content-addressed handle first: resolves a result the agent has seen
+        # even when its producing variable is gone (e.g. after a dry_run cell).
+        # Only the paginatable output types accept display_pages overrides.
+        handled = self._output_handles.get(variable_name)
+        if isinstance(handled, (DataFrameObject, PrimitiveObject)):
+            blocks = handled.to_llm(overrides={"display_pages": display_pages})
+            return SystemToolOutput(content=Text(content=blocks_to_text(blocks)))
+
         cell_ref = _parse_cell_ref(variable_name)
         if cell_ref is not None:
             base_name, row, col = cell_ref
@@ -907,6 +955,11 @@ class Agent:
             return SystemToolOutput(content=Text(content=text))
 
         obj_kernel = await self.code_executor.eval(variable_name)
+        if not obj_kernel.outputs:
+            return _system_error(f"Variable '{variable_name}' not found or returned no output.")
+        # Register so the handle this render may advertise resolves next turn,
+        # even if the live variable is later overwritten or shadowed.
+        self._register_outputs(obj_kernel)
         output = obj_kernel.outputs[0]
         if isinstance(output, (DataFrameObject, PrimitiveObject)):
             blocks = output.to_llm(overrides={"display_pages": display_pages})
@@ -918,14 +971,18 @@ class Agent:
     @toolmethod(
         name="output_search",
         description=(
-            "Search within an in-kernel value. Returns hits with page numbers for output_read. "
-            "Use read_artifact for persisted workspace files."
+            "Search within an in-kernel value or a result handle (the id in a result's retrieval "
+            "cue — resolves even after a dry_run cell). Returns hits with page numbers for "
+            "output_read. Use read_artifact for persisted workspace files."
         ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "Search query."},
-                "variable_name": {"type": "string", "description": "Kernel variable or 'df[row,col]' cell ref."},
+                "variable_name": {
+                    "type": "string",
+                    "description": "Kernel variable, result handle, or 'df[row,col]' cell ref.",
+                },
                 "top_k": {"type": "integer", "description": "Result count.", "default": 5},
             },
             "required": ["query", "variable_name"],
@@ -983,7 +1040,9 @@ class Agent:
         if cell_ref is not None:
             return await self._ensure_cell_indexed(cell_ref, variable_name, context)
 
-        output = await self.code_executor.get(variable_name)
+        # Content-addressed handle first (reaches dry_run scratch results); fall
+        # back to a live kernel variable.
+        output = self._output_handles.get(variable_name) or await self.code_executor.get(variable_name)
         if output is None or output.type not in ("dataframe", "primitive"):
             return False
         tasks = []
@@ -1122,6 +1181,11 @@ class Agent:
         # Attach lightweight metadata to the kernel output
         kernel_output.metadata = metadata
 
+        # Register handles BEFORE returning: a dry_run cell's outputs are durable
+        # on disk (content-addressed) but unreachable by variable name next turn,
+        # so the handle is the only way back to them.
+        self._register_outputs(kernel_output)
+
         return UtilityToolOutput(metadata=metadata, content=kernel_output, ui_message="Executing temporary code")
 
     def _workspace_root(self) -> Path:
@@ -1218,7 +1282,7 @@ class Agent:
         if not path.endswith(".parquet"):
             raise ValueError("read_data only supports .parquet files.")
         full = self._workspace_root() / path
-        result = TabularResult.from_parquet(full)
+        result = Result.from_parquet(full)
         df = result.df
         head = df.head(5)
         # Connector-supplied: column names, dtypes, source, params. Escape every interpolation.
@@ -1312,6 +1376,9 @@ class Agent:
         }
         result = await self._read_artifact_fn(live_name, kind, options)
         if result.kernel_output is not None:
+            # Register handles: a read artifact (e.g. a dataset preview) renders a
+            # retrieval cue, and that handle must resolve when the agent pages it.
+            self._register_outputs(result.kernel_output)
             return SystemToolOutput(content=result.kernel_output)
         return SystemToolOutput(content=Text(content=result.text))
 
@@ -1482,7 +1549,9 @@ class Agent:
                 producer_notebook_path=normalized,
                 seen_live_names=extract_seen_live_names(context.messages),
             )
-            return await self._stamp_notebook_ref(ko, canonical, normalized, context)
+            ko = await self._stamp_notebook_ref(ko, canonical, normalized, context)
+            self._register_outputs(ko)
+            return ko
         return f"Published {normalized} (not executed; pass execute=true to run)."
 
     @toolmethod(
@@ -1546,7 +1615,9 @@ class Agent:
                 producer_notebook_path=path,
                 seen_live_names=extract_seen_live_names(context.messages),
             )
-            return await self._stamp_notebook_ref(ko, script.code, path, context)
+            ko = await self._stamp_notebook_ref(ko, script.code, path, context)
+            self._register_outputs(ko)
+            return ko
         return f"Modified {path} (not executed; pass execute=true to run)."
 
     async def _notebook_script_after_tool(

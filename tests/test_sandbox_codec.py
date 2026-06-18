@@ -10,7 +10,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 from parsimony.errors import ConnectorError, RateLimitError
-from parsimony.result import Result, TabularResult
+from parsimony.result import Result
 
 from parsimony_agents.execution.sandbox.connector_rpc import (
     decode_result,
@@ -31,12 +31,12 @@ def test_plain_result_round_trips_as_json() -> None:
 
 def test_tabular_result_round_trips_as_arrow() -> None:
     frame = pd.DataFrame({"date": ["2020-01-01", "2020-01-02"], "value": [1.0, 2.0]})
-    original = TabularResult(data=frame)
+    original = Result(data=frame)
     meta, blob = encode_result(original)
     assert meta["kind"] == "tabular"
     assert blob  # the table crosses out of band
     decoded = decode_result(meta, blob)
-    assert isinstance(decoded, TabularResult)
+    assert decoded.is_tabular
     pd.testing.assert_frame_equal(decoded.data, frame)
 
 

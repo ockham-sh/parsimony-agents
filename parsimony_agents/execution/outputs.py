@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import traceback
 from functools import cached_property
@@ -12,7 +13,7 @@ from typing import Annotated, Any, Literal
 import altair as alt
 import pandas as pd
 from parsimony.errors import ConnectorError
-from parsimony.result import Column, Provenance
+from parsimony.result import Column, Provenance, governed_view, shape_descriptor
 from parsimony.transport import redact_sensitive_text
 from pydantic import BaseModel, Field, TypeAdapter, computed_field, field_serializer, field_validator
 
@@ -29,8 +30,28 @@ from parsimony_agents.views import get_llm_view_defaults
 # Named constants
 # ---------------------------------------------------------------------------
 _DATAFRAME_FULL_SHOW_THRESHOLD = 10  # Rows at or below this count: show all; above: show head + tail
-_DATAFRAME_HEAD_TAIL_SIZE = 5  # Number of rows in head/tail preview slices
+_DATAFRAME_HEAD_TAIL_SIZE = 5  # Number of rows in head/tail preview slices (frontend payload only)
 _DEFAULT_MAX_CELL_LENGTH = 1000  # Fallback max characters per cell in LLM output
+
+
+def _retrieval_cue(handle: str, *, shown: str, total: str) -> str:
+    """One honest line telling the agent how to reach the rest of a partial view.
+
+    The in-context view of a large output is a bounded window, never the
+    whole. This cue makes that explicit and names the content-addressed
+    ``handle`` both retrieval tools resolve — including after a ``dry_run``
+    cell, where the producing variable no longer exists in the kernel.
+    """
+    return (
+        f"\n[{shown} of {total} shown] Retrieve the rest by handle: "
+        f"output_search(variable_name='{handle}', query=...) to find rows, "
+        f"output_read(variable_name='{handle}', pages=[...]) to page.\n"
+    )
+
+
+def _primitive_handle(value: object) -> str:
+    """Stable content-addressed handle for a primitive output's text."""
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
 class BaseOutputObject(MessageContent):
@@ -77,14 +98,17 @@ class DataFrameObject(BaseOutputObject):
     type: Literal["dataframe"] = "dataframe"
     ref: DataframeRef
     include_full_value_in_frontend: bool = Field(default=False)
-    #: When set, ``to_llm`` returns this governed view verbatim instead of the
-    #: paginated CSV. Set when a connector ``TabularResult`` is displayed: the
-    #: human UI still gets the full table (``to_frontend_dict``), but the LLM
-    #: sees the result's own governed view — schema + sample with
-    #: ``exclude_from_llm_view`` columns enforced, which a raw frame render
-    #: cannot express. Carried as a real field so the governed view survives the
-    #: sandbox→server wire, where ``to_llm`` is rendered into the prompt.
-    governed_llm_text: str | None = Field(default=None)
+    #: Governed column schema (roles, namespaces, ``exclude_from_llm_view``).
+    #: Set when a connector result with an ``output_schema`` is displayed; empty
+    #: for a plain frame. Carried as a real field so governance survives the
+    #: sandbox→server wire and is applied on *every* LLM render path, not just
+    #: the connector-result one — a hidden column is hidden everywhere.
+    columns: list[Column] = Field(default_factory=list)
+
+    @property
+    def handle(self) -> str:
+        """Content-addressed handle the retrieval tools resolve to this output."""
+        return self.ref.content_hash
 
     @cached_property
     def value(self) -> pd.DataFrame:
@@ -130,41 +154,43 @@ class DataFrameObject(BaseOutputObject):
         return json.loads(value.tail(_DATAFRAME_HEAD_TAIL_SIZE).to_json(orient="table"))
 
     def to_llm(self, mode: Literal["default", "minimal"] = "default", overrides: dict[str, Any] | None = None):
-        # A displayed connector Result carries its own governed view (schema +
-        # sample, hidden columns enforced). Return it verbatim — the paginated
-        # CSV below would re-expose columns the result declared LLM-hidden.
-        if self.governed_llm_text is not None:
-            return [{"type": "text", "text": self.governed_llm_text}]
         overrides = overrides or {}
         view_cfg = get_llm_view_defaults("dataframe")[mode].model_copy(update=overrides)
+        frame = self.value
+        # Governance once, on every path: drop exclude_from_llm_view columns
+        # before anything is rendered or paginated, so a hidden column is hidden
+        # here exactly as it is in the connector card and the fetch log.
+        vframe, hidden_count, schema_lines = governed_view(frame, self.columns)
 
-        blocks: list[dict[str, Any]] = [{"type": "text", "text": f"DataFrame {get_output_header(self.type, mode)}\n"}]
+        header = f"DataFrame {get_output_header(self.type, mode)} — {shape_descriptor(frame, hidden_count)}"
+        blocks: list[dict[str, Any]] = [{"type": "text", "text": header + "\n"}]
 
-        if self.value.shape[0] == 0:
+        if frame.shape[0] == 0:
             blocks.append({"type": "text", "text": "DataFrame is empty."})
             return blocks
+        if vframe.shape[1] == 0:
+            blocks.append({"type": "text", "text": "Columns: (all hidden from LLM view)"})
+            return blocks
 
-        paginator = TablePaginator(self.value, rows_per_page=view_cfg.page_rows, show_dtypes=view_cfg.show_dtypes)
+        if schema_lines:
+            blocks.append({"type": "text", "text": "Columns:\n" + "\n".join(schema_lines) + "\n"})
+
+        rows_per_page = max(int(view_cfg.page_rows), 1)
+        paginator = TablePaginator(vframe, rows_per_page=rows_per_page, show_dtypes=view_cfg.show_dtypes)
         max_cell = getattr(view_cfg, "max_cell_length", None)
         if max_cell is None:
             max_cell = _DEFAULT_MAX_CELL_LENGTH
         page_blocks = "\n".join(paginator.iter_pages(view_cfg.display_pages, na_rep="<NULL>", max_cell_length=max_cell))
 
         if view_cfg.show_dtypes:
-            blocks.extend(
-                [
-                    {
-                        "type": "text",
-                        "text": f"DataFrame with {self.value.shape[0]} rows and {self.value.shape[1]} columns.\n",
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            "Data in CSV format [index=False, na_rep=`<NULL>`; column names are displayed "
-                            "as `<column_name> (<dtype>)` (access with `df['<column_name>'])`]:\n"
-                        ),
-                    },
-                ]
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": (
+                        "Data in CSV format [index=False, na_rep=`<NULL>`; column names are displayed "
+                        "as `<column_name> (<dtype>)` (access with `df['<column_name>'])`]:\n"
+                    ),
+                }
             )
 
         blocks.append({"type": "text", "text": page_blocks if page_blocks else "(No pages selected.)"})
@@ -172,11 +198,35 @@ class DataFrameObject(BaseOutputObject):
         if max_cell and max_cell > 0 and " ..." in (page_blocks or ""):
             blocks.append({"type": "text", "text": "\nNote: Some cells are truncated.\n"})
 
+        # When the paginated window doesn't cover the whole frame, name the
+        # content-addressed handle the retrieval tools resolve — including after
+        # a dry_run cell, where the producing variable is gone from the kernel.
+        total_pages = ((len(vframe) - 1) // rows_per_page + 1) if len(vframe) else 0
+        in_range: set[int] = set()
+        for raw in view_cfg.display_pages:
+            try:
+                in_range.add(range(total_pages)[int(raw)])
+            except (IndexError, ValueError, TypeError):
+                continue
+        if len(in_range) < total_pages:
+            blocks.append(
+                {
+                    "type": "text",
+                    "text": _retrieval_cue(
+                        self.handle,
+                        shown=f"{len(in_range)} pages",
+                        total=f"{total_pages} pages ({len(frame)} rows)",
+                    ),
+                }
+            )
+
         if view_cfg.show_sample_unique_values:
             blocks.append({"type": "text", "text": "\nSample unique values:\n"})
-            for col in self.value.columns:
+            # Positional access — robust to duplicate / non-string column labels,
+            # which ``vframe[col]`` would not survive.
+            for i, col in enumerate(vframe.columns):
                 try:
-                    unique_vals = self.value[col].unique().tolist()
+                    unique_vals = vframe.iloc[:, i].unique().tolist()
                 except TypeError:
                     unique_vals = "(complex type - list/array)"
                 blocks.append({"type": "text", "text": f"- {col}: {truncate_text(str(unique_vals), max_length=100)}\n"})
@@ -272,6 +322,16 @@ class PrimitiveObject(BaseOutputObject):
     type: Literal["primitive"] = "primitive"
     value: str | int | float | bool | None
 
+    @property
+    def handle(self) -> str:
+        """Content-addressed handle the retrieval tools resolve to this output.
+
+        A plain property (like :attr:`DataFrameObject.handle`): the value is
+        deterministic from ``value`` and re-derived on whichever side reads it,
+        so it is never serialized across the kernel→supervisor wire.
+        """
+        return _primitive_handle(self.value)
+
     def to_llm(self, mode="default", overrides: dict[str, Any] | None = None):
         text = str(self.value)
 
@@ -289,10 +349,28 @@ class PrimitiveObject(BaseOutputObject):
 
         parts: list[str] = []
         if not view_cfg.minimal:
-            parts.append(get_output_header(self.type, mode))
+            parts.append(f"{get_output_header(self.type, mode)} — {len(text)} chars")
 
         if page_blocks:
             parts.append(page_blocks)
+
+        # Same honest contract as tabular: when the window doesn't cover the
+        # whole string, name the handle the retrieval tools resolve.
+        total_pages = len(paginator._page_ranges)
+        in_range: set[int] = set()
+        for raw in view_cfg.display_pages:
+            try:
+                in_range.add(range(total_pages)[int(raw)])
+            except (IndexError, ValueError, TypeError):
+                continue
+        if len(in_range) < total_pages:
+            parts.append(
+                _retrieval_cue(
+                    self.handle,
+                    shown=f"{len(in_range)} pages",
+                    total=f"{total_pages} pages ({len(text)} chars)",
+                )
+            )
 
         return [{"type": "text", "text": "\n".join(parts).strip()}]
 

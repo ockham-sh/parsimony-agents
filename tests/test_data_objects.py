@@ -8,7 +8,7 @@ Validates the immutable object-pool persister:
 * Different params → different logical_id.
 * Different data → same logical_id, different content_sha (separate pool files).
 * The persisted file is a valid parquet that round-trips through
-  ``TabularResult.from_arrow``.
+  ``Result.from_arrow``.
 * Errors degrade gracefully (return ``None``, no raise).
 """
 
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
-from parsimony.result import Provenance, TabularResult
+from parsimony.result import Provenance, Result
 
 from parsimony_agents.execution.data_objects import make_data_object_persister
 from parsimony_agents.identity import OBJECTS_NAMESPACE, ArtifactRef, object_pool_path
@@ -32,8 +32,8 @@ def _make_result(
     source: str = "src",
     params: dict | None = None,
     fetched_at: datetime | None = None,
-) -> TabularResult:
-    return TabularResult(
+) -> Result:
+    return Result(
         data=df,
         provenance=Provenance(
             source=source,
@@ -105,7 +105,7 @@ def test_persisted_file_is_readable_parquet(tmp_path: Path) -> None:
     ref, _ = out
     blob = (tmp_path / ref.workspace_file_path).read_bytes()
     table = pq.read_table(BytesIO(blob))
-    round_tripped = TabularResult.from_arrow(table)
+    round_tripped = Result.from_arrow(table)
     pd.testing.assert_frame_equal(round_tripped.df.reset_index(drop=True), df)
     assert round_tripped.provenance.source == "us_cpi"
     assert round_tripped.provenance.params == {"q": "cpi"}
