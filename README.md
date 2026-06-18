@@ -415,8 +415,7 @@ Useful sub-modules: `parsimony_agents.agent.config` (`AgentGuardrails`),
 `parsimony_agents.agent.events` (event types),
 `parsimony_agents.identity` (`ArtifactRef`, identity helpers),
 `parsimony_agents.execution` (`CodeExecutor`, `OutputFactory`, output types),
-`parsimony_agents.rag` (`hybrid_search`, `configure_embeddings`),
-`parsimony_agents.quality` (`check_code`, `inspect_object`).
+`parsimony_agents.rag` (`hybrid_search`, `configure_embeddings`).
 
 ### Optional capabilities
 
@@ -433,10 +432,6 @@ configure_embeddings(dimension=768)
 kw = get_or_create_session_keyword_store("session-1")
 vec = get_or_create_session_vector_store("session-1")
 hits = await hybrid_search("unemployment rate by year", keyword_store=kw, vector_store=vec, k=5)
-
-# AST lints + NA report over notebook code / frames
-from parsimony_agents.quality import check_code, inspect_object
-issues = check_code("x = df.groupby('k').sum()")
 ```
 
 Document readers (`read_pdf_text`, `read_excel`, `read_pptx_text`) lazily import their

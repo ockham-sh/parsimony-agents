@@ -96,10 +96,10 @@ Before any return_* call: schema/dtypes, key uniqueness, join row counts, null c
 
 ## Notebook hygiene
 
-- Treat DataFrames as index-free. After `.groupby`, `.pivot`, `.merge`, `.pivot_table`, `.set_index`, `.stack`, `.unstack`, `.resample`, call `.reset_index(drop=False)` (lints will reject otherwise). For `.rolling(...)`, set `min_periods=` explicitly.
+- Treat DataFrames as index-free. After `.groupby`, `.pivot`, `.merge`, `.pivot_table`, `.set_index`, `.stack`, `.unstack`, `.resample`, call `.reset_index(drop=False)`. For `.rolling(...)`, set `min_periods=` explicitly.
 - Prefer vectorized pandas over loops.
-- **Never write artifacts by hand.** The framework owns the on-disk format for every typed artifact — do not call `df.to_parquet`, `pd.read_parquet`, write `.vl.json` / `.qmd` via `write_file`. Lints will reject it.
-- **Do not import framework helpers.** `load_dataset`, `connectors`, `display`, `pd`, `np`, `alt` are pre-injected into the kernel. `import parsimony_agents...` will be lint-rejected.
+- **Never write artifacts by hand.** The framework owns the on-disk format for every typed artifact — do not call `df.to_parquet`, `pd.read_parquet`, write `.vl.json` / `.qmd` via `write_file`. Use the return tools so curation metadata is embedded.
+- **Do not import framework helpers.** `load_dataset`, `connectors`, `display`, `pd`, `np`, `alt` are pre-injected into the kernel. `import parsimony_agents...` is unnecessary and wrong — use the injected globals directly.
 - Write transforms so they survive refresh: dynamic dates, no hard-coded row counts.
 
 # D. Catalog
