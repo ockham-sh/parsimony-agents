@@ -4,6 +4,19 @@ All notable changes to parsimony-agents will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.1.5] - 2026-06-18
+
+### Changed
+
+- **One governed render + content-addressed handle retrieval.** Tabular kernel outputs render through a
+  single governed path: `DataFrameObject` carries the column schema and enforces `exclude_from_llm_view`
+  on every LLM path (the `governed_llm_text` head/tail sidecar is removed), with an honest size header
+  and a retrieval cue naming a content-addressed handle. A server-side handle registry on the `Agent`
+  records every `KernelOutput` by handle and survives `dry_run`, so `output_read` / `output_search` can
+  reach a scratch result from a `dry_execute_code` cell next turn — closing the retrieval gap with no
+  wire changes. Paginators de-duplicate resolved pages.
+- Requires `parsimony-core>=0.7.3` (unified `Result`).
+
 ## [0.1.4] - 2026-06-16
 
 ### Added
