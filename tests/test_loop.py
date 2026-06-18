@@ -204,9 +204,7 @@ async def test_slow_custom_dispatch_tool_does_not_trip_no_progress() -> None:
                 # Simulate a tool that ran well past the stall threshold while
                 # emitting no intermediate events (the bug: timer goes stale).
                 state.last_event_time_s = time.monotonic() - (stall + 60)
-            state.messages.append(
-                _tool_result_message(tool_call_id=tc.id, tool_name=name, result_text="ok")
-            )
+            state.messages.append(_tool_result_message(tool_call_id=tc.id, tool_name=name, result_text="ok"))
             yield ToolEvent(
                 tool_name=name,
                 tool_call_id=tc.id,

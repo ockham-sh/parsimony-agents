@@ -134,9 +134,7 @@ def pre_step(state: RunState, guardrails: AgentGuardrails) -> Failure | None:
         if not warned or elapsed >= limit + _TIME_LIMIT_FINALIZE_GRACE_S:
             return Failure(
                 kind=FailureKind.time_limit,
-                explanation=(
-                    f"The run reached its {limit:.0f}-second time limit before the task was finished."
-                ),
+                explanation=(f"The run reached its {limit:.0f}-second time limit before the task was finished."),
                 metadata={"max_execution_time_s": limit, "elapsed_s": elapsed},
             )
 
