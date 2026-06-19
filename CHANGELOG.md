@@ -6,8 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-06-19
+
 ### Removed
 
+- **`parsimony_agents.quality`.** Dropped the orphaned quality package (`check_code` /
+  `inspect_object` and the raw-parquet-IO AST lints) and the prompt's false "lints will reject"
+  promise it implied.
 - **Retrieval apparatus and the `parsimony_agents.rag` module.** Deleted the `output_read` /
   `output_search` system tools, the content-addressed handle registry on the `Agent`
   (`_register_outputs` / `_output_handles`), and the never-wired `rag/` hybrid-search duplicate
