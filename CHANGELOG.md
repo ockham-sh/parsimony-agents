@@ -4,6 +4,30 @@ All notable changes to parsimony-agents will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
+## [Unreleased]
+
+## [0.1.6] - 2026-06-19
+
+### Removed
+
+- **`parsimony_agents.quality`.** Dropped the orphaned quality package (`check_code` /
+  `inspect_object` and the raw-parquet-IO AST lints) and the prompt's false "lints will reject"
+  promise it implied.
+- **Retrieval apparatus and the `parsimony_agents.rag` module.** Deleted the `output_read` /
+  `output_search` system tools, the content-addressed handle registry on the `Agent`
+  (`_register_outputs` / `_output_handles`), and the never-wired `rag/` hybrid-search duplicate
+  (Tantivy keyword store + ChromaDB vector store), along with the `tantivy` dependency and the
+  `rag` extra. A coding agent in a stateful kernel reaches a large output as a variable — slice it
+  to page, or search a DataFrame with the core catalog `auto_catalog(df).search(...)` (BM25, in
+  base `parsimony-core`, no extra). The governed render and the `DataframeRef` parquet transport
+  are unchanged; the partial-view cue now points at the variable instead of a handle.
+
+### Changed
+
+- `dry_execute_code` description now states plainly that it runs against a throwaway copy of the
+  kernel namespace (reads existing variables; its own assignments do not persist) — produce a
+  result in a real cell to keep or search it.
+
 ## [0.1.5] - 2026-06-18
 
 ### Changed

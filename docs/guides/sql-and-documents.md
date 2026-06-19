@@ -18,7 +18,7 @@ Both are off by default so the base package stays lean. Install what you need (s
 pip install "parsimony-agents[documents]"   # PDF / Excel / PPTX helpers
 pip install "parsimony-agents[sql]"          # duckdb for SQL queries
 pip install "parsimony-agents[documents,sql]"
-pip install "parsimony-agents[all]"          # rag + sql + display + documents
+pip install "parsimony-agents[all]"          # sql + display + documents
 ```
 
 ## The documents extra: `read_pdf_text`, `read_excel`, `read_pptx_text`

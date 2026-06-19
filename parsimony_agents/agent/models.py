@@ -157,10 +157,8 @@ class AgentContext(MessageContent):
     messages: list[AgentMessage] = Field(default_factory=list)
 
     # Session-scoped services (runtime only, not serialized).
-    # Runtime types: FileStore, SessionVectorStore, SessionKeywordStore.
+    # Runtime type: FileStore.
     files: Any | None = Field(default=None, exclude=True)
-    vector_store: Any | None = Field(default=None, exclude=True)
-    keyword_store: Any | None = Field(default=None, exclude=True)
 
     #: Filled by the host before :meth:`to_snapshot` in workspace mode.
     session_state: SessionState | None = None

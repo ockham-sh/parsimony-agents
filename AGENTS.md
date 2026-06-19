@@ -37,7 +37,6 @@ uv run pytest tests/ -v && uv run ruff check . && uv run mypy parsimony_agents/
 | Notebook / `Script` / `ScriptPreview` | `parsimony_agents/notebook.py` |
 | Dataset / chart / notebook I/O helpers | `parsimony_agents/dataset_io.py`, `chart_io.py`, `notebook_io.py` |
 | Altair Parsimony theme | `parsimony_agents/theme.py` |
-| RAG: vector store + BM25 search | `parsimony_agents/rag/` |
 | Terminal display (`stream_to_display`, `display_result`) | `parsimony_agents/display.py` |
 
 ## Rules

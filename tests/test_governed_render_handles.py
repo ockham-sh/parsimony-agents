@@ -1,8 +1,10 @@
-"""Governed single render + content-addressed handle retrieval.
+"""Governed single render + honest partial-view cue.
 
 Regression cover for the result-rendering rebuild: one governed render for
 tabular outputs (honest header, exclude_from_llm_view enforced on the paginated
-path, retrieval cue) and a server-side handle map that survives a dry_run cell.
+path) and an honest partial-view cue that points a coding agent back at the
+value — slice it or search it with the core catalog — rather than at a
+content-addressed retrieval tool (those were removed).
 """
 
 from __future__ import annotations
@@ -12,9 +14,8 @@ import tempfile
 import pandas as pd
 from parsimony.result import Column, ColumnRole
 
-from parsimony_agents.agent.agent import _OUTPUT_HANDLE_LIMIT, Agent
 from parsimony_agents.execution.dataframe_ref import DataframeRef, set_default_local_root
-from parsimony_agents.execution.outputs import DataFrameObject, KernelOutput, PrimitiveObject
+from parsimony_agents.execution.outputs import DataFrameObject, PrimitiveObject
 
 
 def _text(blocks) -> str:
@@ -50,17 +51,21 @@ def test_tabular_render_is_honest_and_governed() -> None:
     assert "- label: object (DATA)" in text
 
 
-def test_tabular_render_emits_handle_retrieval_cue() -> None:
-    obj = _big_codelist_object()
-    text = _text(obj.to_llm())
-    assert obj.handle in text
-    assert f"output_search(variable_name='{obj.handle}'" in text
-    assert f"output_read(variable_name='{obj.handle}'" in text
+def test_tabular_partial_view_cue_points_at_the_value_not_a_tool() -> None:
+    text = _text(_big_codelist_object().to_llm())
+    assert "This is a partial view" in text
+    # Codemode: slice or search the variable; the core catalog is the search path.
+    assert "df.iloc[start:stop]" in text
+    assert "auto_catalog(df).search(" in text
+    # The removed retrieval apparatus is gone — no handle, no tools advertised.
+    assert "output_search" not in text
+    assert "output_read" not in text
 
 
-def test_output_read_pages_reach_buried_rows() -> None:
+def test_render_pagination_reaches_buried_rows() -> None:
     # The aggregates a decomposition needs sit deep in a large codelist; a
-    # specific page must be reachable (this is the codelist-blindness fix).
+    # specific page must be reachable via the render's display_pages (the
+    # codelist-blindness fix), independent of any retrieval tool.
     obj = _big_codelist_object()
     deep = _text(obj.to_llm(overrides={"display_pages": [89]}))
     assert "c890" in deep and "c899" in deep
@@ -73,8 +78,8 @@ def test_small_tabular_shows_all_rows_no_cue() -> None:
     obj = DataFrameObject(ref=DataframeRef.from_pandas(df, ref="anonymous", local_dir=d))
     text = _text(obj.to_llm())
     assert "3 rows × 1 columns" in text
-    # Everything fits one page -> no retrieval cue.
-    assert "output_search(variable_name=" not in text
+    # Everything fits one page -> no partial-view cue.
+    assert "This is a partial view" not in text
 
 
 def test_single_page_frame_not_rendered_twice() -> None:
@@ -87,30 +92,14 @@ def test_single_page_frame_not_rendered_twice() -> None:
     text = _text(obj.to_llm())
     # The single page is emitted exactly once (no [0, 1, -2, -1] re-render).
     assert text.count("Page 1/1") == 1
-    assert "output_search(variable_name=" not in text
+    assert "This is a partial view" not in text
 
 
-def test_large_primitive_has_handle_and_cue() -> None:
+def test_large_primitive_partial_view_cue_points_at_the_value() -> None:
     obj = PrimitiveObject(value="word " * 4000)
     text = _text(obj.to_llm())
     assert "chars" in text
-    assert obj.handle in text
-    assert "output_read(variable_name=" in text
-
-
-def test_register_outputs_indexes_handles_and_is_bounded() -> None:
-    agent = Agent(model="test-model")
-    obj = _big_codelist_object()
-    agent._register_outputs(KernelOutput(outputs=[obj]))
-    # The handle the agent advertised in the cue resolves back to the object.
-    assert agent._output_handles.get(obj.handle) is obj
-
-    # Bound holds: flooding past the cap evicts oldest, keeps the newest.
-    d = tempfile.mkdtemp()
-    set_default_local_root(d)
-    last = None
-    for i in range(_OUTPUT_HANDLE_LIMIT + 50):
-        last = PrimitiveObject(value=f"payload-{i}-" + "z" * 2000)
-        agent._register_outputs(KernelOutput(outputs=[last]))
-    assert len(agent._output_handles) <= _OUTPUT_HANDLE_LIMIT
-    assert agent._output_handles.get(last.handle) is last
+    assert "This is a partial view" in text
+    assert "text[start:stop]" in text
+    assert "grep it with Python" in text
+    assert "output_read" not in text

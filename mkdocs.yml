@@ -21,7 +21,6 @@ nav:
   - Guides:
       - Multi-turn conversations: guides/multi-turn.md
       - Streaming and displaying results: guides/streaming-and-displaying-results.md
-      - Retrieval (RAG): guides/retrieval-rag.md
       - SQL and documents: guides/sql-and-documents.md
       - Saving and loading artifacts: guides/saving-loading-artifacts.md
       - Suspend and resume: guides/suspend-resume.md

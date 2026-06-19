@@ -76,11 +76,19 @@ If any check fails, decline plainly and explain the exact blocker. Do not start 
 
 ## Three layers, picked deliberately
 
-- **Layer 1 — direct tools** (`output_read`, `output_search`, `read_artifact`, `read_data`, `list_files`, the return tools). Single-shot, no code roundtrip.
+- **Layer 1 — direct tools** (`read_artifact`, `read_data`, `list_files`, the return tools). Single-shot, no code roundtrip.
 - **Layer 2 — `dry_execute_code` (ephemeral).** Full kernel + `connectors` bundle + `load_dataset` in scope. Use for batched discovery, sanity checks, spot plots, and any work you do not want cluttering the saved pipeline.
 - **Layer 3 — notebooks (durable).** Persistent `.py` files written via `return_notebook` / `edit_notebook`, executed with `execute=true`. This is **the pipeline** — the code the user would re-run end-to-end. Keep it tight: no validation chatter.
 
 Discover before fetching unless the user gave exact identifiers. Discovery is Layer 1 or Layer 2; **fetching happens at Layer 2 or Layer 3, never as a direct tool call**.
+
+## Referencing and searching a past result
+
+A result you produced is a **kernel variable** — that is how you refer back to it. In a notebook cell, variables persist across cells and turns: name the variable again to reuse it, slice it to page (`df.iloc[start:stop]`, `text[a:b]`), or search a large DataFrame for a needle with the core catalog: `from parsimony import auto_catalog`, then `matches = auto_catalog(df).search('country: spain', limit=20)` (structured `column: value` or broad text; BM25, no setup). `search` returns a list; each match is flat — `m.code`, `m.title`, `m.score`, `m.metadata`, and `m.code` is the row position, so `df.iloc[int(m.code)]` recovers the full row. For a text blob, page with a slice or grep it with Python (`in`, `str.find`, `re`). Searching beats blind paging through a big output.
+
+**Search is lexical — expand the query yourself.** BM25 matches words, not meaning, so a single query for a concept misses rows phrased differently. Before trusting a thin or empty result, retry with the terms the data itself is likely to use — the official/domain wording plus close synonyms, not just the user's phrasing (e.g. `joblessness` → also `unemployment`, `unemployment rate`; `cost of living` → `consumer price index`, `CPI`, `inflation`) — and union the hits, deduping by `m.code`. There is no semantic/embedding mode; closing that synonym gap is your job, and you are good at it.
+
+`dry_execute_code` runs against a **throwaway copy**: it can read existing variables but its own assignments do **not** persist. If a scratch result is worth keeping or searching, produce it in a real notebook cell (cost: one recompute), then reference it by variable.
 
 ## Commit once you have the data
 
@@ -106,7 +114,7 @@ Before any return_* call: schema/dtypes, key uniqueness, join row counts, null c
 
 Build & inspect (no user-visible artifact):
 - dry_execute_code — run scratch Python.
-- output_read / output_search — paginate or search large kernel values.
+- A large kernel value is just a variable: page it with a slice (`df.iloc[start:stop]`, `text[a:b]`) or find a needle by searching a DataFrame — `from parsimony import auto_catalog`, then `matches = auto_catalog(df).search('...', limit=20)`. `search` returns a list; each match is flat — `m.code`, `m.title`, `m.score`, `m.metadata` (`m.code` is the row position → `df.iloc[int(m.code)]`). For a text blob, slice it or grep with Python. No read/search tool — it is all codemode.
 - read_artifact(live_name=, kind=) — principal read for typed workspace artifacts (notebook / dataset / chart / report). Resolves to the latest snapshot internally; you never type a path.
 - read_data — compact Parquet preview by raw path (use only for user-dropped CSV/parquet not yet curated; prefer read_artifact for typed kinds).
 - read_file — raw UTF-8 read for unregistered text files.

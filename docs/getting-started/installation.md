@@ -44,7 +44,7 @@ from parsimony_agents import Dataset, Chart, Script
 > `Agent` to call a model. That is environment configuration, not an install step —
 > see [Configuration](configuration.md).
 
-## Optional extras: rag, sql, display, documents, all
+## Optional extras: sql, display, documents, all
 
 Several capabilities are gated behind optional extras so the base install stays
 lean. Install them with the standard `pip install "parsimony-agents[extra]"`
@@ -52,11 +52,14 @@ syntax (quote the brackets in most shells):
 
 | Extra | Pulls in | Unlocks |
 |---|---|---|
-| `rag` | `chromadb` (Tantivy ships in the base install) | Hybrid retrieval — semantic (ChromaDB) + keyword (Tantivy) search with Reciprocal Rank Fusion |
 | `sql` | `duckdb` | In-kernel SQL over your data |
 | `display` | `rich` | Polished terminal rendering via `stream_to_display` / `display_result` |
 | `documents` | `pypdf`, `openpyxl`, `python-pptx` | Reading PDF, Excel, and PowerPoint files |
-| `all` | `rag` + `sql` + `display` + `documents` | Everything above in one install |
+| `all` | `sql` + `display` + `documents` | Everything above in one install |
+
+To search a large output, a result is a kernel variable, so an agent searches a
+DataFrame in code with the core catalog
+(`auto_catalog(df).search(...)`, BM25 — in base `parsimony-core`, no extra needed).
 
 Examples:
 
@@ -64,10 +67,10 @@ Examples:
 # Just the rich terminal UI
 pip install "parsimony-agents[display]"
 
-# RAG + document parsing
-pip install "parsimony-agents[rag,documents]"
+# Document parsing
+pip install "parsimony-agents[documents]"
 
-# Everything (rag + sql + display + documents)
+# Everything (sql + display + documents)
 pip install "parsimony-agents[all]"
 ```
 
@@ -139,14 +142,6 @@ pip install "parsimony-agents[documents]"
 ```
 
 See [SQL and document inputs](../guides/sql-and-documents.md) for usage.
-
-### `rag` — retrieval (semantic + keyword)
-
-The `rag` extra adds `chromadb` (the semantic vector store). The keyword store,
-`tantivy`, is already a base dependency, so the `rag` extra exists mainly to pull
-in ChromaDB; together they power the hybrid search in `parsimony_agents.rag`
-(`hybrid_search`, session vector/keyword stores). See
-[Retrieval (RAG)](../guides/retrieval-rag.md).
 
 ### `sql` — DuckDB
 

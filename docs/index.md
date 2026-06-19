@@ -111,7 +111,7 @@ connectors = FRED.bind(api_key="...") + SDMX
 Start here, then jump to the page that matches what you're doing.
 
 **Getting started**
-- [Installation](getting-started/installation.md) — install, optional extras (`rag`, `sql`, `display`, `documents`, `examples`, `all`), and Python version.
+- [Installation](getting-started/installation.md) — install, optional extras (`sql`, `display`, `documents`, `examples`, `all`), and Python version.
 - [Quickstart](getting-started/quickstart.md) — the runnable FRED example, expanded.
 - [Configuration](getting-started/configuration.md) — models, API keys, and the convenience vs. expert constructor params.
 
@@ -128,7 +128,6 @@ Start here, then jump to the page that matches what you're doing.
 - [Multi-turn conversations](guides/multi-turn.md)
 - [Suspend and resume](guides/suspend-resume.md)
 - [Saving and loading artifacts](guides/saving-loading-artifacts.md)
-- [Retrieval (RAG)](guides/retrieval-rag.md)
 - [SQL and document inputs](guides/sql-and-documents.md)
 - [Embedding in a host application](guides/embedding-in-a-host.md)
 
