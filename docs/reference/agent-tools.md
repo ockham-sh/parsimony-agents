@@ -64,7 +64,7 @@ method receives `context: AgentContext` as a keyword argument — the loop suppl
 |---|---|---|
 | `code` | Write or run Python in the kernel/notebooks | `return_notebook`, `edit_notebook` |
 | `return` | Publish a typed deliverable artifact | `return_dataset`, `return_chart`, `return_report`, `edit_report`, `refresh` |
-| `system` | Termination/suspension control and workspace system reads | `return_done`, `return_unable`, `ask_user`, `read_artifact`, `list_artifacts`, `list_files`, `read_file`, `restart_kernel`, `output_read`, `output_search` |
+| `system` | Termination/suspension control and workspace system reads | `return_done`, `return_unable`, `ask_user`, `read_artifact`, `list_artifacts`, `list_files`, `read_file`, `restart_kernel` |
 | `utility` | Plain side-effecting helpers (file writes, dry runs) | `write_file`, `edit_file`, `dry_execute_code` |
 
 The loop reads `tool_type` to decide per-layer timeouts, recovery handling, and how the call is
@@ -427,23 +427,14 @@ async def list_artifacts(
 async def refresh(self, *, context: AgentContext, live_name: str) -> Dataset | Chart | Report
 ```
 
-### Output inspection tools
+### Inspecting a large kernel value
 
-`output_read` and `output_search` are `tool_type="system"`. They let the agent page through and
-search large kernel values without re-printing them in full.
-
-```python
-# Read a paginated kernel variable or cell reference (e.g. df[row, col]).
-async def output_read(
-    self, *, context: AgentContext, variable_name: str, pages: list,
-) -> SystemToolOutput
-
-# Hybrid (keyword + semantic) search within a kernel variable.
-async def output_search(
-    self, *, context: AgentContext,
-    query: str, variable_name: str | None = None, top_k: int = 5,
-) -> SystemToolOutput
-```
+There is no dedicated read/search tool. A large kernel value is just a variable, so the agent
+inspects it in code (`dry_execute_code` or a notebook cell): page it with a slice
+(`df.iloc[start:stop]`, `text[a:b]`) or find a needle by searching a DataFrame with the core
+catalog — `from parsimony import auto_catalog; auto_catalog(df).search('country: spain')`
+(structured `column: value` or broad text; BM25, no setup). For a text blob, slice it or grep with
+Python (`in`, `str.find`, `re`).
 
 ## Putting it together
 

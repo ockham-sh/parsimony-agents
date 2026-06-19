@@ -17,7 +17,6 @@ from uuid import uuid4
 os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
 
 import litellm
-import pandas as pd
 from opentelemetry import trace
 from parsimony.connector import Connectors
 from parsimony.result import Result
@@ -34,12 +33,6 @@ from parsimony_agents.agent.helpers import (
     render_connector_catalog,
     render_connector_skills,
 )
-from parsimony_agents.agent.helpers import (
-    parse_cell_ref as _parse_cell_ref,
-)
-from parsimony_agents.agent.helpers import (
-    system_error as _system_error,
-)
 from parsimony_agents.agent.models import (
     AgentContext,
     AgentMessage,
@@ -55,14 +48,11 @@ from parsimony_agents.agent.xml_render import escape_attr, escape_text
 from parsimony_agents.artifacts import Chart, Dataset, Report
 from parsimony_agents.execution import (
     DataFrameObject,
-    ExceptionObject,
     FigureObject,
-    PrimitiveObject,
-    StringPaginator,
 )
 from parsimony_agents.execution.executor import BaseCodeExecutor
 from parsimony_agents.execution.factory import OutputFactory as FrameworkOutputFactory
-from parsimony_agents.execution.outputs import KernelOutput, KernelOutputType
+from parsimony_agents.execution.outputs import KernelOutput
 from parsimony_agents.execution.parquet_helpers import parquet_summary
 from parsimony_agents.identity import (
     ArtifactRef,
@@ -74,7 +64,7 @@ from parsimony_agents.identity import (
     notebook_logical_id,
     report_logical_id,
 )
-from parsimony_agents.messages import Text, blocks_to_text
+from parsimony_agents.messages import Text
 from parsimony_agents.notebook import Script
 from parsimony_agents.notebook_io import (
     deserialize_notebook,
@@ -82,15 +72,12 @@ from parsimony_agents.notebook_io import (
     read_latest_notebook,
     serialize_notebook,
 )
-from parsimony_agents.rag.keyword_store import get_or_create_session_keyword_store
-from parsimony_agents.rag.vector_store import get_or_create_session_vector_store
 from parsimony_agents.refresh import (
     embedded_refs_from_markdown,
     extract_embed_keys_from_markdown,
     refresh_artifact,
 )
 from parsimony_agents.tools import ToolMethod, Tools, toolmethod
-from parsimony_agents.views import get_llm_view_defaults
 
 if TYPE_CHECKING:
     from parsimony_agents.agent.state import SuspensionRecord
@@ -99,10 +86,6 @@ if TYPE_CHECKING:
 # Used by ``_emit_cancelled_tool_events`` below; the loop body that also referenced
 # it moved to ``workspace_hooks.py`` (which keeps its own copy).
 CANCELLED_TOOL_TEXT = "Cancelled by user before the tool completed."
-
-#: Max content-addressed output handles retained for retrieval (bounded so a
-#: long session can't grow the map without limit; oldest drop first).
-_OUTPUT_HANDLE_LIMIT = 512
 
 logger = logging.getLogger("parsimony_agents")
 error_logger = logging.getLogger("parsimony_agents.errors")
@@ -354,17 +337,6 @@ class Agent:
 
         self.figures = []
 
-        # Content-addressed retrieval map: handle -> the output object the agent
-        # last saw under it. Populated from every KernelOutput the agent
-        # receives, so output_read/output_search can resolve a result by handle
-        # even after a dry_run cell — where the producing variable no longer
-        # exists in the kernel namespace the sandbox discards. Lives here on the
-        # agent (not in kernel locals) so it survives dry_run for the lifetime of
-        # this in-process Agent (i.e. within a session). NOTE: a cross-process
-        # resume() rebuilds the Agent and starts this map empty — pre-suspension
-        # dry_run handles are not carried across a suspend/resume boundary.
-        self._output_handles: dict[str, KernelOutputType] = {}
-
         # Standalone artifact discovery. A workspace host (terminal) injects
         # read/list fns and populates session_state itself. The OSS front door
         # has no host, so default both to the local ``.ockham/`` tree the
@@ -418,8 +390,6 @@ class Agent:
                 self.return_report,
                 self.edit_report,
                 self.refresh,
-                self.output_read,
-                self.output_search,
             ]
         )
 
@@ -561,8 +531,6 @@ class Agent:
 
         if self.session_id and self.file_store is not None:
             ctx.files = self.file_store
-            ctx.vector_store = get_or_create_session_vector_store(self.session_id)
-            ctx.keyword_store = get_or_create_session_keyword_store(self.session_id)
             await self.code_executor.set_cwd(str(ctx.files.get_files_dir()), session_id=self.session_id)
 
         await self._setup_connectors()
@@ -714,8 +682,6 @@ class Agent:
 
         if self.session_id and self.file_store is not None:
             ctx.files = self.file_store
-            ctx.vector_store = get_or_create_session_vector_store(self.session_id)
-            ctx.keyword_store = get_or_create_session_keyword_store(self.session_id)
             await self.code_executor.set_cwd(str(ctx.files.get_files_dir()), session_id=self.session_id)
 
         await self._setup_connectors()
@@ -879,253 +845,13 @@ class Agent:
             ]
         return []
 
-    def _register_outputs(self, ko: KernelOutput) -> None:
-        """Record each retrievable output under its content-addressed handle.
-
-        The handle survives a ``dry_run`` cell — it lives here on the agent,
-        not in the kernel namespace the sandbox copies and discards — so
-        ``output_read`` / ``output_search`` can reach a scratch result whose
-        producing variable is gone. The map is bounded; oldest entries drop
-        first (insertion order) so a long session can't grow it without limit.
-        """
-        for out in ko.outputs:
-            handle = getattr(out, "handle", None)
-            if not handle:
-                continue
-            # Re-insert at the end so a re-seen handle counts as most-recent, then
-            # evict from the front until within bound. The just-inserted entry is
-            # newest, so it is never the one evicted.
-            self._output_handles.pop(handle, None)
-            self._output_handles[handle] = out
-            while len(self._output_handles) > _OUTPUT_HANDLE_LIMIT:
-                self._output_handles.pop(next(iter(self._output_handles)))
-
-    @toolmethod(
-        name="output_read",
-        description=(
-            "Read pages from an in-kernel value (DataFrame or primitive) or a result handle "
-            "(the id in a result's retrieval cue — resolves even after a dry_run cell). For "
-            "persisted files use read_artifact. variable_name='df[row,col]' paginates a single cell."
-        ),
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "variable_name": {
-                    "type": "string",
-                    "description": "Kernel variable, result handle, or 'df[row,col]' cell ref.",
-                },
-                "pages": {
-                    "type": "array",
-                    "description": "Up to 5 pages.",
-                    "items": {"type": "integer"},
-                    "minItems": 1,
-                    "maxItems": 5,
-                },
-            },
-            "required": ["variable_name", "pages"],
-            "additionalProperties": False,
-        },
-        tool_type="system",
-        ui_message="Reading output...",
-        ui_message_completed="Read output",
-    )
-    async def output_read(self, *, variable_name: str, pages: list[int], context: AgentContext) -> SystemToolOutput:
-        pages = pages[:5]
-        display_pages = [p - 1 for p in pages]
-
-        # Content-addressed handle first: resolves a result the agent has seen
-        # even when its producing variable is gone (e.g. after a dry_run cell).
-        # Only the paginatable output types accept display_pages overrides.
-        handled = self._output_handles.get(variable_name)
-        if isinstance(handled, (DataFrameObject, PrimitiveObject)):
-            blocks = handled.to_llm(overrides={"display_pages": display_pages})
-            return SystemToolOutput(content=Text(content=blocks_to_text(blocks)))
-
-        cell_ref = _parse_cell_ref(variable_name)
-        if cell_ref is not None:
-            base_name, row, col = cell_ref
-            prim, err = await self._get_cell_as_primitive(cell_ref, context)
-            if err:
-                return _system_error(err)
-            page_chars = get_llm_view_defaults("primitive")["default"].page_chars
-            paginator = StringPaginator(prim.value, chars_per_page=page_chars)
-            page_blocks = "\n".join(paginator.iter_pages(display_pages))
-            header = f'type="primitive"\nCell [{row},{col}] from {base_name}'
-            text = f"{header}\n{page_blocks}" if page_blocks else f"{header}\n(Empty cell.)"
-            return SystemToolOutput(content=Text(content=text))
-
-        obj_kernel = await self.code_executor.eval(variable_name)
-        if not obj_kernel.outputs:
-            return _system_error(f"Variable '{variable_name}' not found or returned no output.")
-        # Register so the handle this render may advertise resolves next turn,
-        # even if the live variable is later overwritten or shadowed.
-        self._register_outputs(obj_kernel)
-        output = obj_kernel.outputs[0]
-        if isinstance(output, (DataFrameObject, PrimitiveObject)):
-            blocks = output.to_llm(overrides={"display_pages": display_pages})
-        else:
-            blocks = output.to_llm()
-        text = blocks_to_text(blocks)
-        return SystemToolOutput(content=Text(content=text))
-
-    @toolmethod(
-        name="output_search",
-        description=(
-            "Search within an in-kernel value or a result handle (the id in a result's retrieval "
-            "cue — resolves even after a dry_run cell). Returns hits with page numbers for "
-            "output_read. Use read_artifact for persisted workspace files."
-        ),
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "Search query."},
-                "variable_name": {
-                    "type": "string",
-                    "description": "Kernel variable, result handle, or 'df[row,col]' cell ref.",
-                },
-                "top_k": {"type": "integer", "description": "Result count.", "default": 5},
-            },
-            "required": ["query", "variable_name"],
-            "additionalProperties": False,
-        },
-        tool_type="system",
-        ui_message="Reading output...",
-        ui_message_completed="Read output",
-    )
-    async def output_search(
-        self,
-        *,
-        query: str,
-        variable_name: str | None = None,
-        top_k: int = 5,
-        context: AgentContext,
-    ) -> SystemToolOutput:
-        """Search outputs using hybrid search (keyword + semantic)."""
-        from parsimony_agents.rag import hybrid_search
-
-        if variable_name:
-            indexed = await self._ensure_indexed(variable_name, context)
-            if not indexed:
-                return _system_error(f"Could not index '{variable_name}' for search")
-
-        try:
-            results = await hybrid_search(
-                query=query,
-                keyword_store=context.keyword_store,
-                vector_store=context.vector_store,
-                identifier=variable_name,
-                k=top_k,
-            )
-        except Exception as e:
-            return _system_error(f"Search failed: {str(e)}")
-
-        response_text = (
-            self._format_no_search_results(query, variable_name)
-            if not results
-            else self._format_search_results(query, results)
-        )
-
-        return SystemToolOutput(content=Text(content=response_text))
-
-    async def _ensure_indexed(self, variable_name: str, context: AgentContext) -> bool:
-        """Ensure a variable (or cell ref) is indexed in both stores (lazy indexing)."""
-        keyword_indexed = context.keyword_store.is_indexed(variable_name) if context.keyword_store else True
-        vector_indexed = context.vector_store.is_indexed(variable_name) if context.vector_store else True
-
-        if keyword_indexed and vector_indexed:
-            return True
-
-        # Cell ref: variable_name="df[row,col]" - index cell content as primitive
-        cell_ref = _parse_cell_ref(variable_name)
-        if cell_ref is not None:
-            return await self._ensure_cell_indexed(cell_ref, variable_name, context)
-
-        # Content-addressed handle first (reaches dry_run scratch results); fall
-        # back to a live kernel variable.
-        output = self._output_handles.get(variable_name) or await self.code_executor.get(variable_name)
-        if output is None or output.type not in ("dataframe", "primitive"):
-            return False
-        tasks = []
-        if context.keyword_store and not keyword_indexed:
-            tasks.append(context.keyword_store.index_output(output, variable_name))
-        if context.vector_store and not vector_indexed:
-            tasks.append(context.vector_store.index_output(output, variable_name))
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            return all(r is True or not isinstance(r, Exception) for r in results)
-        return False
-
-    async def _get_cell_as_primitive(
-        self,
-        cell_ref: tuple[str, int, str],
-        context: AgentContext,
-    ) -> tuple[PrimitiveObject | None, str | None]:
-        """Resolve a cell ref to a PrimitiveObject (kernel is source of truth)."""
-        _ = context
-        base_name, row, col = cell_ref
-        df: pd.DataFrame | None = None
-        obj_kernel = await self.code_executor.eval(base_name)
-        if not obj_kernel.outputs:
-            return (None, f"Variable '{base_name}' not found or has no output.")
-        output = obj_kernel.outputs[0]
-        if isinstance(output, ExceptionObject):
-            return (None, f"Error evaluating '{base_name}': {output.value}")
-        if not isinstance(output, DataFrameObject):
-            return (None, f"'{base_name}' is not a DataFrame; cell ref requires a DataFrame variable.")
-        df = output.value
-
-        try:
-            col_idx = int(col) if str(col).lstrip("-").isdigit() else df.columns.get_loc(col)
-        except (KeyError, ValueError) as e:
-            return (None, f"Invalid column '{col}' for cell ref: {e}")
-        if row < 0 or row >= len(df):
-            return (None, f"Row {row} out of range (0..{len(df) - 1}) for '{base_name}'.")
-        try:
-            cell_val = df.iloc[row, col_idx]
-        except IndexError as e:
-            return (None, f"Cell [{row},{col}] out of range: {e}")
-        cell_text = "<NULL>" if pd.isna(cell_val) else str(cell_val)
-        return (PrimitiveObject(value=cell_text), None)
-
-    async def _ensure_cell_indexed(
-        self,
-        cell_ref: tuple[str, int, str],
-        identifier: str,
-        context: AgentContext,
-    ) -> bool:
-        """Index a DataFrame cell as a primitive for search (lazy, on demand)."""
-        prim, _ = await self._get_cell_as_primitive(cell_ref, context)
-        if prim is None:
-            return False
-        tasks = []
-        if context.keyword_store:
-            tasks.append(context.keyword_store.index_output(prim, identifier))
-        if context.vector_store:
-            tasks.append(context.vector_store.index_output(prim, identifier))
-        if tasks:
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            return all(r is True or not isinstance(r, Exception) for r in results)
-        return False
-
-    def _format_search_results(self, query: str, results: list) -> str:
-        """Format search results."""
-        lines: list[str] = []
-        for result in results:
-            page = result.metadata.get("page", 1)
-            lines.append(f"Page {page}:\n{result.content}\n")
-        return "\n".join(lines).rstrip()
-
-    def _format_no_search_results(self, query: str, variable_name: str | None) -> str:
-        """Format response when no relevant results are found."""
-        if variable_name:
-            return f"No matching content for '{query}' in '{variable_name}'."
-        return f"No matching content for '{query}'."
-
     @toolmethod(
         name="dry_execute_code",
         description=(
-            "Run scratch Python; stdout/display() land in the conversation, kernel state is preserved, "
-            "no notebook is published. _ui_message is a short past-tense line shown to the user."
+            "Run scratch Python against a throwaway copy of the kernel: stdout/display() land in the "
+            "conversation and you can read existing variables, but assignments here do NOT persist and "
+            "no notebook is published. To keep or later search a result, produce it in a real cell. "
+            "_ui_message is a short past-tense line shown to the user."
         ),
         parameters_schema={
             "type": "object",
@@ -1180,11 +906,6 @@ class Agent:
 
         # Attach lightweight metadata to the kernel output
         kernel_output.metadata = metadata
-
-        # Register handles BEFORE returning: a dry_run cell's outputs are durable
-        # on disk (content-addressed) but unreachable by variable name next turn,
-        # so the handle is the only way back to them.
-        self._register_outputs(kernel_output)
 
         return UtilityToolOutput(metadata=metadata, content=kernel_output, ui_message="Executing temporary code")
 
@@ -1376,9 +1097,6 @@ class Agent:
         }
         result = await self._read_artifact_fn(live_name, kind, options)
         if result.kernel_output is not None:
-            # Register handles: a read artifact (e.g. a dataset preview) renders a
-            # retrieval cue, and that handle must resolve when the agent pages it.
-            self._register_outputs(result.kernel_output)
             return SystemToolOutput(content=result.kernel_output)
         return SystemToolOutput(content=Text(content=result.text))
 
@@ -1550,7 +1268,6 @@ class Agent:
                 seen_live_names=extract_seen_live_names(context.messages),
             )
             ko = await self._stamp_notebook_ref(ko, canonical, normalized, context)
-            self._register_outputs(ko)
             return ko
         return f"Published {normalized} (not executed; pass execute=true to run)."
 
@@ -1616,7 +1333,6 @@ class Agent:
                 seen_live_names=extract_seen_live_names(context.messages),
             )
             ko = await self._stamp_notebook_ref(ko, script.code, path, context)
-            self._register_outputs(ko)
             return ko
         return f"Modified {path} (not executed; pass execute=true to run)."
 

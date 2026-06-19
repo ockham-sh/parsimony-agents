@@ -144,23 +144,23 @@ agent = Agent(
 ```
 
 If you don't pass a `session_id`, the agent assigns one for you; the same
-generated id is then used for the life of that `Agent` instance. The vector and
-keyword stores are only wired up when both a `session_id` and a `file_store` are
-present — see the [Retrieval (RAG)](retrieval-rag.md) guide for how the agent
-searches those indexes, and [SQL and document inputs](sql-and-documents.md) for
-loading files into a session.
+generated id is then used for the life of that `Agent` instance. The workspace
+file store is wired up when both a `session_id` and a `file_store` are present —
+see [SQL and document inputs](sql-and-documents.md) for loading files into a
+session. To search a large output, the agent works in code: a result is a kernel
+variable, so it slices it to page or searches a DataFrame with the core catalog
+(`auto_catalog(df).search(...)`).
 
-> The stores are runtime-only (excluded from serialization). They live in the
-> process keyed by `session_id`, not inside the serialized context — so they
-> survive across `ask()`/`run()` calls within one process, but they are not
+> The file store is runtime-only (excluded from serialization). It lives in the
+> process keyed by `session_id`, not inside the serialized context — so it
+> survives across `ask()`/`run()` calls within one process, but it is not
 > something you persist by pickling a context.
 
-The file/vector/keyword stores above hold session-scoped *retrieval indexes* and live only
-in-process — they are distinct from your returned deliverables. `return_dataset` /
-`return_chart` / `return_report` / `return_notebook` results are written to the on-disk `.ockham/`
-store by the framework itself (no host required) and rediscovered on the next turn, so a follow-up
-turn can reuse a prior turn's deliverable — even across process restarts — by `logical_id`, unlike
-the in-memory stores here.
+The session file store above lives only in-process — it is distinct from your returned
+deliverables. `return_dataset` / `return_chart` / `return_report` / `return_notebook` results are
+written to the on-disk `.ockham/` store by the framework itself (no host required) and rediscovered
+on the next turn, so a follow-up turn can reuse a prior turn's deliverable — even across process
+restarts — by `logical_id`, unlike the in-memory store here.
 
 ## Capturing context from a StateSnapshot
 
@@ -296,6 +296,5 @@ cancellation flow.
 - [Quickstart](../getting-started/quickstart.md) — your first multi-turn example.
 - [Streaming and displaying results](streaming-and-displaying-results.md) — `stream_to_display` and event loops.
 - [Suspend and resume](suspend-resume.md) — continuing a run that asked for input.
-- [Retrieval (RAG)](retrieval-rag.md) — how the per-session vector/keyword stores are searched.
 - [Events](../concepts/events.md) — the full `StateSnapshot` / event reference.
 - [Agent, AgentResult, AgentConfig, AgentGuardrails](../reference/agent.md) — API reference.

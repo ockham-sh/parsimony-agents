@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import traceback
 from functools import cached_property
@@ -34,24 +33,15 @@ _DATAFRAME_HEAD_TAIL_SIZE = 5  # Number of rows in head/tail preview slices (fro
 _DEFAULT_MAX_CELL_LENGTH = 1000  # Fallback max characters per cell in LLM output
 
 
-def _retrieval_cue(handle: str, *, shown: str, total: str) -> str:
-    """One honest line telling the agent how to reach the rest of a partial view.
+def _retrieval_cue(*, shown: str, total: str, how: str) -> str:
+    """One honest line: this view is a bounded window, and how to reach the rest.
 
-    The in-context view of a large output is a bounded window, never the
-    whole. This cue makes that explicit and names the content-addressed
-    ``handle`` both retrieval tools resolve — including after a ``dry_run``
-    cell, where the producing variable no longer exists in the kernel.
+    The in-context view of a large output is a window, never the whole. A coding
+    agent reaches the rest from the value itself — in a notebook cell, where
+    variables persist across turns — by slicing or searching it; ``how`` carries
+    the type-appropriate pattern.
     """
-    return (
-        f"\n[{shown} of {total} shown] Retrieve the rest by handle: "
-        f"output_search(variable_name='{handle}', query=...) to find rows, "
-        f"output_read(variable_name='{handle}', pages=[...]) to page.\n"
-    )
-
-
-def _primitive_handle(value: object) -> str:
-    """Stable content-addressed handle for a primitive output's text."""
-    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+    return f"\n[{shown} of {total} shown] This is a partial view. {how}\n"
 
 
 class BaseOutputObject(MessageContent):
@@ -104,11 +94,6 @@ class DataFrameObject(BaseOutputObject):
     #: sandbox→server wire and is applied on *every* LLM render path, not just
     #: the connector-result one — a hidden column is hidden everywhere.
     columns: list[Column] = Field(default_factory=list)
-
-    @property
-    def handle(self) -> str:
-        """Content-addressed handle the retrieval tools resolve to this output."""
-        return self.ref.content_hash
 
     @cached_property
     def value(self) -> pd.DataFrame:
@@ -198,9 +183,8 @@ class DataFrameObject(BaseOutputObject):
         if max_cell and max_cell > 0 and " ..." in (page_blocks or ""):
             blocks.append({"type": "text", "text": "\nNote: Some cells are truncated.\n"})
 
-        # When the paginated window doesn't cover the whole frame, name the
-        # content-addressed handle the retrieval tools resolve — including after
-        # a dry_run cell, where the producing variable is gone from the kernel.
+        # When the paginated window doesn't cover the whole frame, tell the agent
+        # how to reach the rest from the value itself in a notebook cell.
         total_pages = ((len(vframe) - 1) // rows_per_page + 1) if len(vframe) else 0
         in_range: set[int] = set()
         for raw in view_cfg.display_pages:
@@ -213,9 +197,13 @@ class DataFrameObject(BaseOutputObject):
                 {
                     "type": "text",
                     "text": _retrieval_cue(
-                        self.handle,
                         shown=f"{len(in_range)} pages",
                         total=f"{total_pages} pages ({len(frame)} rows)",
+                        how=(
+                            "Reference the DataFrame in a notebook cell, then slice it "
+                            "(df.iloc[start:stop]) or, for a needle, search it "
+                            "(auto_catalog(df).search('...'))."
+                        ),
                     ),
                 }
             )
@@ -322,16 +310,6 @@ class PrimitiveObject(BaseOutputObject):
     type: Literal["primitive"] = "primitive"
     value: str | int | float | bool | None
 
-    @property
-    def handle(self) -> str:
-        """Content-addressed handle the retrieval tools resolve to this output.
-
-        A plain property (like :attr:`DataFrameObject.handle`): the value is
-        deterministic from ``value`` and re-derived on whichever side reads it,
-        so it is never serialized across the kernel→supervisor wire.
-        """
-        return _primitive_handle(self.value)
-
     def to_llm(self, mode="default", overrides: dict[str, Any] | None = None):
         text = str(self.value)
 
@@ -355,7 +333,7 @@ class PrimitiveObject(BaseOutputObject):
             parts.append(page_blocks)
 
         # Same honest contract as tabular: when the window doesn't cover the
-        # whole string, name the handle the retrieval tools resolve.
+        # whole string, tell the agent how to reach the rest from the value.
         total_pages = len(paginator._page_ranges)
         in_range: set[int] = set()
         for raw in view_cfg.display_pages:
@@ -366,9 +344,12 @@ class PrimitiveObject(BaseOutputObject):
         if len(in_range) < total_pages:
             parts.append(
                 _retrieval_cue(
-                    self.handle,
                     shown=f"{len(in_range)} pages",
                     total=f"{total_pages} pages ({len(text)} chars)",
+                    how=(
+                        "Reference the value in a notebook cell, then slice it (text[start:stop]) "
+                        "or, for a needle, grep it with Python (in, str.find, re)."
+                    ),
                 )
             )
 

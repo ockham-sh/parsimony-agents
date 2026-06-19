@@ -414,8 +414,7 @@ Useful sub-modules: `parsimony_agents.agent.config` (`AgentGuardrails`),
 `parsimony_agents.agent.cancellation` (`CancellationRequest`),
 `parsimony_agents.agent.events` (event types),
 `parsimony_agents.identity` (`ArtifactRef`, identity helpers),
-`parsimony_agents.execution` (`CodeExecutor`, `OutputFactory`, output types),
-`parsimony_agents.rag` (`hybrid_search`, `configure_embeddings`).
+`parsimony_agents.execution` (`CodeExecutor`, `OutputFactory`, output types).
 
 ### Optional capabilities
 
@@ -423,15 +422,11 @@ Useful sub-modules: `parsimony_agents.agent.config` (`AgentGuardrails`),
 # SQL over kernel DataFrames (needs the [sql] extra)
 out = await ex.execute_sql("SELECT * FROM df WHERE a > 1")
 
-# Hybrid keyword + semantic search over agent outputs (vector half needs [rag])
-from parsimony_agents.rag import (
-    configure_embeddings, hybrid_search,
-    get_or_create_session_keyword_store, get_or_create_session_vector_store,
-)
-configure_embeddings(dimension=768)
-kw = get_or_create_session_keyword_store("session-1")
-vec = get_or_create_session_vector_store("session-1")
-hits = await hybrid_search("unemployment rate by year", keyword_store=kw, vector_store=vec, k=5)
+# Search a large output in code — no dedicated tool, it is just a variable.
+# Wrap the rows in an in-memory BM25 catalog and query it.
+from parsimony import auto_catalog
+hits = auto_catalog(df).search("unemployment rate by year", limit=5)
+# structured `column: value` works too: auto_catalog(df).search("country: spain")
 ```
 
 Document readers (`read_pdf_text`, `read_excel`, `read_pptx_text`) lazily import their
