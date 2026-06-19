@@ -18,9 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
   (`_register_outputs` / `_output_handles`), and the never-wired `rag/` hybrid-search duplicate
   (Tantivy keyword store + ChromaDB vector store), along with the `tantivy` dependency and the
   `rag` extra. A coding agent in a stateful kernel reaches a large output as a variable — slice it
-  to page, or search a DataFrame with the core catalog `auto_catalog(df).search(...)` (BM25,
-  needs the `catalog` extra). The governed render and the `DataframeRef` parquet transport are
-  unchanged; the partial-view cue now points at the variable instead of a handle.
+  to page, or search a DataFrame with the core catalog `auto_catalog(df).search(...)` (BM25, in
+  base `parsimony-core`, no extra). The governed render and the `DataframeRef` parquet transport
+  are unchanged; the partial-view cue now points at the variable instead of a handle.
 
 ### Changed
 

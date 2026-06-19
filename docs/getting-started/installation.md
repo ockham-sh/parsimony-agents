@@ -59,8 +59,7 @@ syntax (quote the brackets in most shells):
 
 To search a large output, a result is a kernel variable, so an agent searches a
 DataFrame in code with the core catalog
-(`auto_catalog(df).search(...)`, BM25 — `parsimony-core`'s `catalog` extra,
-which the agent runtime already ships).
+(`auto_catalog(df).search(...)`, BM25 — in base `parsimony-core`, no extra needed).
 
 Examples:
 
