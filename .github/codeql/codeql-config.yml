@@ -1,0 +1,21 @@
+name: "parsimony-agents CodeQL config"
+
+# Inherit the default security-and-quality query suite (set on the action via
+# `queries: security-and-quality`) and prune the rules below.
+#
+# Suppressions:
+# - `py/call/wrong-(named-)argument`: redundant with mypy, and CodeQL's
+#   path-agnostic version false-positives on intentional bad-input tests
+#   (e.g. `pytest.raises(TypeError)` around a deliberately wrong call).
+#   `query-filters` can't scope per-path — it's all-or-nothing per query id.
+
+query-filters:
+  - exclude:
+      id: py/call/wrong-named-argument
+  - exclude:
+      id: py/call/wrong-named-class-argument
+
+paths-ignore:
+  - "**/.venv/**"
+  - "**/dist/**"
+  - "**/build/**"

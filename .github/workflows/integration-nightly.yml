@@ -1,0 +1,64 @@
+name: Integration (nightly)
+
+# Cross-repo integration job. Per-repo `Test` CI only resolves the published
+# version pins, so it can't catch regressions that span the ecosystem. This
+# workflow checks out parsimony-agents alongside its sibling repos and runs
+# the integration suite against the `[tool.uv.sources]` local path overrides,
+# i.e. everything built from source rather than from PyPI.
+#
+# parsimony-agents is the most-downstream framework repo (depends on
+# parsimony-core + connectors), so it's the natural home for this job.
+
+on:
+  schedule:
+    # 03:17 UTC daily — off the top-of-hour rush.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+# Sibling repos are checked out side-by-side so the editable path sources in
+# pyproject's [tool.uv.sources] resolve.
+env:
+  KERNEL_REPO: ockham-sh/parsimony
+  KERNEL_REF: main
+  CONNECTORS_REPO: ockham-sh/parsimony-connectors
+  CONNECTORS_REF: main
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: parsimony-agents
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: parsimony-agents
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KERNEL_REPO }}
+          ref: ${{ env.KERNEL_REF }}
+          path: parsimony
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CONNECTORS_REPO }}
+          ref: ${{ env.CONNECTORS_REF }}
+          path: parsimony-connectors
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Sync workspace
+        run: uv sync --all-extras
+
+      - name: Integration tests
+        # pytest + pytest-asyncio aren't declared deps; install ephemerally
+        # via --with (matches the test.yml convention).
+        run: uv run --with pytest --with pytest-asyncio pytest tests/integration -v

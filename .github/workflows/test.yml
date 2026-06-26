@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# parsimony-core + connectors are pinned to published PyPI versions in
+# pyproject's [project.dependencies]; [tool.uv.sources] overrides them with
+# editable sibling paths for local dev. CI checks the siblings out side-by-side
+# so `uv sync` resolves those paths against the latest trunk. The published-pin
+# path real users get (deps from PyPI) is NOT exercised here — it is gated at
+# release time by the published-resolution smoke in publish.yml. PR CI tracks
+# trunk; the release gate tracks PyPI.
+env:
+  KERNEL_REPO: ockham-sh/parsimony
+  KERNEL_REF: main
+  CONNECTORS_REPO: ockham-sh/parsimony-connectors
+  CONNECTORS_REF: main
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: parsimony-agents
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: parsimony-agents
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KERNEL_REPO }}
+          ref: ${{ env.KERNEL_REF }}
+          path: parsimony
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CONNECTORS_REPO }}
+          ref: ${{ env.CONNECTORS_REF }}
+          path: parsimony-connectors
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - run: uv run ruff check parsimony_agents/ tests/
+      - run: uv run ruff format --check parsimony_agents/ tests/
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    defaults:
+      run:
+        working-directory: parsimony-agents
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: parsimony-agents
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.KERNEL_REPO }}
+          ref: ${{ env.KERNEL_REF }}
+          path: parsimony
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.CONNECTORS_REPO }}
+          ref: ${{ env.CONNECTORS_REF }}
+          path: parsimony-connectors
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv sync --all-extras
+      - name: Set up bubblewrap (so the bwrap boundary test runs, not skips)
+        # Ubuntu 24.04 (ubuntu-latest) restricts unprivileged user namespaces via
+        # AppArmor; relax it so bwrap can create them. The key is absent on 22.04,
+        # hence `|| true`.
+        run: |
+          sudo apt-get update && sudo apt-get install -y bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - name: Verify the bwrap boundary is available (keep the guarantee honest)
+        # If this fails, the live boundary test would silently skip — which is
+        # exactly the regression this step exists to catch.
+        run: uv run python -c "from parsimony_agents.execution.sandbox import detect_bwrap_support; assert detect_bwrap_support(), 'bwrap boundary unavailable in CI'"
+      # Coverage floor tracks the current level (~70%); ratchet toward 80 as
+      # display/pagination/rag coverage improves. See CHANGELOG follow-ups.
+      - run: uv run pytest tests/ -v -m "not integration" --cov=parsimony_agents --cov-report=term-missing --cov-fail-under=68
+
+# Deferred gates (tracked follow-ups, see CHANGELOG):
+#   - mypy:       77 pre-existing type errors to clear before this can block.
+#   - pip-audit:  blocked on the pypdf 5 -> 6 major bump (pypdf 5.9.0 carries
+#                 ~17 CVEs, all fixed only in 6.x). Add `uv run pip-audit
+#                 --ignore-vuln <none-left>` once pypdf is bumped.
