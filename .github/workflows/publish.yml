@@ -26,4 +26,22 @@ jobs:
           python-version: "3.12"
       - run: pip install build
       - run: python -m build
+      - name: Published-resolution smoke (gate on the real dependency graph)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Gate publish on the combination a user actually installs: a venv with
+          # no source tree resolves parsimony-core + the example connectors from
+          # PyPI. The examples extra installs the published connectors so load_all()
+          # exercises connector discovery against the real dependency graph, not
+          # just a bare import. Mirrors the release gate in parsimony-connectors /
+          # parsimony — PR CI tracks trunk, the release gate tracks PyPI. (Also
+          # enforces bottom-up release order: this fails if core/connectors aren't
+          # on PyPI yet.)
+          venv="$RUNNER_TEMP/smoke"
+          python3 -m venv "$venv"
+          "$venv/bin/python" -m pip install --quiet --upgrade pip
+          wheel="$(ls dist/*.whl)"
+          "$venv/bin/python" -m pip install "${wheel}[examples]"
+          "$venv/bin/python" -c "import parsimony_agents; from parsimony.discover import load_all; load_all(); print('published-resolution smoke OK: parsimony-agents')"
       - uses: pypa/gh-action-pypi-publish@v1.13.0
