@@ -1076,7 +1076,7 @@ wheels = [
 
 [[package]]
 name = "parsimony-agents"
-version = "0.1.5"
+version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "altair" },
@@ -1168,7 +1168,7 @@ dev = [
 
 [[package]]
 name = "parsimony-core"
-version = "0.7.3"
+version = "0.0.1"
 source = { editable = "../parsimony" }
 dependencies = [
     { name = "httpx" },
@@ -1210,7 +1210,7 @@ provides-extras = ["catalog", "standard-onnx", "litellm", "all", "dev", "docs"]
 
 [[package]]
 name = "parsimony-fmp"
-version = "0.7.1"
+version = "0.0.1"
 source = { editable = "../parsimony-connectors/packages/fmp" }
 dependencies = [
     { name = "pandas" },
@@ -1233,7 +1233,7 @@ provides-extras = ["dev"]
 
 [[package]]
 name = "parsimony-fred"
-version = "0.7.1"
+version = "0.0.1"
 source = { editable = "../parsimony-connectors/packages/fred" }
 dependencies = [
     { name = "pandas" },
