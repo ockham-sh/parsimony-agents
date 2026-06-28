@@ -41,7 +41,7 @@ dependencies = [
 sql = ["duckdb>=1.4.3,<2"]
 display = ["rich>=14.0.0"]
 documents = [
-    "pypdf>=5.0.0,<6",
+    "pypdf>=5.0.0,<7",
     "openpyxl>=3.1.0,<4",
     "python-pptx>=1.0.0,<2",
 ]
