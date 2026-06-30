@@ -45,3 +45,5 @@ jobs:
           "$venv/bin/python" -m pip install "${wheel}[examples]"
           "$venv/bin/python" -c "import parsimony_agents; from parsimony.discover import load_all; load_all(); print('published-resolution smoke OK: parsimony-agents')"
       - uses: pypa/gh-action-pypi-publish@v1.13.0
+        with:
+          skip-existing: true
