@@ -26,15 +26,15 @@ jobs:
       run:
         working-directory: parsimony-agents
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: parsimony-agents
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: ${{ env.KERNEL_REPO }}
           ref: ${{ env.KERNEL_REF }}
           path: parsimony
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: ${{ env.CONNECTORS_REPO }}
           ref: ${{ env.CONNECTORS_REF }}
@@ -55,15 +55,15 @@ jobs:
       run:
         working-directory: parsimony-agents
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           path: parsimony-agents
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: ${{ env.KERNEL_REPO }}
           ref: ${{ env.KERNEL_REF }}
           path: parsimony
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           repository: ${{ env.CONNECTORS_REPO }}
           ref: ${{ env.CONNECTORS_REF }}
