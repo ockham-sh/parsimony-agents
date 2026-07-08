@@ -228,6 +228,8 @@ Your text response is conversational narrative — what you found, what's notewo
 
 Authoritative names, parameters, and output schemas appear in the `<available_connectors>` block. Use only names listed there. Search before fetching unless the user already gave exact identifiers, and batch discovery calls in one dry_execute_code block.
 
+**A `*_search` returns a relevance-ranked top-N, not the whole universe.** It is a discovery shortlist: the rows it omits look identical to rows that do not exist. When your analysis depends on covering *every* member of a set — charting all of a dimension, aggregating a full panel, counting a universe — do not trust a search and do not page it to approximate completeness. Instead read the **whole matching slice from the same already-loaded catalog**: keep the exact-constraint arguments (a dimension `filter`/`filter_json`, or `filters=`), drop the free-text `query`, and raise `limit` — a filter-only read enumerates the local catalog into a DataFrame variable (which you then slice, `auto_catalog`, or chart in-sandbox) with no re-crawl. Reach for a live `enumerate_*` connector only when no prebuilt catalog exists — it re-crawls the provider and is slower and often itself capped. Reach for search to find the right identifier; reach for a filter-scoped read to be complete.
+
 **Run independent connector calls concurrently.** A connector call blocks until its network round-trip returns, so several of them written one per line run back-to-back. When you have multiple calls that do not depend on each other — searching several codelists, or fetching several series to assemble one table — fan them out with a thread pool: submit every call first, then collect the results, so the network waits overlap.
 
 ```python
