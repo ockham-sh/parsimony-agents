@@ -266,7 +266,6 @@ class AgentResult:
     datasets: dict[str, Dataset] = field(default_factory=dict)
     charts: dict[str, Chart] = field(default_factory=dict)
     reports: dict[str, Report] = field(default_factory=dict)
-    code: dict[str, Script] = field(default_factory=dict)
     context: AgentContext | None = None
     events: list[Any] = field(default_factory=list)
 ```
@@ -277,7 +276,6 @@ class AgentResult:
 | `datasets` | `dict[str, Dataset]` | Returned `Dataset` objects keyed by `logical_id`. |
 | `charts` | `dict[str, Chart]` | Returned `Chart` objects keyed by `logical_id`. |
 | `reports` | `dict[str, Report]` | Returned `Report` objects keyed by `logical_id`. |
-| `code` | `dict[str, Script]` | Declared for returned `Script` objects keyed by notebook path, but **not populated today** — `AgentResult._collect` only fills `text`, `context`, `datasets`, `charts`, and `reports`. This field stays empty. |
 | `context` | `AgentContext \| None` | The final `AgentContext` — pass it back as `ctx=` for multi-turn continuation. |
 | `events` | `list[Any]` | The full event log (every `AgentEvent` yielded during the run). |
 
@@ -318,8 +316,6 @@ if result.context is not None:
 | `session_id` | `str` | required | Session identifier. |
 | `messages` | `list[AgentMessage]` | `[]` | The full conversation transcript. |
 | `files` | `Any \| None` | `None` | Session-scoped `FileStore` (runtime only, not serialized). |
-| `vector_store` | `Any \| None` | `None` | Vector store for retrieval (runtime only, not serialized). |
-| `keyword_store` | `Any \| None` | `None` | Keyword store for retrieval (runtime only, not serialized). |
 | `session_state` | `SessionState \| None` | `None` | Host-filled workspace state, populated before `to_snapshot`. |
 | `notebook_logical_id_resolver` | `Any \| None` | `None` | Host resolver mapping a notebook working-copy path to its current `logical_id`; when `None`, the agent derives `logical_id` from the path directly. |
 | `report_validator` | `Any \| None` | `None` | Optional host-injected report validator (`(body, *, pin_map_keys) -> None`, raising on unsafe content). `persist_artifact` calls it **before** writing a `return_report`/refresh snapshot, so unsafe report bytes never reach the workspace tree and the agent self-corrects. Standalone leaves this `None` (the author reads their own output); a workspace host injects its validator. Runtime only, not serialized. |

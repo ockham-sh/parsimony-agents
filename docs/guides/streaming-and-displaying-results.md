@@ -157,9 +157,8 @@ if __name__ == "__main__":
 internally. It concatenates `TextDelta.content` into `result.text`, extracts
 `Dataset`, `Chart`, and `Report` objects from completed `ToolEvent`s into
 `result.datasets`, `result.charts`, and `result.reports` (each keyed by logical
-id), and updates `result.context` from each `StateSnapshot`. (`result.code` is
-declared on `AgentResult` but is not populated by `_collect` today.) After the
-loop, `result.ok` is `True` only if the run produced no `error`, `handoff`, or
+id), and updates `result.context` from each `StateSnapshot`. After the loop,
+`result.ok` is `True` only if the run produced no `error`, `handoff`, or
 `partial_run_summary` events — handoff and partial-run-summary are
 non-interactive terminal failures (the agent gave up or ran out of budget) and
 carry no `error` event, so `ok` checks for them explicitly. `result.events`

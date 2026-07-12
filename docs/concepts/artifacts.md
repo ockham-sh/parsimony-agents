@@ -333,14 +333,14 @@ published value.
 Because it's part of the recipe, it cannot be edited after the fact without
 changing the artifact's identity — replay semantics depend on it staying fixed.
 
-Refreshing an artifact re-runs its lineage and **appends a new snapshot** under
-the same `logical_id`:
+Refreshing an artifact re-runs its lineage and appends a new snapshot under the
+same `logical_id` only when the serialized bytes change:
 
 ```python
 from parsimony_agents.refresh import refresh_artifact
 
 new_ref = await refresh_artifact(dataset_ref, executor=executor)
-# new_ref shares dataset_ref.logical_id but carries a fresh content_sha
+# logical_id stays stable; content_sha changes only when snapshot bytes change
 ```
 
 The mechanics by kind:
@@ -350,6 +350,9 @@ The mechanics by kind:
   from the kernel, persist a new snapshot.
 - **chart** → recurse into source datasets, re-run the chart's notebook,
   re-extract, persist.
+- **report** → refresh every pinned dataset and chart, rewrite the embedded
+  references, validate through the optional host `report_validator`, and
+  persist.
 - **notebook** → *not* refreshable this way; notebooks are working copies
   (re-publish via `return_notebook(execute=True)`).
 - **data_object** → refreshes implicitly through the connector layer when its
@@ -359,6 +362,30 @@ Refresh is idempotent: if nothing upstream changed, re-extraction produces
 identical bytes and therefore the same `content_sha`. Artifacts published without
 a `variable_name` (older snapshots) can't be refreshed — `refresh_artifact`
 raises.
+
+## Reviewing what changed
+
+`refresh_artifact` tells you whether an artifact has a new snapshot.
+`diff_artifacts` explains why by comparing the complete dependency closures of
+two snapshots of the same artifact:
+
+```python
+from parsimony_agents.lineage_diff import diff_artifacts
+
+change = await diff_artifacts(before_ref, after_ref, executor=executor)
+print(change.summary())
+```
+
+Both references must have the same `kind` and `logical_id`. The returned
+`ArtifactDiff` separates upstream nodes into:
+
+- `changed` — the same dependency has a different `content_sha`;
+- `added` — a dependency appears only in the newer closure;
+- `removed` — a dependency appears only in the older closure.
+
+`content_changed` reports whether the root snapshot itself changed, and
+`is_empty` is true when neither the root nor its lineage moved. The comparison
+is read-only and uses the same executor storage seam as closure enumeration.
 
 ## Embedded self-describing metadata
 

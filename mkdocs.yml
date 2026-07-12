@@ -26,10 +26,12 @@ nav:
       - Suspend and resume: guides/suspend-resume.md
       - Embedding in a host: guides/embedding-in-a-host.md
   - Reference:
+      - Public API: reference/public-api.md
       - Agent: reference/agent.md
       - Agent tools: reference/agent-tools.md
       - Execution: reference/execution.md
       - Events: reference/events.md
       - Artifacts: reference/artifacts.md
       - I/O: reference/io.md
+      - Environment variables: reference/environment.md
   - Architecture: architecture.md

@@ -9,25 +9,28 @@ We use [uv](https://docs.astral.sh/uv/) for dependency management:
 ```bash
 git clone https://github.com/<your-username>/parsimony-agents.git
 cd parsimony-agents
-uv venv && source .venv/bin/activate
-uv pip install -e ".[all]"
-uv pip install pytest pytest-asyncio ruff mypy
+uv sync --all-extras
 ```
+
+`uv sync` installs the project and its development group. `--all-extras` also
+installs the optional SQL, display, document, and example dependencies.
 
 ## Running Checks
 
 ```bash
-# Tests
-pytest tests/ -v
+uv run pytest tests/ -v
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy parsimony_agents/
+```
 
-# Linting
-ruff check .
+The development group is declared in `pyproject.toml` and includes `pytest`,
+`pytest-asyncio`, `pytest-cov`, `ruff`, `mypy`, and `pip-audit`. Dependency
+auditing is currently advisory while the remaining transitive findings are
+resolved:
 
-# Formatting
-ruff format --check .
-
-# Type checking
-mypy parsimony_agents/
+```bash
+uv run pip-audit
 ```
 
 ## Making Changes

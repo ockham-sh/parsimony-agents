@@ -212,7 +212,6 @@ class AgentResult:
     datasets: dict[str, Dataset] = ...       # keyed by logical_id
     charts: dict[str, Chart] = ...           # keyed by logical_id
     reports: dict[str, Report] = ...         # keyed by logical_id
-    code: dict[str, Script] = ...            # keyed by notebook path
     context: AgentContext | None = None      # final context, for multi-turn
     events: list[Any] = ...                   # full event log
 ```

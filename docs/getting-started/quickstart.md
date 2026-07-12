@@ -34,11 +34,20 @@ agent = Agent(
 )
 ```
 
-You cannot pass both `model=` and `model_config=` — the constructor treats `model_config` as the explicit override and only builds one from `model`/`api_key` when `model_config` is absent.
+When `model_config=` is supplied it takes precedence; any simultaneous `model=`
+or `api_key=` convenience values are ignored.
 
 ## Bind a connector for data
 
-On its own the agent can reason and run code, but it has no way to reach external data sources. **Connectors** are the bridge. A connector package exports a `CONNECTORS` object — a [`Connectors`](../concepts/connectors.md) collection — and you bind any required secrets onto it before passing it to the agent's constructor. Behind the scenes, under the sandbox the agent's code only ever sees a name-routed `RemoteConnector` stub for each connector — the credentialed connector stays in the trusted supervisor. Under the out-of-process sandbox (bubblewrap on Linux) the agent's code runs in a separate, no-network kernel and bound credentials never enter it; in the in-process fallback there is no process boundary. See [Code execution](../concepts/code-execution.md) for the boundary tiers.
+On its own the agent can reason and run code, but it has no way to reach
+external data sources. **Connectors** are the bridge. A connector package
+exports a `CONNECTORS` object — a
+[`Connectors`](../concepts/connectors.md) collection — and you bind any required
+secrets before passing it to the agent. The standalone `Agent` used here runs
+in-process. A host can inject the optional subprocess executor; under its
+bubblewrap boundary, agent code sees only name-routed `RemoteConnector` stubs
+while credentials remain in the trusted supervisor. See [Code
+execution](../concepts/code-execution.md) before running untrusted code.
 
 The FRED connector (Federal Reserve Economic Data) is a good first connector because the API key is free. Get one at <https://fred.stlouisfed.org/docs/api/api_key.html>.
 
@@ -113,14 +122,11 @@ if __name__ == "__main__":
 | `datasets` | `dict[str, Dataset]` | Returned `Dataset` objects keyed by `logical_id`. |
 | `charts` | `dict[str, Chart]` | Returned `Chart` objects keyed by `logical_id`. |
 | `reports` | `dict[str, Report]` | Returned `Report` objects keyed by `logical_id` (via `return_report`). |
-| `code` | `dict[str, Script]` | Reserved for `Script` artifacts, but **currently always empty** — see note below. |
 | `context` | `AgentContext \| None` | Final conversation context — pass back as `ctx=` to continue. |
 | `events` | `list[Any]` | The full event log yielded during the run. |
 | `ok` | `bool` (property) | `True` when the run produced no error, handoff, or partial_run_summary event. |
 
 `ok` is a computed property: it is `True` only if the run produced none of `error`, `handoff`, or `partial_run_summary` events — so it is `False` on an error, a handoff (the agent gave up), or a partial/incomplete run (e.g. budget exhausted), even though handoff and partial-run summaries carry no separate error event. `assert result.ok` is a quick check that the run completed cleanly.
-
-> **`code` is not yet wired.** The `code` field is declared on `AgentResult`, but the collection step that builds the result (`AgentResult._collect`, shared by both `ask()` and `stream_to_display`) only ever populates `text`, `context`, `datasets`, and `charts`. Nothing assigns to `code`, so after a run `result.code` is **always an empty dict**. Treat it as reserved/not-yet-implemented — do not rely on it to recover the notebook source the agent ran.
 
 ## Stream events instead of waiting (preview of `run()`)
 
@@ -169,19 +175,25 @@ result = await stream_to_display(
 )
 ```
 
-`stream_to_display` requires the `display` extra (`pip install parsimony-agents[display]`); without `rich` installed it falls back to plain text. See [Streaming and displaying results](../guides/streaming-and-displaying-results.md) and the full [Events](../concepts/events.md) catalogue.
+Rich rendering requires the `display` extra
+(`pip install "parsimony-agents[display]"`); without `rich`,
+`stream_to_display` falls back to plain text. See [Streaming and displaying
+results](../guides/streaming-and-displaying-results.md) and the full
+[Events](../concepts/events.md) catalogue.
 
 ## Where the results live (datasets, charts, reports)
 
 When the agent fetches data and analyzes it, it does not just describe the answer in prose — it publishes typed **artifacts**, which is what populates `AgentResult`:
 
-- **Datasets** (`result.datasets`) — each value is a `Dataset` artifact wrapping a tabular result, keyed by its content-derived `logical_id`. Returned via the agent's `return_dataset` tool.
+- **Datasets** (`result.datasets`) — each value is a `Dataset` artifact wrapping a tabular result, keyed by its recipe-derived `logical_id`. Returned via the agent's `return_dataset` tool.
 - **Charts** (`result.charts`) — each value is a `Chart` artifact (a Vega-Lite spec), keyed by `logical_id`. Returned via `return_chart`.
 - **Reports** (`result.reports`) — each value is a `Report` artifact (a Quarto `.qmd` body), keyed by `logical_id`. Returned via `return_report`.
 
-These are the deliverable artifact types `AgentResult` surfaces today. (`result.code` is declared for `Script` artifacts but is not yet populated — see the note under [`AgentResult` fields](#agentresult-fields).)
-
-`Dataset`, `Chart`, and `Report` are all importable from the top-level package (`from parsimony_agents import Dataset, Chart, Report`). Because the keys are content-addressed `logical_id`s, the same content always lands under the same key, which is what makes lineage and re-use automatic. The deeper model — logical identity versus content hash — is covered in [Artifacts, identity & lineage](../concepts/artifacts.md).
+`Dataset`, `Chart`, and `Report` are all importable from the top-level package
+(`from parsimony_agents import Dataset, Chart, Report`). `logical_id` identifies
+the artifact recipe across refreshes; `content_sha` identifies the serialized
+bytes of one snapshot. The deeper dual-identity model is covered in [Artifacts,
+identity & lineage](../concepts/artifacts.md).
 
 Results also live durably on disk, not just in memory. As each deliverable is returned, the framework persists it (and the notebook that produced it) to a content-addressed `.ockham/<kind>s/<logical_id>/` tree — `curation.json`, an append-only `log.jsonl`, and an immutable `<content_sha>.<ext>` snapshot — written through the code executor's storage seam. This happens standalone, with no host: a plain `agent.ask()` produces reusable, refreshable artifacts on disk, which is what lets a follow-up turn discover and re-use them.
 

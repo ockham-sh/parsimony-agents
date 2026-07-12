@@ -33,12 +33,18 @@ This policy covers the open-source packages:
 - `parsimony-agents`
 - `parsimony-connectors` (parsimony-*)
 
-For vulnerabilities in the ockham terminal (coming soon) (the AGPLv3 agentic data-analysis product built on this library), please also email security@ockham.sh.
+For vulnerabilities in the Ockham terminal, the AGPLv3 agentic data-analysis
+product built on this library, please also email security@ockham.sh.
 
 ## Code execution and credential isolation
 
-Agent-authored code is untrusted. The security model rests on two boundaries, not
-on inspecting the code:
+Agent-authored code is untrusted. A standalone `Agent` uses the in-process
+`CodeExecutor` by default and therefore provides no isolation boundary. Hosts
+that execute untrusted code must supply a confined executor, for example the
+result of `create_executor(cwd=...)` on a Linux host with bubblewrap support.
+
+Under the confined executor, the security model rests on two boundaries, not on
+inspecting the code:
 
 - **The kernel holds no credentials.** A connector is exposed to agent code as a
   `RemoteConnector` — a name-routed stub carrying only the connector's name and
@@ -46,17 +52,17 @@ on inspecting the code:
   metadata. The bound, credentialed connector lives in a trusted supervisor
   process; the kernel invokes it only by RPC to a broker there, which means a
   bound connector is the sole egress path.
-- **The kernel is confined.** `parsimony_agents.execution.sandbox` runs the kernel
-  out-of-process. On Linux with unprivileged user namespaces, the kernel is
-  spawned under `bwrap` (`confine=True`), which removes network access, clears the
-  environment, and confines the filesystem to the workspace
-  (`capability_tier == "namespaces"`). Where no boundary is
-  available (non-Linux self-host), execution falls back in-process
-  (`capability_tier == "none"`) and says so loudly.
+- **The kernel is confined.** On Linux with unprivileged user namespaces,
+  `create_executor` spawns the kernel under `bwrap` (`confine=True`), which
+  removes network access, clears the environment, and confines the filesystem
+  to the workspace (`capability_tier == "namespaces"`). If no boundary is
+  available, the factory falls back in-process (`capability_tier == "none"`) and
+  logs a warning. `SandboxedCodeExecutor(confine=False)` reports
+  `capability_tier == "process"` but provides process separation only, not
+  confinement.
 
 The compile-time guard (`sanitize.assert_safe_code`) and any host-side env
 scrubbing are **best-effort defense-in-depth for the in-process fallback only**;
 they are trivially bypassable and must never be treated as containment. The
-boundary is the out-of-process kernel. Hosts that run untrusted code should verify
-`capability_tier` (surfaced on the executor's health endpoint) rather than assume
-a boundary is present.
+boundary is the bubblewrap-confined kernel. Hosts that run untrusted code should
+verify `capability_tier` rather than assume a boundary is present.

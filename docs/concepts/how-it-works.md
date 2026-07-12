@@ -184,8 +184,9 @@ that carries state across them is `AgentContext` (from
 - **`session_id`** — the stable identifier for the conversation.
 - **`messages`** — the full transcript (`list[AgentMessage]`), accumulated turn
   over turn.
-- **runtime stores** — `files` (a `FileStore`), `vector_store`, and
-  `keyword_store`, the session-scoped services the tools read and write.
+- **runtime services** — an optional `files` store plus host-injected workspace
+  state, artifact resolvers, and validation hooks. These are not serialized as
+  part of the conversation.
 
 To continue a conversation, pass the *same* context back in. `AgentResult.context`
 hands you the final context from a completed run, ready to feed into the next
@@ -203,7 +204,7 @@ async def main() -> None:
     first = await agent.ask("Fetch Q1 sales")
     print(first.text)
 
-    # Reuse the same context — messages and stores carry forward
+    # Reuse the same context — the transcript carries forward
     second = await agent.ask("Now compare to Q2", ctx=first.context)
     print(second.text)
 
@@ -353,7 +354,7 @@ if __name__ == "__main__":
 ```
 
 Each `stream_to_display` call runs the loop to termination; passing
-`ctx=result.context` carries the transcript and stores into the next turn.
+`ctx=result.context` carries the transcript into the next turn.
 
 ## Where to go next
 
