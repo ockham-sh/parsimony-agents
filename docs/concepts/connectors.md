@@ -6,7 +6,11 @@ This page explains what a connector bundle is, how you bind credentials onto one
 
 ## What a connector bundle is
 
-A connector bundle is a `Connectors` object: an immutable, composable collection of individual `Connector` instances. Each `Connector` wraps one async data-fetching function plus its metadata — name, description, the parameter signature the agent sees, output schema, tags, and the names of any secrets it needs (e.g. `api_key`).
+A connector bundle is a `Connectors` object: an immutable, composable collection
+of individual `Connector` instances. Each `Connector` wraps a data-fetching
+function plus its metadata — name, description, the parameter signature the
+agent sees, output schema, tags, and the names of any secrets it needs (for
+example, `api_key`).
 
 Connector packages export their bundle as a module-level `CONNECTORS`. For example, `parsimony_fred` ships two connectors (`fred_search`, `fred_fetch`) bundled together:
 
@@ -17,7 +21,10 @@ from parsimony_fred import CONNECTORS as FRED
 
 You never construct connectors by hand for normal use. You import a package's `CONNECTORS`, bind your credentials, and hand the result to the agent.
 
-Connector packages are installed separately from `parsimony-agents`. See [Installation](../getting-started/installation.md) for the `examples` extra that pulls in `parsimony-fred`, `parsimony-sdmx`, and `parsimony-fmp`.
+Connector packages are installed separately from `parsimony-agents`. See
+[Installation](../getting-started/installation.md) for the `examples` extra,
+which includes `parsimony-fred` and `parsimony-fmp`; install
+`parsimony-sdmx` separately when needed.
 
 ## Binding: `CONNECTORS.bind(api_key=...)`
 
@@ -115,7 +122,14 @@ Connectors are passed at construction time, but they are **not** embedded in the
 
 Placing the catalog in the cached prefix matters for cost: the catalog is static, so it is billed once per session rather than re-sent on every turn. If you rebind connectors between turns, the catalog is re-injected to refresh its content while keeping the cached prefix stable.
 
-The practical consequence: the agent doesn't call connectors directly from the prompt. It writes Python in the execution kernel, and that code calls connectors by name. Behind the scenes, under the sandbox boundary the kernel holds a `RemoteConnector` for each — a name-routed stub with no metadata and no credentials. When kernel code awaits a connector call, the stub RPCs the broker in the supervisor, which holds the bound connector and runs the fetch, keeping credentials outside the kernel process. See [Code execution](code-execution.md) for how agent-written code runs.
+The practical consequence: the agent doesn't call connectors directly from the
+prompt. It writes Python in the execution kernel, and that code calls connectors
+by name. With the confined subprocess executor, the kernel holds a
+`RemoteConnector` for each connector — a name-routed stub with no metadata or
+credentials. Calling the stub RPCs the broker in the supervisor, which holds the
+bound connector and runs the fetch. The default in-process executor instead
+holds the real bound connectors. See [Code execution](code-execution.md) for the
+execution modes.
 
 ## In-kernel calls and memoization (`memoizing_bundle`, `ConnectorCache`)
 

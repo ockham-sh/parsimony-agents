@@ -17,14 +17,17 @@ python --version
 # Python 3.11.x  or  3.12.x
 ```
 
-A core dependency, `parsimony-core` (pinned `>=0.7,<0.8`), is installed
-automatically — it provides the connector model (`parsimony.connector`) and plugin
-discovery (`parsimony.discover`) used throughout the framework.
+The `parsimony-core` dependency is installed automatically. It provides the
+connector model (`parsimony.connector`) and plugin discovery
+(`parsimony.discover`) used throughout the framework. The package metadata is
+the source of truth for the supported version range.
 
 ## pip install parsimony-agents
 
-The base install gives you the full agent loop, code execution (with optional
-out-of-process sandboxing when deployed), charts (Altair / Vega-Lite), and the streaming event API:
+The base install gives you the full agent loop, in-process code execution,
+charts (Altair / Vega-Lite), and the streaming event API. Hosts can opt into
+bubblewrap confinement by injecting the executor returned by
+`create_executor`:
 
 ```bash
 pip install parsimony-agents
@@ -33,12 +36,15 @@ pip install parsimony-agents
 This pulls in the runtime dependencies declared in `pyproject.toml` — `pandas`,
 `numpy`, `altair`, `litellm` (the LLM gateway), and `parsimony-core`, among others.
 
-The public API is imported from the top-level `parsimony_agents` package:
+The main public API is imported from the top-level `parsimony_agents` package:
 
 ```python
 from parsimony_agents import Agent, AgentResult, stream_to_display
-from parsimony_agents import Dataset, Chart, Script
+from parsimony_agents import Dataset, Chart, Report, Script
 ```
+
+See the [public API reference](../reference/public-api.md) for the complete
+top-level import surface.
 
 > You also need an LLM provider key (for example `ANTHROPIC_API_KEY`) for the
 > `Agent` to call a model. That is environment configuration, not an install step —
@@ -102,7 +108,7 @@ async def main() -> None:
         connectors=FRED.bind(api_key=fred_key),
     )
 
-    # Ask a question — full display with spinner, datasets, code
+    # Ask a question — full display with progress and returned artifacts
     result = await stream_to_display(
         agent,
         "What is the current US unemployment rate? Fetch the data and show me.",
@@ -188,8 +194,8 @@ connectors = discover.load("fred", "fmp")
 
 > **Tip:** the framework's `[examples]` extra
 > (`pip install "parsimony-agents[examples]"`) bundles `parsimony-fred`,
-> `parsimony-sdmx`, `parsimony-fmp`, and `python-dotenv` together so the runnable
-> `examples/` scripts work out of the box.
+> `parsimony-fmp`, and `python-dotenv`. Install `parsimony-sdmx` separately for
+> examples or experiments that use SDMX.
 
 For the full connector model — binding, composition, and discovery — see
 [Connectors](../concepts/connectors.md).
@@ -234,6 +240,28 @@ for p in discover.iter_providers():
 
 If `iter_providers()` prints `fred`, `sdmx`, and/or `fmp`, those connector packages
 are installed and ready to bind.
+
+## Running the source examples
+
+The runnable examples live in the repository rather than the published wheel.
+Clone the source and install the example dependencies before invoking them:
+
+```bash
+git clone https://github.com/ockham-sh/parsimony-agents
+cd parsimony-agents
+uv sync --extra examples --extra display
+export FRED_API_KEY="..."
+export GEMINI_API_KEY="..."
+
+uv run python -m examples.quickstart
+uv run python -m examples.event_stream
+uv run python -m examples.terminal_chat
+```
+
+Additional examples cover SNB and SEC EDGAR data. Their module docstrings list
+the connector packages and credentials they require. Because `examples/` is not
+included in the built wheel, `python -m examples.*` works from a source checkout,
+not after a plain `pip install`.
 
 ## Next steps
 

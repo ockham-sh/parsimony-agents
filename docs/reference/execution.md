@@ -48,6 +48,35 @@ output factory about a new type, or inspecting lineage. For the conceptual
 picture, see [Code execution](../concepts/code-execution.md) and
 [Artifacts, identity & lineage](../concepts/artifacts.md).
 
+## Executor selection
+
+`Agent()` constructs the in-process `CodeExecutor` when `code_executor` is not
+provided. For host deployments, `create_executor` selects the strongest local
+boundary available:
+
+```python
+from parsimony_agents import Agent, create_executor
+
+executor = create_executor(
+    cwd="/srv/workspaces/session-1",
+    prefer_boundary=True,
+    scratch_root="/srv/cache",
+)
+agent = Agent(model="claude-sonnet-4-6", code_executor=executor)
+```
+
+With bubblewrap support, the factory returns
+`SandboxedCodeExecutor(confine=True)` and `capability_tier == "namespaces"`.
+Otherwise it logs a warning and returns `CodeExecutor` with
+`capability_tier == "none"`. `selected_capability_tier()` reports which of those
+two outcomes the factory would choose without starting a kernel.
+
+`SandboxedCodeExecutor(cwd=..., confine=False)` is also available as a plain
+subprocess substrate and reports `capability_tier == "process"`. It provides a
+process boundary but no network, environment, or filesystem confinement.
+
+`prefer_boundary`, not an environment variable, controls factory selection.
+
 ## BaseCodeExecutor and CodeExecutor (methods)
 
 `BaseCodeExecutor` is the abstract protocol for code execution. The default
@@ -233,12 +262,13 @@ await executor.set_connectors(FRED.bind(api_key="..."))
 await executor.set_connectors({"fred": FRED.bind(api_key="...")})
 ```
 
-Accepts a `Connectors` bundle or a `Mapping[str, Connectors]`. The credentialed
-connectors are held supervisor-side in the broker; only the connector **names**
-are shipped to the kernel, which builds a name-routed `RemoteConnector` stub for
-each (no metadata, no credential). Each stub is wrapped in a memoizing layer that
-shares a per-kernel cache and runs the post-fetch hooks (data-object persister,
-fetch logger) so lineage stays truthful across cached and uncached calls. See
+Accepts a `Connectors` bundle or a `Mapping[str, Connectors]`. Under the
+subprocess executor, credentialed connectors remain supervisor-side in the
+broker; only connector **names** enter the kernel, which builds name-routed
+`RemoteConnector` stubs. The in-process executor injects the real bound
+connectors. Both modes wrap calls in a memoizing layer with a per-kernel cache
+and run the post-fetch hooks (data-object persister, fetch logger) so lineage
+stays truthful across cached and uncached calls. See
 [Connectors](../concepts/connectors.md) for the connector model and
 [Memoization](#memoization-connectorcache-memoizingconnector) below.
 
@@ -575,8 +605,9 @@ lineage model.
 
 Connector calls are memoized within one kernel lifetime so an agent re-running
 the same fetch doesn't hit the network twice. `set_connectors` wires this up
-automatically. The kernel receives a `Mapping[str, RemoteConnector]` wrapped in a
-memoizing layer; the pieces below are the moving parts.
+automatically. The subprocess kernel receives a
+`Mapping[str, RemoteConnector]`; the in-process executor receives real bound
+connectors. Both are wrapped in the same memoizing layer.
 
 ### ConnectorCache
 
@@ -601,18 +632,19 @@ the wrapped `inner` is a real `Connector` in-process, or a `RemoteConnector` stu
 in the out-of-process kernel.
 
 ```python
-result = await executor.execute('data = fred["gdpc1"](series_id="GDPC1")')
+result = await executor.execute('data = fred["fred_fetch"](series_id="GDPC1")')
 # result.fetch_log has one FetchLogEntry with a persisted data_object_ref
 ```
 
 ### RemoteConnector — the kernel-side stub
 
-The kernel never receives a bound `Connector` (which would carry the credential
-in its `bound_arguments`). It receives only the connector **name** and builds a
-`RemoteConnector` — a stub holding the name plus the supervisor socket, with no
-metadata and no credential. Calling it RPCs the `ConnectorBroker` in the
-supervisor, which runs the real connector. Connector metadata (the cards the
-model reads) is rendered host-side into the prompt, never shipped into the kernel.
+Under the subprocess executor, the kernel never receives a bound `Connector`
+(which would carry the credential in its `bound_arguments`). It receives only
+the connector **name** and builds a `RemoteConnector` — a stub holding the name
+plus the supervisor socket, with no metadata or credential. Calling it RPCs the
+`ConnectorBroker` in the supervisor, which runs the real connector. Connector
+metadata is rendered host-side into the prompt, never shipped into that kernel.
+The in-process executor injects the real memoized connector instead.
 
 ## Pagination (StringPaginator, TablePaginator) and StructuredStreamCapturer
 

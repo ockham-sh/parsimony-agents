@@ -1,29 +1,37 @@
 # Code execution
 
-When an agent answers a data question, it does not hand you a paragraph — it
-writes Python, runs it, and shows you the result. This page explains the engine
-that runs that code: an isolated kernel that runs in a separate process (under
-bwrap network/IPC/pid isolation on Linux, or in-process as a fallback on
-non-Linux self-host), injects analysis libraries and connector proxies,
-captures every result as a *typed* output, enforces per-cell timeouts, and
-records who produced each variable so artifacts stay traceable. Credentials are
-never sent to the kernel—they are held in a trusted supervisor process and
-accessed only via RPC.
+When an agent answers a data question, it writes Python, runs it in a stateful
+namespace, and observes typed outputs. The execution engine also enforces
+per-cell timeouts and records which inputs produced each variable so published
+artifacts remain traceable.
 
-If you only embed the [`Agent`](../reference/agent.md), you rarely touch the
-executor directly — it is created and driven for you. But understanding it tells
-you exactly what the agent's code can and cannot do, what comes back from each
-cell, and how to extend the kernel (custom output types, remote sandboxes,
-storage backends) when you host Parsimony Agents in your own application.
+Execution has three distinct modes:
 
-The executor lives in `parsimony_agents.execution`. The abstract contract every
-executor satisfies is `BaseCodeExecutor`. On Linux with bubblewrap support,
-`SandboxedCodeExecutor` runs the kernel in a separate process under bwrap
-network/pid/ipc/uts/user isolation (the "namespaces" capability tier). On
-non-Linux self-host or when bwrap is unavailable, execution falls back to
-in-process (the "none" capability tier, with a loud warning). The capability
-tier is the trust signal behind credential isolation and is exposed on the
-executor service /health endpoint.
+- A standalone [`Agent`](../reference/agent.md) uses the in-process
+  `CodeExecutor` unless you pass `code_executor=`. This is convenient for local
+  scripts, but it is **not an isolation boundary**.
+- `create_executor(cwd=...)` selects a bubblewrap-confined subprocess on
+  supported Linux hosts. The kernel has no network or credentials and reaches
+  bound connectors through an RPC broker in the trusted supervisor. If
+  bubblewrap is unavailable, the factory logs a warning and returns the
+  in-process executor.
+- `SandboxedCodeExecutor(cwd=..., confine=False)` runs a plain child process.
+  It separates processes but does not deny network access, clear the
+  environment, or confine the filesystem. It is a development substrate, not a
+  security boundary.
+
+Every implementation satisfies `BaseCodeExecutor`. Inspect
+`executor.capability_tier` — `"namespaces"`, `"process"`, or `"none"` — rather
+than assuming code is confined.
+
+To ask `Agent` to select the strongest available local boundary:
+
+```python
+from parsimony_agents import Agent, create_executor
+
+executor = create_executor(cwd="/tmp/my_workspace")
+agent = Agent(model="claude-sonnet-4-6", code_executor=executor)
+```
 
 ```python
 from pathlib import Path
@@ -85,7 +93,7 @@ the common analysis stack:
 | `datetime`, `timedelta`, `timezone` | the corresponding classes from the `datetime` module |
 | `load_dataset` | the dataset-loading primitive (see below) |
 | `read_pdf_text`, `read_excel`, `read_pptx_text` | document readers (see below) |
-| each connector (e.g. `fred`) | bound via `set_connectors` as a name-routed `RemoteConnector` stub; the real connector (with credentials) stays in the broker |
+| each connector (e.g. `fred`) | a name-routed `RemoteConnector` stub under the subprocess executor; a memoized bound connector under the in-process executor |
 
 Connectors are bound in the supervisor and exposed to the kernel via `set_connectors`,
 which accepts a `Connectors` bundle or `Mapping[str, Connectors]` for named bindings:
@@ -97,17 +105,17 @@ await executor.set_connectors(FRED.bind(api_key="..."))
 # or, for an explicit binding name:
 await executor.set_connectors({"fred": FRED.bind(api_key="...")})
 
-result = await executor.execute('gdp = fred["GDPC1"](series_id="GDPC1")')
+result = await executor.execute('gdp = fred["fred_fetch"](series_id="GDPC1")')
 ```
 
-Under the hood, `set_connectors` ships only the connector **names** to the
-kernel. The kernel builds a `RemoteConnector` for each — a name-routed stub with
-no metadata, no credentials, no bound arguments, and no function body. Calling a
-stub RPCs the `ConnectorBroker` in the supervisor (over the kernel's one socket),
-which holds the bound connectors and runs the real fetch. In-process (no
-boundary), the agent instead gets the real connectors wrapped in the same
-memoizing layer. Memoization is transparent: identical calls are served from a
-per-kernel cache on every call (cached or not), so the fetch log stays truthful.
+The confined subprocess ships only connector **names** to the kernel. The
+kernel builds a `RemoteConnector` for each — a name-routed stub with no
+metadata, credentials, bound arguments, or function body. Calling a stub RPCs
+the `ConnectorBroker` in the supervisor, which holds the bound connectors and
+runs the real fetch. The in-process executor instead injects the real connectors
+wrapped in the same memoizing layer. Identical calls are served from a
+per-kernel cache, while post-fetch hooks still run on every call so the fetch
+log stays truthful.
 The cache is a kernel-lifetime concern — `set_cwd()` and `clear_namespace()`
 clear it. See [Connectors](connectors.md) for the connector model itself.
 
@@ -197,7 +205,7 @@ list. It bundles two things:
   during the run.
 
 ```python
-result = await executor.execute('gdp = fred["GDPC1"](series_id="GDPC1")\ngdp')
+result = await executor.execute('gdp = fred["fred_fetch"](series_id="GDPC1")\ngdp')
 
 for output in result.outputs:
     ...  # DataFrameObject / FigureObject / PrimitiveObject / ExceptionObject
@@ -261,9 +269,9 @@ There is one escape hatch for local debugging: set the environment variable
 becomes a no-op. Leave it unset in any deployment that runs untrusted
 agent-authored code.
 
-To force in-process execution on Linux (overriding the bwrap default), set
-`OCKHAM_SANDBOX_BOUNDARY=none` (mainly for debugging). The default is
-`OCKHAM_SANDBOX_BOUNDARY=auto`, which picks the strongest available boundary.
+`create_executor(prefer_boundary=True)` is the selection API. Pass
+`prefer_boundary=False` to request the in-process executor explicitly. There is
+no environment-variable switch for execution mode.
 
 ## Timeouts and the daemon-thread execution model
 

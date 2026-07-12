@@ -21,6 +21,31 @@ pip install "parsimony-agents[documents,sql]"
 pip install "parsimony-agents[all]"          # sql + display + documents
 ```
 
+## SQL over kernel DataFrames
+
+`CodeExecutor.execute_sql` registers every pandas DataFrame and Series in the
+current namespace with an in-memory DuckDB connection, then returns the query
+result as a typed `KernelOutput`:
+
+```python
+out = await executor.execute_sql(
+    "SELECT country, AVG(value) AS average "
+    "FROM observations GROUP BY country"
+)
+```
+
+The method imports DuckDB only when called. Without the `[sql]` extra it does
+not raise at the call site; it returns a `KernelOutput` containing an
+`ExceptionObject` that wraps:
+
+```
+duckdb is not installed; install parsimony-agents with the [sql] extra.
+```
+
+Query errors follow the same typed-output path. This low-level method is useful
+when a host drives the executor directly. Agent-authored code can also use
+ordinary Python and DuckDB inside the kernel.
+
 ## The documents extra: `read_pdf_text`, `read_excel`, `read_pptx_text`
 
 The three helpers live in `parsimony_agents.execution.documents`. Their exact signatures:

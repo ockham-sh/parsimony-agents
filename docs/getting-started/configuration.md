@@ -17,14 +17,16 @@ end-to-end example.
 
 ## Convenience vs expert construction
 
-The constructor exposes two front doors. You pick **one**:
+The constructor exposes two front doors:
 
 - **Convenience** — pass `model=` (a litellm model string) plus the optional `api_key=`. The
   agent builds the underlying model configuration for you.
 - **Expert** — pass `model_config=`, a dict handed straight to litellm. Use this when you need
   to set `temperature`, `api_base`, or any other litellm parameter.
 
-You **cannot pass both**. The constructor resolves the model like this:
+When both are supplied, `model_config` takes precedence and the convenience
+`model` / `api_key` values are ignored. The constructor resolves the model like
+this:
 
 ```python
 # from parsimony_agents/agent/agent.py
@@ -36,9 +38,9 @@ else:
     raise TypeError("Agent requires either model_config={...} or model='model-name'")
 ```
 
-If you supply neither `model` nor `model_config`, construction raises `TypeError`. If you supply
-`model_config`, the `model=` and `api_key=` convenience arguments are ignored — fold the key into
-the config dict instead (`model_config={"model": ..., "api_key": ...}`).
+If you supply neither `model` nor `model_config`, construction raises
+`TypeError`. When using `model_config`, fold the key into that dictionary
+(`model_config={"model": ..., "api_key": ...}`).
 
 ```python
 import asyncio
@@ -268,9 +270,9 @@ defaults:
 self.session_id = session_id or str(uuid4())
 ```
 
-The session id keys session-scoped services — the file store and the vector/keyword stores used
-for retrieval — so the same id reuses them across turns. To carry the *conversation* forward
-across turns, pass the `AgentContext` from one result into the next call's `ctx=` argument. The
+The session id names the conversation and any host-provided session services,
+such as the file store. To carry the *conversation* forward across turns, pass
+the `AgentContext` from one result into the next call's `ctx=` argument. The
 final context is returned on `AgentResult.context`:
 
 ```python

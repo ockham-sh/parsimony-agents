@@ -3,9 +3,8 @@
 A single `Agent.ask()` or `Agent.run()` call is one turn. To hold a
 conversation — where the second question can refer to "that data" or "the
 chart you just made" — you reuse the same `AgentContext` across calls. The
-context carries the message transcript forward; a stable `session_id` keeps the
-agent's session-scoped stores (files, vector, keyword) tied together across
-every turn.
+context carries the message transcript forward; a stable `session_id` names the
+conversation and any runtime services supplied by the host.
 
 This guide assumes you've read the [Quickstart](../getting-started/quickstart.md)
 and understand the basic [agent loop](../concepts/how-it-works.md).
@@ -85,8 +84,7 @@ class AgentContext(MessageContent):
     messages: list[AgentMessage] = []
     # session-scoped runtime services (not serialized):
     files: Any | None = None
-    vector_store: Any | None = None
-    keyword_store: Any | None = None
+    session_state: SessionState | None = None
 ```
 
 The field that makes follow-ups work is `messages` — the full conversation
@@ -101,37 +99,17 @@ system message at `messages[0]` to reflect the agent's current instructions:
 Because the transcript persists, the LLM sees the earlier exchange on turn 2 and
 can resolve references like "that data" or "the chart you just made."
 
-> The `messages` list is the conversation. Everything the agent
-> remembers about earlier turns lives there. The runtime stores below are about
-> *artifacts and files*, not the chat history.
+> The `messages` list is the conversation. Everything the model remembers about
+> earlier turns lives there. Runtime services are about files, artifacts, and
+> host integration, not chat history.
 
-## session_id and persistent stores (files, vector, keyword)
+## `session_id`, files, and persisted artifacts
 
-`AgentContext` also carries three session-scoped runtime services:
+`AgentContext.files` may hold a host-provided `FileStore` that lists uploaded
+files and exposes the working directory. It is keyed by the agent's
+`session_id` and rebound when each turn starts:
 
-| Field | Purpose |
-|---|---|
-| `files` | The session's [`FileStore`](../reference/agent.md) — lists uploaded files and exposes the working directory. |
-| `vector_store` | Per-session vector index over fetched outputs (semantic retrieval). |
-| `keyword_store` | Per-session keyword index over fetched outputs (lexical retrieval). |
-
-These are keyed off the agent's `session_id`. When you construct the agent with a
-`session_id` and a `file_store`, every turn rebinds the *same* stores onto the
-context:
-
-```python
-ctx.files = self.file_store
-ctx.vector_store = get_or_create_session_vector_store(self.session_id)
-ctx.keyword_store = get_or_create_session_keyword_store(self.session_id)
-```
-
-The `get_or_create_session_*` calls are the key: the **same `session_id`
-persists `file_store`/`vector_store`/`keyword_store` across turns** — calling
-them again with the same id returns the index that already exists rather than a
-fresh empty one. So data the agent fetched and indexed on turn 1 is still
-searchable on turn 5, as long as the `session_id` is stable.
-
-You set the `session_id` (and optional `file_store`) at construction:
+Set the `session_id` and optional `file_store` at construction:
 
 ```python
 from parsimony_agents import Agent
@@ -145,22 +123,18 @@ agent = Agent(
 
 If you don't pass a `session_id`, the agent assigns one for you; the same
 generated id is then used for the life of that `Agent` instance. The workspace
-file store is wired up when both a `session_id` and a `file_store` are present —
-see [SQL and document inputs](sql-and-documents.md) for loading files into a
-session. To search a large output, the agent works in code: a result is a kernel
-variable, so it slices it to page or searches a DataFrame with the core catalog
-(`auto_catalog(df).search(...)`).
+file store is wired up when a `file_store` is present. See
+[SQL and document inputs](sql-and-documents.md) for loading files into a
+session.
 
-> The file store is runtime-only (excluded from serialization). It lives in the
-> process keyed by `session_id`, not inside the serialized context — so it
-> survives across `ask()`/`run()` calls within one process, but it is not
-> something you persist by pickling a context.
+The file store and other host hooks are runtime-only. They are excluded from
+context serialization and must be reattached when a host reconstructs a
+session.
 
-The session file store above lives only in-process — it is distinct from your returned
-deliverables. `return_dataset` / `return_chart` / `return_report` / `return_notebook` results are
-written to the on-disk `.ockham/` store by the framework itself (no host required) and rediscovered
-on the next turn, so a follow-up turn can reuse a prior turn's deliverable — even across process
-restarts — by `logical_id`, unlike the in-memory store here.
+Returned deliverables are independent of the runtime file store.
+`return_dataset`, `return_chart`, `return_report`, and `return_notebook` write to
+the on-disk `.ockham/` store. They are rediscovered on later turns and can be
+reused across process restarts by `logical_id`.
 
 ## Capturing context from a StateSnapshot
 
@@ -287,8 +261,8 @@ cancellation flow.
   Omit it to start fresh.
 - `result.context` (from `ask()`) and `StateSnapshot.context` (from `run()`)
   both give you the latest `AgentContext` to feed into the next turn.
-- A stable `session_id` ties the session's `file_store`, `vector_store`, and
-  `keyword_store` together so indexed data stays available turn after turn.
+- A stable `session_id` names the conversation and its host-provided runtime
+  services.
 - A suspended run is continued with [`resume()`](suspend-resume.md), not `ctx`.
 
 ## See also

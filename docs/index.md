@@ -1,8 +1,13 @@
 # Parsimony Agents
 
-Parsimony Agents is a Python framework for building AI agents that **discover, fetch, and analyze data by writing and running Python**. You hand the agent a question and some connectors; the agent fetches the data, writes Python in a live kernel, executes it, and hands back structured artifacts — datasets, charts, and the code it ran. **It is not a Q&A chatbot: the agent writes and runs real Python to analyze your data, and returns the dataframes and figures it produced, not just prose.**
+Parsimony Agents is a data-analysis agent that **discovers, fetches, and
+analyzes data by writing and running Python**. You give it a question and a set
+of connectors; it returns structured artifacts — datasets, charts, and reports
+— alongside its answer. The producing notebooks and source lineage are
+persisted with those artifacts so the work can be inspected, reused, and
+refreshed.
 
-Everything a caller touches is importable from the top-level package:
+The main entry point is importable from the top-level package:
 
 ```python
 from parsimony_agents import Agent
@@ -25,7 +30,11 @@ result = await agent.ask("Show me US GDP trends")
 - `result.reports` — `dict[str, Report]` keyed by logical id (the reports it published)
 - `result.ok` — `True` if the run finished without a terminal failure: `False` if any `error`, `handoff`, or `partial_run_summary` event occurred (handoff and partial_run_summary are non-interactive terminal failures that carry no separate `error` event)
 
-`Agent` also exposes `result.context` (state for the next turn) and `result.events` (the full event log). (`result.code` is declared on `AgentResult` but is **not** currently populated — datasets, charts, and reports are the artifacts surfaced today; see the [Quickstart](getting-started/quickstart.md).) Models are addressed in [litellm](https://docs.litellm.ai/) format, so `model="claude-sonnet-4-6"` (the value used throughout these docs), `model="gemini/gemini-3-flash-preview"`, and any other litellm-supported provider all work; the provider key comes from the environment (`ANTHROPIC_API_KEY`, etc.) or `Agent(api_key=...)`.
+`Agent` also exposes `result.context` (state for the next turn) and
+`result.events` (the full event log). Producing notebooks are persisted in the
+workspace artifact store. Models use
+[litellm](https://docs.litellm.ai/) names, so any provider supported by litellm
+works with its corresponding credentials.
 
 ## When to use it (and when not to)
 
@@ -47,7 +56,7 @@ Look elsewhere when:
 Install the package with the display extra and set your keys:
 
 ```bash
-pip install parsimony-agents[display]
+pip install "parsimony-agents[display]" parsimony-fred
 export ANTHROPIC_API_KEY="sk-ant-..."   # or any litellm-supported provider
 export FRED_API_KEY="..."               # free: https://fred.stlouisfed.org/docs/api/api_key.html
 ```
@@ -104,7 +113,20 @@ connectors = FRED.bind(api_key="...") + SDMX
 
 ## The mental model in one paragraph
 
-`Agent` runs a single **iterate-until-terminate loop**: each iteration renders state to the LLM, calls it once, then executes whatever tools the model asked for, repeating until the model emits a termination tool. The tools that matter most let the agent **execute Python** in a live kernel — it writes a notebook cell, runs it, sees the output (dataframe, figure, error), and iterates, exactly as a human analyst would. Anything the agent publishes (`Dataset`, `Chart`, `Script`, report) becomes a **content-addressed artifact**: it carries a stable `logical_id` plus a `content_sha` derived from a hash of its content, so identical content always lands at the same address and re-running the same analysis never duplicates. Those artifacts are what `AgentResult.datasets` / `.charts` hand back to you. Multi-turn continuation is just passing the previous `result.context` into the next call; long pauses for human input are handled by [suspend/resume](guides/suspend-resume.md), which serializes the run into a signed record you can persist and continue later.
+`Agent` runs a single **iterate-until-terminate loop**: each iteration renders state to the LLM, calls it once, then executes whatever tools the model asked for, repeating until the model emits a termination tool. The tools that matter most let the agent **execute Python** in a live kernel — it writes a notebook cell, runs it, sees the output (dataframe, figure, error), and iterates, exactly as a human analyst would. Published datasets, charts, and reports get a stable, recipe-derived `logical_id`; notebooks derive theirs from the working-copy path. Every artifact also has a `content_sha` derived from its serialized bytes. Re-running unchanged work therefore reuses the same snapshot, while changed bytes append a new snapshot under the same artifact identity. Those artifacts are what `AgentResult.datasets` / `.charts` hand back to you. Multi-turn continuation is just passing the previous `result.context` into the next call; long pauses for human input are handled by [suspend/resume](guides/suspend-resume.md), which serializes the run into a signed record you can persist and continue later.
+
+## Where it fits
+
+Parsimony Agents builds on `parsimony-core`, which provides connectors, results,
+and provenance. Data sources come from separately installed `parsimony-*`
+connector packages; the agent library does not depend on a particular provider.
+The Ockham terminal embeds this package as its analysis engine.
+
+The dependency direction is one-way: Parsimony Agents depends on
+`parsimony-core`, but not on connector packages or the terminal. Standalone and
+embedded runs use the same executor storage seam and `.ockham/` artifact layout;
+the host adds concerns such as workspace routing, synchronization, and report
+validation.
 
 ## How these docs are organized
 
@@ -118,7 +140,7 @@ Start here, then jump to the page that matches what you're doing.
 **Concepts** — how it works under the hood
 - [How it works: the agent loop](concepts/how-it-works.md) — the iterate-until-terminate loop in detail.
 - [Connectors](concepts/connectors.md) — the `Connectors` model, `bind()`, and `+` composition.
-- [Code execution](concepts/code-execution.md) — the sandboxed kernel, notebooks, process isolation, and how Python output flows back to the agent.
+- [Code execution](concepts/code-execution.md) — the stateful kernel, optional process isolation, and how Python output flows back to the agent.
 - [Artifacts, identity & lineage](concepts/artifacts.md) — `logical_id`, `content_sha`, and content-addressed storage.
 - [Events](concepts/events.md) — the stream `Agent.run` yields.
 - [Failure handling & recovery](concepts/failure-and-recovery.md) — guardrails, the recovery funnel, and handoff.
@@ -138,6 +160,8 @@ Start here, then jump to the page that matches what you're doing.
 - [Artifacts reference](reference/artifacts.md)
 - [I/O functions reference](reference/io.md)
 - [Execution reference](reference/execution.md)
+- [Public API](reference/public-api.md)
+- [Environment variables](reference/environment.md)
 
 For the big picture of how the pieces fit together, see the [Architecture overview](architecture.md).
 
