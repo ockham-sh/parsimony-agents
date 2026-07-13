@@ -110,7 +110,7 @@ See [parsimony-connectors](https://github.com/ockham-sh/parsimony-connectors) fo
 
 A standalone `Agent` runs Python in-process by default. This is convenient for local scripts, but it is not a security boundary.
 
-Hosts can pass `create_executor(cwd=...)` as `code_executor=` to select bubblewrap isolation on supported Linux systems. The factory falls back in-process with a warning when that boundary is unavailable. Check `executor.capability_tier` before running untrusted code.
+Hosts can pass `create_executor(cwd=...)` as `code_executor=` to select bubblewrap isolation on supported Linux systems. The factory falls back to in-process execution with a warning when that boundary is unavailable. Check `executor.capability_tier` before running untrusted code.
 
 See [Code execution](docs/concepts/code-execution.md) and the [Security policy](SECURITY.md).
 

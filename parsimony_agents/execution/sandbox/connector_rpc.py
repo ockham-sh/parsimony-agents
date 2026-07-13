@@ -151,7 +151,7 @@ class ConnectorBroker:
         if bundle is None:
             raise KeyError(f"no connector binding {binding!r}")
         connector = bundle[name]  # KeyError with available names if missing
-        # Connectors are synchronous (parsimony-core 0.7); run the real
+        # Connectors are synchronous; run the real
         # connector off the supervisor's event loop so a network fetch never
         # blocks the RPC serving the kernel.
         return await asyncio.to_thread(connector, *args, **kwargs)
