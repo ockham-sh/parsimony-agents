@@ -89,7 +89,7 @@ class DataFrameObject(BaseOutputObject):
     ref: DataframeRef
     include_full_value_in_frontend: bool = Field(default=False)
     #: Governed column schema (roles, namespaces, ``exclude_from_llm_view``).
-    #: Set when a connector result with an ``output_schema`` is displayed; empty
+    #: Set when a connector result with an ``output_spec`` is displayed; empty
     #: for a plain frame. Carried as a real field so governance survives the
     #: sandbox→server wire and is applied on *every* LLM render path, not just
     #: the connector-result one — a hidden column is hidden everywhere.
