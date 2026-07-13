@@ -1004,11 +1004,13 @@ class Agent:
             raise ValueError("read_data only supports .parquet files.")
         full = self._workspace_root() / path
         result = Result.from_parquet(full)
-        df = result.df
+        df = result.frame
         head = df.head(5)
-        # Connector-supplied: column names, dtypes, source, params. Escape every interpolation.
+        # Connector-supplied: column names, roles, source, params. Escape every interpolation.
         schema_line = " | ".join(
-            f"{escape_text(c.name)} ({escape_text(c.role.value)}, {escape_text(c.dtype)})" for c in result.columns
+            f"{escape_text(c.name)} ({escape_text(c.role.value)}, {escape_text(str(df[c.name].dtype))})"
+            for c in result.columns
+            if c.name in df.columns
         )
         prov = result.provenance
         lines = [

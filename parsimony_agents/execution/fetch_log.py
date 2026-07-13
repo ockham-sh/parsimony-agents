@@ -21,8 +21,6 @@ import json
 from collections.abc import Callable
 from typing import Any
 
-import pandas as pd
-
 from parsimony_agents.execution.run_scope import OriginLedger
 from parsimony_agents.identity import ArtifactRef
 
@@ -56,8 +54,8 @@ def make_fetch_logger(
             "provenance": result.provenance,
             "columns": [c.model_dump(mode="json") for c in result.columns],
         }
-        if isinstance(result.data, pd.DataFrame):
-            df = result.data
+        if result.is_tabular:
+            df = result.raw
             entry["row_count"] = len(df)
             entry["column_names"] = list(df.columns)
             entry["head"] = json.loads(df.head(5).to_json(orient="table"))
@@ -65,7 +63,7 @@ def make_fetch_logger(
         else:
             entry["row_count"] = 1
             entry["column_names"] = []
-            entry["head"] = {"data": str(result.data)[:500]}
+            entry["head"] = {"data": str(result.raw)[:500]}
             entry["tail"] = None
         if persist_fn is not None:
             value = persist_fn(result)

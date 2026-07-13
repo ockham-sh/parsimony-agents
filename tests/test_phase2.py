@@ -113,6 +113,6 @@ async def test_code_executor_await_cell_runs() -> None:
 
 def test_tabular_result_from_dataframe_roundtrip() -> None:
     df = pd.DataFrame({"a": [1]})
-    r = Result.from_dataframe(df)
+    r = Result(raw=df)
     assert r.is_tabular
     assert isinstance(r, Result)

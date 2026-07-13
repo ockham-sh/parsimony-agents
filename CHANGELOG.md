@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Adapted to `parsimony-core`'s `Result.raw` / `Result.entities` / `Result.data` split**
+  (follows the `OutputConfig` → `OutputSpec` rename in `#52`). `Result.data` is no longer the
+  raw payload — it is the entity-keyed `DATA`-column projection, and reading it requires an
+  `OutputSpec`. Every call site that wanted the untouched connector output (`fetch_log`,
+  `dataset_io`, memoization, the sandbox codec, `read_data`, the agent's connector-result
+  guidance) now reads `.raw` instead; `Result.df` is gone too, replaced by `.frame`.
+  `Result.from_dataframe` is gone — construct with `Result(raw=df)` directly, since a bare
+  constructor call was always the whole of what the factory did. No behavior change beyond the
+  rename: `fetch_log`'s tabular check now reads `Result.is_tabular` instead of re-deriving it
+  via `isinstance`.
+
 ## [0.1.6] - 2026-06-19
 
 ### Removed

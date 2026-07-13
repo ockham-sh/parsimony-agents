@@ -147,7 +147,7 @@ from parsimony_agents import read_dataset
 
 result, dataset = read_dataset("/tmp/q4_results.parquet")
 
-print(result.df.shape)          # the live pandas DataFrame
+print(result.frame.shape)       # the live pandas DataFrame
 print(dataset.title)            # "Q4 Results"
 print(dataset.notebook_refs)    # recovered lineage
 print(dataset.variable_name)    # "results"
@@ -208,7 +208,7 @@ raw: bytes = serialize_dataset(dataset, DataFrameObject.from_pandas(df, local_di
 
 # Later, somewhere else (different process, machine, or object store):
 result, recovered = deserialize_dataset(raw)
-print(result.df.shape, recovered.title)
+print(result.frame.shape, recovered.title)
 ```
 
 `deserialize_chart` raises `ValueError("Chart bytes must decode to a Vega-Lite JSON

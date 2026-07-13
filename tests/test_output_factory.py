@@ -46,13 +46,13 @@ def test_from_value_object_column_of_exotic_type_degrades(tmp_path) -> None:  # 
 def test_displayed_tabular_result_is_dual_projection(tmp_path) -> None:  # noqa: ANN001
     """A displayed connector Result: full table for the UI, governed
     view for the LLM. Hidden columns reach the human (UI) but not the LLM."""
-    from parsimony.result import Column, ColumnRole, OutputConfig, Result
+    from parsimony.result import Column, ColumnRole, OutputSpec, Result
 
     of = OutputFactory(local_dir=tmp_path)
 
     tab = Result(
-        data=pd.DataFrame({"date": ["2020-01-01"], "value": [1.0], "internal_id": ["XYZ-SECRET"]}),
-        output_schema=OutputConfig(
+        raw=pd.DataFrame({"date": ["2020-01-01"], "value": [1.0], "internal_id": ["XYZ-SECRET"]}),
+        output_spec=OutputSpec(
             columns=[
                 Column(name="date", role=ColumnRole.KEY),
                 Column(name="value", role=ColumnRole.DATA),
@@ -75,7 +75,7 @@ def test_displayed_opaque_result_renders_structure_not_raw_dump(tmp_path) -> Non
 
     of = OutputFactory(local_dir=tmp_path)
     # Opaque payload (no frame): a big value renders as structure, not the full dump.
-    big = Result(data={"rows": list(range(10_000)), "meta": {"a": 1}})
+    big = Result(raw={"rows": list(range(10_000)), "meta": {"a": 1}})
     out = of.from_value(big)
     assert isinstance(out, PrimitiveObject)
     assert len(str(out.value)) < 2_000

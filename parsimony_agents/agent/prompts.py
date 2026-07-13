@@ -224,7 +224,7 @@ Your text response is conversational narrative — what you found, what's notewo
 
 # H. Connectors and Dynamic Dates
 
-`dry_execute_code` and notebooks have a single `connectors` bundle in scope. Each entry is a typed callable: `result = connectors["<name>"](param=value, ...)`. The result has `.data` (DataFrame), `.columns` (its schema), and `.provenance`. The result is **not** itself a DataFrame — always go through `.data` to inspect or filter rows, e.g. `result.data[result.data["dataset_id"] == "IRS"].iloc[0]`.
+`dry_execute_code` and notebooks have a single `connectors` bundle in scope. Each entry is a typed callable: `result = connectors["<name>"](param=value, ...)`. The result has `.raw` (DataFrame), `.columns` (its schema), and `.provenance`. The result is **not** itself a DataFrame — always go through `.raw` to inspect or filter rows, e.g. `result.raw[result.raw["dataset_id"] == "IRS"].iloc[0]`.
 
 Authoritative names, parameters, and output schemas appear in the `<available_connectors>` block. Use only names listed there. Search before fetching unless the user already gave exact identifiers, and batch discovery calls in one dry_execute_code block.
 

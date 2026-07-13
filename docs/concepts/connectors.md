@@ -138,7 +138,7 @@ When the agent runs code, the connector bundle is available in the kernel namesp
 ```python
 # Code the agent writes and the kernel executes:
 result = fred["fred_fetch"](series_id="UNRATE")
-data = result.data  # a DataFrame; also result.columns, result.provenance
+data = result.raw  # a DataFrame; also result.columns, result.provenance
 ```
 
 Connector entries are synchronous callables — agent-written kernel code calls them directly (no `await`).

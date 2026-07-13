@@ -53,7 +53,7 @@ def test_render_dataset_bytes_roundtrips(tmp_path: Path) -> None:
     blob = render_artifact_bytes(_dataset(tmp_path), "dataset")
     result, ds = deserialize_dataset(blob)
     assert ds.live_name == "unrate"
-    assert len(result.df) == 2
+    assert len(result.frame) == 2
 
 
 def test_render_dataset_without_payload_raises() -> None:

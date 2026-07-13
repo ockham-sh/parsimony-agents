@@ -294,7 +294,7 @@ def read_local_artifact(
 
         try:
             result, dataset = deserialize_dataset(snapshot.read_bytes())
-            df = result.df
+            df = result.frame
         except Exception as exc:  # noqa: BLE001
             raise ArtifactNotFound(path=f"{kind}:{live_name}", kind="canonical_missing") from exc
         header = f'<artifact_ref kind="dataset" live_name="{live_name}"/>\n'
