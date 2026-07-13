@@ -11,6 +11,6 @@ def parquet_summary(path: Path) -> str:
     """One-line summary: row count, column count, provenance source."""
     result = Result.from_parquet(path)
     n_cols = len(result.columns)
-    n_rows = len(result.df)
+    n_rows = len(result.frame)
     source = result.provenance.source or "unknown"
     return f"{n_rows} rows x {n_cols} cols, source: {source}"

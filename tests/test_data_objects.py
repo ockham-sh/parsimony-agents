@@ -34,7 +34,7 @@ def _make_result(
     fetched_at: datetime | None = None,
 ) -> Result:
     return Result(
-        data=df,
+        raw=df,
         provenance=Provenance(
             source=source,
             source_description="test fixture",
@@ -106,7 +106,7 @@ def test_persisted_file_is_readable_parquet(tmp_path: Path) -> None:
     blob = (tmp_path / ref.workspace_file_path).read_bytes()
     table = pq.read_table(BytesIO(blob))
     round_tripped = Result.from_arrow(table)
-    pd.testing.assert_frame_equal(round_tripped.df.reset_index(drop=True), df)
+    pd.testing.assert_frame_equal(round_tripped.frame.reset_index(drop=True), df)
     assert round_tripped.provenance.source == "us_cpi"
     assert round_tripped.provenance.params == {"q": "cpi"}
 

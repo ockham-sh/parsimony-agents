@@ -65,7 +65,7 @@ async def test_broker_runs_connector_and_returns_tabular() -> None:
     try:
         result = await asyncio.to_thread(_stub("ok_fetch", ker), series_id="GDPC1")
         assert result.is_tabular
-        assert list(result.data["series"]) == ["GDPC1"]
+        assert list(result.raw["series"]) == ["GDPC1"]
         assert result.provenance.source == "ok_fetch"
         assert "SECRET" not in str(result.provenance.params)  # secret stripped from provenance
     finally:

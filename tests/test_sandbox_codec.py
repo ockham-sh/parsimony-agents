@@ -21,23 +21,23 @@ from parsimony_agents.execution.sandbox.connector_rpc import (
 
 
 def test_plain_result_round_trips_as_json() -> None:
-    original = Result(data={"name": "Alice", "items": [1, 2, 3]})
+    original = Result(raw={"name": "Alice", "items": [1, 2, 3]})
     meta, blob = encode_result(original)
     assert meta["kind"] == "result"
     assert blob == b""
     decoded = decode_result(meta, blob)
-    assert decoded.data == {"name": "Alice", "items": [1, 2, 3]}
+    assert decoded.raw == {"name": "Alice", "items": [1, 2, 3]}
 
 
 def test_tabular_result_round_trips_as_arrow() -> None:
     frame = pd.DataFrame({"date": ["2020-01-01", "2020-01-02"], "value": [1.0, 2.0]})
-    original = Result(data=frame)
+    original = Result(raw=frame)
     meta, blob = encode_result(original)
     assert meta["kind"] == "tabular"
     assert blob  # the table crosses out of band
     decoded = decode_result(meta, blob)
     assert decoded.is_tabular
-    pd.testing.assert_frame_equal(decoded.data, frame)
+    pd.testing.assert_frame_equal(decoded.raw, frame)
 
 
 def test_decode_unknown_kind_raises() -> None:

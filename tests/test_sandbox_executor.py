@@ -60,7 +60,7 @@ async def test_connector_call_over_broker_keeps_key_in_supervisor(tmp_path) -> N
         # returns the frame to the kernel.
         out = await _exec(
             ex,
-            "res = connectors['secret_fetch'](series_id='GDPC1')\nprint(int(res.data.shape[0]))\n",
+            "res = connectors['secret_fetch'](series_id='GDPC1')\nprint(int(res.raw.shape[0]))\n",
         )
         assert not any(isinstance(o, ExceptionObject) for o in out.outputs), _texts(out)
         assert "1" in _texts(out)
@@ -171,7 +171,7 @@ async def test_kernel_death_raises_clear_error_and_next_call_respawns(tmp_path) 
         # ...and the next call boots a fresh kernel with snippets + connector
         # manifests restored (the broker side never went away).
         out = await asyncio.wait_for(
-            ex.execute("print(MARKER)\nres = connectors['secret_fetch'](series_id='X')\nprint(res.data.shape[0])\n"),
+            ex.execute("print(MARKER)\nres = connectors['secret_fetch'](series_id='X')\nprint(res.raw.shape[0])\n"),
             timeout=30,
         )
         assert not any(isinstance(o, ExceptionObject) for o in out.outputs), _texts(out)

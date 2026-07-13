@@ -74,7 +74,7 @@ def test_stub_call_emits_canonical_rpc_and_round_trips() -> None:
         result = RemoteConnector("plain_fetch", "connectors", rpc, loop)("GDPC1")
 
     assert result.is_tabular
-    assert list(result.data["value"]) == [1.0]
+    assert list(result.raw["value"]) == [1.0]
     method, params = rpc.calls[0]
     assert method == "connector_invoke"
     assert params == {"binding": "connectors", "name": "plain_fetch", "args": ["GDPC1"], "kwargs": {}}

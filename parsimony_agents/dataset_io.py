@@ -104,7 +104,7 @@ def write_dataset_bytes(dataset: Dataset, payload: DataFrameObject) -> bytes:
             f"{type(payload).__name__}. Wrap raw frames with "
             f"DataFrameObject.from_pandas(df, local_dir=...)."
         )
-    result = Result.from_dataframe(payload.value)
+    result = Result(raw=payload.value)
     table = _build_curated_table(result, dataset)
     buffer = io.BytesIO()
     pq.write_table(table, buffer)

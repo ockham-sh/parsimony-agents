@@ -201,6 +201,6 @@ def build_load_dataset(
             ledger.current.record_load(ref)
         # Pull the DataFrame out — the codec returns ``(Result, Dataset)``
         # and we want only the live frame in the agent's namespace.
-        return _result.df
+        return _result.frame
 
     return load_dataset

@@ -49,7 +49,7 @@ def test_identical_args_cached() -> None:
 
     r1 = mb["test_fetch"](series_id="GDPC1")
     r2 = mb["test_fetch"](series_id="GDPC1")
-    assert r1.data.equals(r2.data)
+    assert r1.raw.equals(r2.raw)
     # Underlying connector hit only once.
     assert _CALL_COUNT["n"] == 1
     # Hook fired on BOTH calls (lineage / log idempotency relies on it).

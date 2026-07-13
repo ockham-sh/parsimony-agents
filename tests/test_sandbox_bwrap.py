@@ -217,7 +217,7 @@ async def test_bwrap_blocks_egress_and_sibling_files_but_broker_works(tmp_path, 
         bound = Connectors([_secret_fetch]).bind(api_key="SECRET-XYZ")
         await ex.set_connectors({"connectors": bound})
         out3 = await asyncio.wait_for(
-            ex.execute("res = connectors['secret_fetch'](series_id='X')\nprint(int(res.data.shape[0]))\n"),
+            ex.execute("res = connectors['secret_fetch'](series_id='X')\nprint(int(res.raw.shape[0]))\n"),
             timeout=60,
         )
         assert not any(isinstance(o, ExceptionObject) for o in out3.outputs), _texts(out3)

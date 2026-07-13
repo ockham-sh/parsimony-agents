@@ -65,7 +65,7 @@ def test_write_dataset_bytes_roundtrips(sample_df: pd.DataFrame, tmp_path: Path)
     assert blob.startswith(b"PAR1")  # parquet magic
 
     result, recovered = deserialize_dataset(blob)
-    pd.testing.assert_frame_equal(result.df, sample_df)
+    pd.testing.assert_frame_equal(result.frame, sample_df)
     assert recovered.title == "Demo"
     assert recovered.description == "Curation round-trip"
     assert recovered.tags == ["demo", "test"]
@@ -92,7 +92,7 @@ def test_deserialize_handles_vanilla_parquet(sample_df: pd.DataFrame, tmp_path: 
 
     result, dataset = deserialize_dataset(target.read_bytes())
 
-    pd.testing.assert_frame_equal(result.df, sample_df)
+    pd.testing.assert_frame_equal(result.frame, sample_df)
     assert dataset.title == ""
     assert dataset.description == ""
     assert dataset.tags == []
@@ -102,7 +102,7 @@ def test_deserialize_handles_vanilla_parquet(sample_df: pd.DataFrame, tmp_path: 
 
 def test_deserialize_returns_empty_dataset_for_vanilla_parquet(sample_df: pd.DataFrame, tmp_path: Path) -> None:
     r = Result(
-        data=sample_df,
+        raw=sample_df,
         provenance=Provenance(source="fred", source_description="fred", params={"series_id": "GDPC1"}),
     )
     target = tmp_path / "connector.parquet"

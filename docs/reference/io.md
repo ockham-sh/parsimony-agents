@@ -95,7 +95,7 @@ and the `Dataset` is an empty curation envelope.
 ```python
 result, dataset = deserialize_dataset(parquet_bytes)
 
-print(result.df.shape)          # the live DataFrame
+print(result.frame.shape)       # the live DataFrame
 print(dataset.title)            # curation metadata (empty if vanilla parquet)
 print(dataset.notebook_refs)    # lineage back to the producing notebook
 print(dataset.variable_name)    # kernel variable name (recipe field)
