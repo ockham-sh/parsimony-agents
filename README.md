@@ -1,18 +1,25 @@
+<div align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/parsimony-agents-brand-dark.png" />
+  <img src="docs/assets/parsimony-agents-brand-light.png" alt="parsimony-agents" width="460" />
+</picture>
+
+**Extensible agent for data discovery, analysis, and visualization**
+
+[![PyPI](https://img.shields.io/pypi/v/parsimony-agents.svg)](https://pypi.org/project/parsimony-agents/)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python](https://img.shields.io/pypi/pyversions/parsimony-agents.svg)](https://pypi.org/project/parsimony-agents/)
+
+</div>
 
 
-**A code-writing agent for data analysis that returns datasets, charts, and reports — not just answers.**
-
-[PyPI](https://pypi.org/project/parsimony-agents/)
-[License: Apache-2.0](LICENSE)
-[Python](https://pypi.org/project/parsimony-agents/)
-
-
-
-
+<p align="center">
+  <img src="docs/assets/parsimony-agents-hero.gif" alt="parsimony-agents: an Agent bound to FRED answers &quot;How has US unemployment changed since 2020?&quot; by fetching the UNRATE series, running code, and publishing a Dataset and a Chart artifact, ending in result.ok = True." width="900" />
+</p>
 
 ---
 
-Parsimony Agents finds data through [Parsimony connectors](https://github.com/ockham-sh/parsimony-connectors), analyzes it by writing and executing Python, and publishes the work as reusable artifacts. The producing notebooks and source lineage are persisted with each dataset, chart, and report so the result can be inspected, reused, or refreshed.
+Parsimony Agents finds data through [Parsimony connectors](https://github.com/ockham-sh/parsimony-connectors), analyzes it by writing and executing Python, and returns the work as reusable artifacts. The producing notebooks and source lineage are persisted with each dataset, chart, and report so the result can be inspected, reused, or refreshed.
 
 ## Quickstart
 
@@ -46,7 +53,18 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-`Agent.ask()` returns an `AgentResult` containing the narrative, published datasets, charts and reports, the event log, and the context required for a follow-up turn.
+`Agent.ask()` returns an `AgentResult` containing the datasets, charts and reports, the event log, and the context required for a follow-up turn.
+
+## Follow-up turns
+
+Pass the previous result's `context` back in to continue the conversation — the agent keeps the full transcript, so it can resolve references like "that chart" or "the same period":
+
+```python
+follow_up = await agent.ask("Now do the same for the Eurozone.", ctx=result.context)
+print(follow_up.text)
+```
+
+See [Multi-turn conversations](docs/guides/multi-turn.md) for streaming, suspension, and resume.
 
 ## How it works
 
