@@ -14,6 +14,7 @@ import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+import parsimony
 import pytest
 from parsimony.connector import Connectors
 
@@ -24,6 +25,19 @@ from parsimony_agents.messages import Text
 
 _BODY = "# Demo skill\n\nResolve carefully, then fetch."
 _SKILL_MD = f'---\nname: demo-skill\ndescription: "A demo skill: resolve then fetch."\n---\n\n{_BODY}\n'
+
+
+def _core_skill_body() -> str:
+    """The frontmatter-stripped body of parsimony's own skill, read fresh from disk.
+
+    Any bound connector always pulls this in alongside its package's own skill (if
+    any) — see ``render_connector_skills``. Read directly rather than hardcoding the
+    text so these tests don't drift when the skill's content is edited.
+    """
+    md = Path(parsimony.__file__).parent.parent / "skills" / "parsimony" / "SKILL.md"
+    text = md.read_text(encoding="utf-8")
+    return (text.split("---", 2)[-1] if text.startswith("---") else text).strip()
+
 
 _PKG_INIT = (
     "import pandas as pd\n"
@@ -72,16 +86,20 @@ class TestRenderConnectorSkills:
         assert render_connector_skills(None) == ""
 
     def test_renders_body_frontmatter_stripped(self, make_pkg: Callable[[str, bool], Connectors]) -> None:
-        assert render_connector_skills(make_pkg("pkg_skill_a", True)) == _BODY
+        assert _BODY in render_connector_skills(make_pkg("pkg_skill_a", True))
 
-    def test_package_without_skills_dir_yields_empty(self, make_pkg: Callable[[str, bool], Connectors]) -> None:
-        assert render_connector_skills(make_pkg("pkg_noskill_a", False)) == ""
+    def test_package_without_own_skill_still_gets_core_skill(self, make_pkg: Callable[[str, bool], Connectors]) -> None:
+        # No skill in this package, but a real connector is bound — parsimony's own
+        # skill always applies once any connector is in play.
+        text = render_connector_skills(make_pkg("pkg_noskill_a", False))
+        assert text == _core_skill_body()
+        assert _BODY not in text
 
     def test_dedup_same_skill_name_across_packages(self, make_pkg: Callable[[str, bool], Connectors]) -> None:
         a = make_pkg("pkg_skill_b", True)
         b = make_pkg("pkg_skill_c", True)
         text = render_connector_skills({"a": a, "b": b})
-        assert text == _BODY  # both ship demo-skill → deduped to one body
+        assert _BODY in text  # both ship demo-skill → deduped to one body
         assert text.count("# Demo skill") == 1
 
 
@@ -124,8 +142,20 @@ class TestInjectConnectorSkills:
         _inject_connector_skills(ctx, bundle)
         assert len(_skill_indices(ctx)) == 1
 
-    def test_rebind_to_skill_less_bundle_clears_block(self, make_pkg: Callable[[str, bool], Connectors]) -> None:
+    def test_rebind_to_own_skill_less_bundle_keeps_core_skill_only(
+        self, make_pkg: Callable[[str, bool], Connectors]
+    ) -> None:
         ctx = _ctx_with_catalog()
         _inject_connector_skills(ctx, make_pkg("pkg_inj_d", True))
         _inject_connector_skills(ctx, make_pkg("pkg_inj_e", False))
+        # Still one connector bound, so the block stays — just without the demo body.
+        assert _skill_indices(ctx) == [2]
+        content = ctx.messages[2].content.content  # type: ignore[union-attr]
+        assert "# Demo skill" not in content
+        assert _core_skill_body() in content
+
+    def test_rebind_to_zero_connectors_clears_block(self, make_pkg: Callable[[str, bool], Connectors]) -> None:
+        ctx = _ctx_with_catalog()
+        _inject_connector_skills(ctx, make_pkg("pkg_inj_e2", True))
+        _inject_connector_skills(ctx, Connectors([]))
         assert _skill_indices(ctx) == []

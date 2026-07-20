@@ -105,17 +105,28 @@ def render_connector_skills(
     ``<package>/skills/<name>/SKILL.md`` — procedural knowledge that belongs to no single verb
     (e.g. how to resolve an SDMX series key). Relevance is *package-presence*: a skill is
     included when its package contributed at least one connector to the bound bundles, resolved
-    from each connector's defining module. Each body is emitted with its YAML frontmatter
-    stripped (that is file-host discovery metadata, not prompt content), deduped by skill
-    directory name and sorted so the block is byte-stable across iterations (it sits in the
-    cached prefix, like the connector catalog). Returns the empty string when no bound package
-    ships a skill, so callers can skip the ``<connector_skills>`` block entirely.
+    from each connector's defining module. ``parsimony`` itself is always included alongside
+    whatever provider packages the bundles resolve to — any agent with at least one bound
+    connector is using the library, so its own skill (route→inspect→search→fetch, ranking-trio
+    semantics) always applies; this is the same file a coding agent installs via
+    ``npx skills add ockham-sh/parsimony``, read here through the wheel instead of the git repo.
+    Each body is emitted with its YAML frontmatter stripped (that is file-host discovery
+    metadata, not prompt content), deduped by skill directory name and sorted so the block is
+    byte-stable across iterations (it sits in the cached prefix, like the connector catalog).
+    Returns the empty string when no connectors are bound, so callers can skip the
+    ``<connector_skills>`` block entirely.
     """
     bundles = normalize_connector_bundles(connectors)
     if not bundles:
         return ""
 
-    packages = sorted({(c.fn.__module__ or "").split(".")[0] for bundle in bundles.values() for c in bundle})
+    resolved = {(c.fn.__module__ or "").split(".")[0] for bundle in bundles.values() for c in bundle}
+    if not resolved:
+        # A bare (possibly empty) Connectors normalizes to a non-empty bundle dict, so
+        # this catches "bundles exist but bind zero connectors" — no connector in play
+        # means core's own skill doesn't apply either.
+        return ""
+    packages = sorted(resolved | {"parsimony"})
 
     bodies: list[str] = []
     seen: set[str] = set()
@@ -123,9 +134,18 @@ def render_connector_skills(
         if not pkg:
             continue
         try:
-            skills_dir = importlib.resources.files(pkg) / "skills"
+            pkg_root = importlib.resources.files(pkg)
         except (ModuleNotFoundError, TypeError):
             continue
+        skills_dir = pkg_root / "skills"
+        if not skills_dir.is_dir():
+            # A skill shipped as a sibling of the package (parsimony's own repo-root
+            # skills/, force-included into the wheel for a real install) isn't reachable
+            # through the package path alone under an editable/path-source dev install,
+            # which points straight at the source tree with no build step. Fall back to
+            # the package's parent directory so this works in both layouts.
+            parent = getattr(pkg_root, "parent", None)
+            skills_dir = parent / "skills" if parent is not None else skills_dir
         if not skills_dir.is_dir():
             continue
         for entry in sorted(skills_dir.iterdir(), key=lambda e: e.name):
